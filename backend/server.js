@@ -11,16 +11,7 @@ const allowedOrigins = ("https://estimate-project-omega.vercel.app/" || "http://
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow non-browser clients and local tools that may not send Origin header.
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error("CORS blocked for this origin."));
-    }
-  })
-);
+app.use(cors());
 app.use(express.json());
 
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
