@@ -49,7 +49,7 @@ app.get("/api/ssr-regions", async (_req, res) => {
     const result = await pool.query(
       `SELECT "SSRRegionId", "SSRRegionName", "SSRRegionShortName", "DOrder", "DOrder1", "Remarks"
        FROM "MasterSSRRegion"
-       ORDER BY "SSRRegionId" DESC`
+       ORDER BY "DOrder" ASC NULLS LAST, "SSRRegionName" ASC`
     );
     res.json(result.rows);
   } catch (error) {
@@ -130,11 +130,11 @@ app.put("/api/ssr-regions/:id", async (req, res) => {
 app.get("/api/ssr-categories", async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT c."SSRCategoryId", c."SSRRegionId", r."SSRRegionName",
+      `SELECT c."SSRCategoryId", c."SSRRegionId", r."SSRRegionName", r."SSRRegionShortName",
               c."SSRCategoryName", c."SSRCategoryShortName", c."DOrder", c."DOrder1", c."Remarks"
        FROM "MasterSSRCategory" c
        INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = c."SSRRegionId"
-       ORDER BY c."SSRCategoryId" DESC`
+       ORDER BY c."DOrder" ASC NULLS LAST, c."SSRCategoryName" ASC`
     );
     return res.json(result.rows);
   } catch (error) {
