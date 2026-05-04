@@ -31,9 +31,9 @@ const pool = connectionString
       ssl: useSsl ? { rejectUnauthorized: false } : false
     });
 
-pool.connect()
-.then(() => console.log("Connected to the database"))
-.catch(err => console.error("Error connecting to the database", err));
+pool.on("error", (err) => {
+  console.error("Unexpected database pool error", err);
+});
 
 app.get("/health", async (_req, res) => {
   try {
