@@ -35,6 +35,10 @@ pool.on("error", (err) => {
   console.error("Unexpected database pool error", err);
 });
 
+app.get("/", async (_req, res) => {
+  res.json({ message: "Welcome to Estimate Project Server." });
+});
+
 app.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
