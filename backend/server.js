@@ -6,7 +6,7 @@ require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 4000;
 
-const allowedOrigins = ("https://estimate-project-omega.vercel.app/" || "http://localhost:3000,http://127.0.0.1:3000")
+const allowedOrigins = ("https://estimate-project-omega.vercel.app/" || "http://localhost:3000" || "http://127.0.0.1:3000")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -90,6 +90,33 @@ app.post("/api/ssr-regions", async (req, res) => {
     return res.status(500).json({ message: error.message });
   }
 });
+
+app.get("/api/ssr-categories/:regionId", async (req,res) => {
+  const { regionId } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT "SSRCategoryId", "SSRCategoryName" FROM "MasterSSRCategory" WHERE "RegionID" = $1 ORDER BY "DOrder";`,
+      [regionId,]
+    )
+    return res.status(200).json(result.rows)
+  } catch(err){
+    console.error(err);
+  }
+})
+
+app.get("/api/ssr-sub-categories/:categoryId", async(req,res) => {
+  const { categoryId } = req.params;
+  console.log("Category ID: ",categoryId);
+  try{
+    const result = await pool.query(
+      `SELECT "SSRSubCategoryId", "SSRSubCategoryName" FROM "MasterSSRSubCategory" WHERE "SSRCategoryId" = $1 ORDER BY "DOrder";`,[categoryId,]
+    );
+    return res.status(200).json(result.rows)
+  }catch(err) {
+    console.error(err);
+  }
+})
 
 app.put("/api/ssr-regions/:id", async (req, res) => {
   const { id } = req.params;
