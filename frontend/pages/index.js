@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-const API_BASE = "https://estimate-project-omega.vercel.app/";
+const API_BASE = "https://estimate-project-omega.vercel.app";
 const SESSION_KEY = "werms_user";
 
 const cardStyle = {
