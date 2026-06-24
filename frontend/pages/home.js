@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { TabList, Tabs, Tab, TabPanel } from "@mui/joy";
 
-const API_BASE = "https://estimate-project-omega.vercel.app/";
+const API_BASE = "https://estimate-project-omega.vercel.app";
 
 const mastersMenu = [
   { id: "regions", label: "SSR Regions", status: "active" },
