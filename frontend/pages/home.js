@@ -4,7 +4,8 @@ import axios from "axios";
 import { TabList, Tabs, Tab, TabPanel } from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
 
-const API_BASE = "http://localhost:4000" || "https://estimate-project-omega.vercel.app";
+const API_BASE = "https://estimate-project-omega.vercel.app/";
+// const API_BASE = "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — drafting-paper / blueprint palette, tuned to an
@@ -45,7 +46,12 @@ const mastersMenu = [
   { id: "items", label: "SSR Items", status: "active", icon: "📋" },
   { id: "works", label: "Works Master", status: "active", icon: "🏗" },
   { id: "sub-work", label: "Sub Work Master", status: "active", icon: "🧩" },
-  { id: "master-projects", label: "Master Projects", status: "active", icon: "📁" },
+  {
+    id: "master-projects",
+    label: "Master Projects",
+    status: "active",
+    icon: "📁",
+  },
 ];
 
 const initialRegionForm = {
@@ -72,7 +78,8 @@ const initialCategoryForm = {
 function RequiredLabel({ children }) {
   return (
     <span>
-      {children} <span style={{ color: theme.colors.red, fontWeight: 700 }}>*</span>
+      {children}{" "}
+      <span style={{ color: theme.colors.red, fontWeight: 700 }}>*</span>
     </span>
   );
 }
@@ -105,10 +112,19 @@ function Card({ eyebrow, title, subtitle, children, style }) {
         </div>
       )}
       {title && (
-        <h2 style={{ margin: 0, fontSize: 20, color: theme.colors.ink }}>{title}</h2>
+        <h2 style={{ margin: 0, fontSize: 20, color: theme.colors.ink }}>
+          {title}
+        </h2>
       )}
       {subtitle && (
-        <p style={{ marginTop: 6, marginBottom: 18, color: theme.colors.inkSoft, fontSize: 13.5 }}>
+        <p
+          style={{
+            marginTop: 6,
+            marginBottom: 18,
+            color: theme.colors.inkSoft,
+            fontSize: 13.5,
+          }}
+        >
           {subtitle}
         </p>
       )}
@@ -136,8 +152,16 @@ function FormShell({ children, onSubmit }) {
 
 function Field({ label, required, children, span }) {
   return (
-    <label style={{ display: "grid", gap: 6, gridColumn: span ? "1 / -1" : undefined }}>
-      <span style={{ fontSize: 12.5, fontWeight: 600, color: theme.colors.inkSoft }}>
+    <label
+      style={{
+        display: "grid",
+        gap: 6,
+        gridColumn: span ? "1 / -1" : undefined,
+      }}
+    >
+      <span
+        style={{ fontSize: 12.5, fontWeight: 600, color: theme.colors.inkSoft }}
+      >
         {required ? <RequiredLabel>{label}</RequiredLabel> : label}
       </span>
       {children}
@@ -153,6 +177,7 @@ const inputStyle = {
   background: theme.colors.surface,
   color: theme.colors.ink,
   fontFamily: theme.font.display,
+  width: "70%",
 };
 
 function PrimaryButton({ children, style, ...props }) {
@@ -250,7 +275,12 @@ function EmptyRow({ colSpan, children }) {
     <tr>
       <td
         colSpan={colSpan}
-        style={{ textAlign: "center", color: theme.colors.inkSoft, fontStyle: "italic", padding: "22px 10px" }}
+        style={{
+          textAlign: "center",
+          color: theme.colors.inkSoft,
+          fontStyle: "italic",
+          padding: "22px 10px",
+        }}
       >
         {children}
       </td>
@@ -391,6 +421,7 @@ export default function HomePage() {
   const loadItems = (e) => {
     e.preventDefault();
     getCheckedItemsList();
+    getCheckedItems();
     axios
       .get(`${API_BASE}/api/ssr-items-load`, {
         params: {
@@ -497,14 +528,25 @@ export default function HomePage() {
 
   const getCheckedItems = () => {
     axios
-      .get(`${API_BASE}/api/work-abstract-get`)
+      .get(`${API_BASE}/api/work-abstract-get`, {
+        params: {
+          workId: selectedProjectId,
+          subWorkId: selectedSubWorkId,
+        },
+      })
       .then((res) => {
-        if (res.status === 200) setCheckedItemIds(res.data.data);
+        if (res.status === 200) {
+          console.log(res.data);
+          const ids = res.data.data.map((row) => Number(row.ItemId));
+          console.log("Checked Item Ids (from frontend): ", ids);
+          setCheckedItemIds(ids);
+        }
       })
       .catch(console.error);
   };
 
   const getCheckedItemsList = () => {
+    console.log("Get checked Items List Called..//");
     axios
       .get(`${API_BASE}/api/get-items-checked-list`, {
         params: { projectId: selectedProjectId, subWorkId: selectedSubWorkId },
@@ -523,7 +565,6 @@ export default function HomePage() {
     loadRegions();
     loadCategories();
     loadProjects();
-    getCheckedItems();
   }, []);
 
   const onRegionChange = (e) => {
@@ -695,14 +736,30 @@ export default function HomePage() {
       </Head>
 
       <style jsx global>{`
-        * { box-sizing: border-box; }
-        html, body { margin: 0; background: ${theme.colors.paper}; }
-        input, select, button { font-family: ${theme.font.display}; }
-        input:focus, select:focus, button:focus-visible {
+        * {
+          box-sizing: border-box;
+        }
+        html,
+        body {
+          margin: 0;
+          background: ${theme.colors.paper};
+        }
+        input,
+        select,
+        button {
+          font-family: ${theme.font.display};
+        }
+        input:focus,
+        select:focus,
+        button:focus-visible {
           outline: 2px solid ${theme.colors.accent};
           outline-offset: 1px;
         }
-        .wrms-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+        .wrms-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 13.5px;
+        }
         .wrms-table thead th {
           text-align: left;
           font-size: 11px;
@@ -717,18 +774,41 @@ export default function HomePage() {
           padding: 10px 12px;
           border-bottom: 1px solid ${theme.colors.line};
         }
-        .wrms-table tbody tr:nth-child(even) { background: #FBFAF5; }
-        .wrms-table tbody tr:hover { background: ${theme.colors.accentSoft}; }
-        .wrms-shell { display: flex; min-height: 100vh; }
-        .wrms-aside { width: 232px; flex-shrink: 0; }
+        .wrms-table tbody tr:nth-child(even) {
+          background: #fbfaf5;
+        }
+        .wrms-table tbody tr:hover {
+          background: ${theme.colors.accentSoft};
+        }
+        .wrms-shell {
+          display: flex;
+          min-height: 100vh;
+        }
+        .wrms-aside {
+          width: 232px;
+          flex-shrink: 0;
+        }
         @media (max-width: 860px) {
-          .wrms-shell { flex-direction: column; }
-          .wrms-aside { width: 100%; position: static !important; height: auto !important; }
-          .wrms-nav-list { display: flex !important; overflow-x: auto; gap: 6px; }
+          .wrms-shell {
+            flex-direction: column;
+          }
+          .wrms-aside {
+            width: 100%;
+            position: static !important;
+            height: auto !important;
+          }
+          .wrms-nav-list {
+            display: flex !important;
+            overflow-x: auto;
+            gap: 6px;
+          }
         }
       `}</style>
 
-      <div className="wrms-shell" style={{ fontFamily: theme.font.display, color: theme.colors.ink }}>
+      <div
+        className="wrms-shell"
+        style={{ fontFamily: theme.font.display, color: theme.colors.ink }}
+      >
         {/* ── Sidebar ── */}
         <aside
           className="wrms-aside"
@@ -743,10 +823,19 @@ export default function HomePage() {
           }}
         >
           <div style={{ padding: "0 10px", marginBottom: 28 }}>
-            <div style={{ fontSize: 10.5, letterSpacing: "0.16em", textTransform: "uppercase", color: "#8FA9C7" }}>
+            <div
+              style={{
+                fontSize: 10.5,
+                letterSpacing: "0.16em",
+                textTransform: "uppercase",
+                color: "#8FA9C7",
+              }}
+            >
               WERMS
             </div>
-            <div style={{ fontSize: 17, fontWeight: 700, marginTop: 2 }}>Estimate Workspace</div>
+            <div style={{ fontSize: 17, fontWeight: 700, marginTop: 2 }}>
+              Estimate Workspace
+            </div>
           </div>
 
           <div className="wrms-nav-list" style={{ display: "grid", gap: 3 }}>
@@ -803,12 +892,29 @@ export default function HomePage() {
         {/* ── Main content ── */}
         <main style={{ flex: 1, padding: "36px 44px", maxWidth: 1160 }}>
           <div style={{ marginBottom: 22 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.09em", textTransform: "uppercase", color: theme.colors.accent }}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: "0.09em",
+                textTransform: "uppercase",
+                color: theme.colors.accent,
+              }}
+            >
               Masters {activeMasterMeta ? `· ${activeMasterMeta.label}` : ""}
             </div>
-            <h1 style={{ margin: "4px 0 6px", fontSize: 28, color: theme.colors.ink }}>Masters Management</h1>
+            <h1
+              style={{
+                margin: "4px 0 6px",
+                fontSize: 28,
+                color: theme.colors.ink,
+              }}
+            >
+              Masters Management
+            </h1>
             <p style={{ margin: 0, color: theme.colors.inkSoft, fontSize: 14 }}>
-              Manage the reference data behind your estimates — regions, categories, items, works and sub-works.
+              Manage the reference data behind your estimates — regions,
+              categories, items, works and sub-works.
             </p>
           </div>
 
@@ -819,7 +925,9 @@ export default function HomePage() {
                 marginBottom: 20,
                 borderRadius: 8,
                 fontSize: 13.5,
-                background: isErrorMessage ? theme.colors.redSoft : theme.colors.greenSoft,
+                background: isErrorMessage
+                  ? theme.colors.redSoft
+                  : theme.colors.greenSoft,
                 color: isErrorMessage ? theme.colors.red : theme.colors.green,
                 border: `1px solid ${isErrorMessage ? "#F0C6C2" : "#C9E6D3"}`,
               }}
@@ -832,11 +940,21 @@ export default function HomePage() {
           {activeMaster === "regions" && (
             <Card
               eyebrow="Master · SSR Region"
-              title={editingRegionId ? `Edit region #${editingRegionId}` : "SSR Regions"}
+              title={
+                editingRegionId
+                  ? `Edit region #${editingRegionId}`
+                  : "SSR Regions"
+              }
               subtitle="Regions used to scope SSR categories, items and rates."
             >
               <FormShell onSubmit={onRegionSubmit}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 14,
+                  }}
+                >
                   <Field label="SSR Region Name" required>
                     <input
                       name="SSRRegionName"
@@ -856,26 +974,53 @@ export default function HomePage() {
                     />
                   </Field>
                   <Field label="DOrder">
-                    <input name="DOrder" value={regionForm.DOrder} onChange={onRegionChange} style={inputStyle} />
+                    <input
+                      name="DOrder"
+                      value={regionForm.DOrder}
+                      onChange={onRegionChange}
+                      style={inputStyle}
+                    />
                   </Field>
                   <Field label="DOrder1">
-                    <input name="DOrder1" value={regionForm.DOrder1} onChange={onRegionChange} style={inputStyle} />
+                    <input
+                      name="DOrder1"
+                      value={regionForm.DOrder1}
+                      onChange={onRegionChange}
+                      style={inputStyle}
+                    />
                   </Field>
                   <Field label="Remarks" span>
-                    <input name="Remarks" value={regionForm.Remarks} onChange={onRegionChange} style={inputStyle} />
+                    <input
+                      name="Remarks"
+                      value={regionForm.Remarks}
+                      onChange={onRegionChange}
+                      style={inputStyle}
+                    />
                   </Field>
                 </div>
                 <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
                   <PrimaryButton disabled={savingRegion}>
-                    {savingRegion ? "Saving…" : editingRegionId ? "Update region" : "Save region"}
+                    {savingRegion
+                      ? "Saving…"
+                      : editingRegionId
+                        ? "Update region"
+                        : "Save region"}
                   </PrimaryButton>
                   {editingRegionId && (
-                    <SecondaryButton onClick={resetRegionEdit}>Cancel edit</SecondaryButton>
+                    <SecondaryButton onClick={resetRegionEdit}>
+                      Cancel edit
+                    </SecondaryButton>
                   )}
                 </div>
               </FormShell>
 
-              <div style={{ overflowX: "auto", border: `1px solid ${theme.colors.line}`, borderRadius: 10 }}>
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
                 <table className="wrms-table">
                   <thead>
                     <tr>
@@ -894,21 +1039,37 @@ export default function HomePage() {
                     ) : regions.length ? (
                       regions.map((r) => (
                         <tr key={r.SSRRegionId}>
-                          <td style={{ fontFamily: theme.font.mono, color: theme.colors.inkSoft }}>{r.SSRRegionId}</td>
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              color: theme.colors.inkSoft,
+                            }}
+                          >
+                            {r.SSRRegionId}
+                          </td>
                           <td>{r.SSRRegionName}</td>
                           <td>{r.SSRRegionShortName}</td>
-                          <td style={{ fontFamily: theme.font.mono }}>{r.DOrder ?? ""}</td>
-                          <td style={{ fontFamily: theme.font.mono }}>{r.DOrder1 ?? ""}</td>
+                          <td style={{ fontFamily: theme.font.mono }}>
+                            {r.DOrder ?? ""}
+                          </td>
+                          <td style={{ fontFamily: theme.font.mono }}>
+                            {r.DOrder1 ?? ""}
+                          </td>
                           <td>{r.Remarks ?? ""}</td>
                           <td>
-                            <GhostIconButton tone={theme.colors.accent} onClick={() => startRegionEdit(r)}>
+                            <GhostIconButton
+                              tone={theme.colors.accent}
+                              onClick={() => startRegionEdit(r)}
+                            >
                               ✎ Edit
                             </GhostIconButton>
                           </td>
                         </tr>
                       ))
                     ) : (
-                      <EmptyRow colSpan={7}>No region rows yet — add one above.</EmptyRow>
+                      <EmptyRow colSpan={7}>
+                        No region rows yet — add one above.
+                      </EmptyRow>
                     )}
                   </tbody>
                 </table>
@@ -920,11 +1081,21 @@ export default function HomePage() {
           {activeMaster === "categories" && (
             <Card
               eyebrow="Master · SSR Category"
-              title={editingCategoryId ? `Edit category #${editingCategoryId}` : "SSR Categories"}
+              title={
+                editingCategoryId
+                  ? `Edit category #${editingCategoryId}`
+                  : "SSR Categories"
+              }
               subtitle="Categories nest under a region and group SSR items."
             >
               <FormShell onSubmit={onCategorySubmit}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 14,
+                  }}
+                >
                   <Field label="SSR Region" required>
                     <select
                       name="SSRRegionId"
@@ -960,26 +1131,53 @@ export default function HomePage() {
                     />
                   </Field>
                   <Field label="DOrder">
-                    <input name="DOrder" value={categoryForm.DOrder} onChange={onCategoryChange} style={inputStyle} />
+                    <input
+                      name="DOrder"
+                      value={categoryForm.DOrder}
+                      onChange={onCategoryChange}
+                      style={inputStyle}
+                    />
                   </Field>
                   <Field label="DOrder1">
-                    <input name="DOrder1" value={categoryForm.DOrder1} onChange={onCategoryChange} style={inputStyle} />
+                    <input
+                      name="DOrder1"
+                      value={categoryForm.DOrder1}
+                      onChange={onCategoryChange}
+                      style={inputStyle}
+                    />
                   </Field>
                   <Field label="Remarks" span>
-                    <input name="Remarks" value={categoryForm.Remarks} onChange={onCategoryChange} style={inputStyle} />
+                    <input
+                      name="Remarks"
+                      value={categoryForm.Remarks}
+                      onChange={onCategoryChange}
+                      style={inputStyle}
+                    />
                   </Field>
                 </div>
                 <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
                   <PrimaryButton disabled={savingCategory}>
-                    {savingCategory ? "Saving…" : editingCategoryId ? "Update category" : "Save category"}
+                    {savingCategory
+                      ? "Saving…"
+                      : editingCategoryId
+                        ? "Update category"
+                        : "Save category"}
                   </PrimaryButton>
                   {editingCategoryId && (
-                    <SecondaryButton onClick={resetCategoryEdit}>Cancel edit</SecondaryButton>
+                    <SecondaryButton onClick={resetCategoryEdit}>
+                      Cancel edit
+                    </SecondaryButton>
                   )}
                 </div>
               </FormShell>
 
-              <div style={{ overflowX: "auto", border: `1px solid ${theme.colors.line}`, borderRadius: 10 }}>
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
                 <table className="wrms-table">
                   <thead>
                     <tr>
@@ -999,26 +1197,44 @@ export default function HomePage() {
                     ) : categories.length ? (
                       categories.map((c) => (
                         <tr key={c.SSRCategoryId}>
-                          <td style={{ fontFamily: theme.font.mono, color: theme.colors.inkSoft }}>{c.SSRCategoryId}</td>
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              color: theme.colors.inkSoft,
+                            }}
+                          >
+                            {c.SSRCategoryId}
+                          </td>
                           <td>
                             <Badge tone="accent">
-                              {getRegionShortNameById(c.SSRRegionId) || c.SSRRegionShortName || c.SSRRegionName}
+                              {getRegionShortNameById(c.SSRRegionId) ||
+                                c.SSRRegionShortName ||
+                                c.SSRRegionName}
                             </Badge>
                           </td>
                           <td>{c.SSRCategoryName}</td>
                           <td>{c.SSRCategoryShortName}</td>
-                          <td style={{ fontFamily: theme.font.mono }}>{c.DOrder ?? ""}</td>
-                          <td style={{ fontFamily: theme.font.mono }}>{c.DOrder1 ?? ""}</td>
+                          <td style={{ fontFamily: theme.font.mono }}>
+                            {c.DOrder ?? ""}
+                          </td>
+                          <td style={{ fontFamily: theme.font.mono }}>
+                            {c.DOrder1 ?? ""}
+                          </td>
                           <td>{c.Remarks ?? ""}</td>
                           <td>
-                            <GhostIconButton tone={theme.colors.accent} onClick={() => startCategoryEdit(c)}>
+                            <GhostIconButton
+                              tone={theme.colors.accent}
+                              onClick={() => startCategoryEdit(c)}
+                            >
                               ✎ Edit
                             </GhostIconButton>
                           </td>
                         </tr>
                       ))
                     ) : (
-                      <EmptyRow colSpan={8}>No category rows yet — add one above.</EmptyRow>
+                      <EmptyRow colSpan={8}>
+                        No category rows yet — add one above.
+                      </EmptyRow>
                     )}
                   </tbody>
                 </table>
@@ -1029,9 +1245,19 @@ export default function HomePage() {
           {/* ── Items ── */}
           {activeMaster === "items" && (
             <>
-              <Card eyebrow="Master · SSR Item" title="Find SSR Items" subtitle="Filter by work, region, category and sub-category, then view matching items.">
+              <Card
+                eyebrow="Master · SSR Item"
+                title="Find SSR Items"
+                subtitle="Filter by work, region, category and sub-category, then view matching items."
+              >
                 <FormShell onSubmit={loadItems}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 14,
+                    }}
+                  >
                     <Field label="Select Work" required>
                       <select
                         name="Projects"
@@ -1045,7 +1271,10 @@ export default function HomePage() {
                       >
                         <option>Select Work Name</option>
                         {projects.map((project) => (
-                          <option key={project.ProjectId} value={project.ProjectId}>
+                          <option
+                            key={project.ProjectId}
+                            value={project.ProjectId}
+                          >
                             {project.ProjectName}
                           </option>
                         ))}
@@ -1062,7 +1291,10 @@ export default function HomePage() {
                       >
                         <option>Select Sub Work</option>
                         {subWorks.map((subWork) => (
-                          <option key={subWork.SubWorkId} value={subWork.SubWorkId}>
+                          <option
+                            key={subWork.SubWorkId}
+                            value={subWork.SubWorkId}
+                          >
                             {subWork.SubWorkName}
                           </option>
                         ))}
@@ -1104,9 +1336,14 @@ export default function HomePage() {
                       >
                         <option value="">Select SSR Category</option>
                         {itemCategories
-                          .filter((c) => String(c.SSRRegionId) === String(itemRegion))
+                          .filter(
+                            (c) => String(c.SSRRegionId) === String(itemRegion),
+                          )
                           .map((c) => (
-                            <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                            <option
+                              key={c.SSRCategoryId}
+                              value={c.SSRCategoryId}
+                            >
                               {c.SSRCategoryShortName || c.SSRCategoryName}
                             </option>
                           ))}
@@ -1124,7 +1361,10 @@ export default function HomePage() {
                       >
                         <option value="">Select SSR Sub Category</option>
                         {subCategories.map((s) => (
-                          <option key={s.SSRSubCategoryId} value={s.SSRSubCategoryId}>
+                          <option
+                            key={s.SSRSubCategoryId}
+                            value={s.SSRSubCategoryId}
+                          >
                             {s.SSRSubCategoryName}
                           </option>
                         ))}
@@ -1180,7 +1420,13 @@ export default function HomePage() {
                   <TabPanel value={0}>
                     {itemList.length > 0 ? (
                       <div style={{ marginTop: 18 }}>
-                        <div style={{ overflowX: "auto", border: `1px solid ${theme.colors.line}`, borderRadius: 10 }}>
+                        <div
+                          style={{
+                            overflowX: "auto",
+                            border: `1px solid ${theme.colors.line}`,
+                            borderRadius: 10,
+                          }}
+                        >
                           <table className="wrms-table">
                             <thead>
                               <tr>
@@ -1200,24 +1446,50 @@ export default function HomePage() {
                                         type="checkbox"
                                         value={item.ItemId}
                                         checked={
-                                          checkedItemIds.includes(Number(item.ItemId)) ||
-                                          selectedItems.includes(Number(item.ItemId))
+                                          checkedItemIds.includes(
+                                            Number(item.ItemId),
+                                          ) ||
+                                          selectedItems.includes(
+                                            Number(item.ItemId),
+                                          )
                                         }
                                         onChange={(e) => {
                                           const itemId = Number(item.ItemId);
                                           if (e.target.checked) {
-                                            setSelectedItems((prev) => [...new Set([...prev, itemId])]);
+                                            setSelectedItems((prev) => [
+                                              ...new Set([...prev, itemId]),
+                                            ]);
                                           } else {
-                                            setSelectedItems((prev) => prev.filter((id) => id !== itemId));
+                                            setSelectedItems((prev) =>
+                                              prev.filter(
+                                                (id) => id !== itemId,
+                                              ),
+                                            );
                                           }
                                         }}
                                       />
                                     )}
                                   </td>
-                                  <td style={{ fontFamily: theme.font.mono, color: theme.colors.inkSoft }}>{item.ItemId}</td>
-                                  <td style={{ fontFamily: theme.font.mono }}>{item.ItemNumber}</td>
+                                  <td
+                                    style={{
+                                      fontFamily: theme.font.mono,
+                                      color: theme.colors.inkSoft,
+                                    }}
+                                  >
+                                    {item.ItemId}
+                                  </td>
+                                  <td style={{ fontFamily: theme.font.mono }}>
+                                    {item.ItemNumber}
+                                  </td>
                                   <td>{item.ItemDescription}</td>
-                                  <td style={{ fontFamily: theme.font.mono, textAlign: "right" }}>{item.CompletedRate}</td>
+                                  <td
+                                    style={{
+                                      fontFamily: theme.font.mono,
+                                      textAlign: "right",
+                                    }}
+                                  >
+                                    {item.CompletedRate}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -1230,7 +1502,14 @@ export default function HomePage() {
                         </div>
                       </div>
                     ) : (
-                      <p style={{ color: theme.colors.inkSoft, fontSize: 13.5, marginTop: 18, fontStyle: "italic" }}>
+                      <p
+                        style={{
+                          color: theme.colors.inkSoft,
+                          fontSize: 13.5,
+                          marginTop: 18,
+                          fontStyle: "italic",
+                        }}
+                      >
                         Run a search above to list matching SSR items.
                       </p>
                     )}
@@ -1256,11 +1535,21 @@ export default function HomePage() {
                         >
                           <span>📐</span>
                           <span>
-                            Check a row to open its measurement panel. Enter expressions like{" "}
-                            <code style={{ fontFamily: theme.font.mono }}>3.5+2.1+1.8</code> — quantity is computed automatically.
+                            Check a row to open its measurement panel. Enter
+                            expressions like{" "}
+                            <code style={{ fontFamily: theme.font.mono }}>
+                              3.5+2.1+1.8
+                            </code>{" "}
+                            — quantity is computed automatically.
                           </span>
                         </div>
-                        <div style={{ overflowX: "auto", border: `1px solid ${theme.colors.line}`, borderRadius: 10 }}>
+                        <div
+                          style={{
+                            overflowX: "auto",
+                            border: `1px solid ${theme.colors.line}`,
+                            borderRadius: 10,
+                          }}
+                        >
                           <table className="wrms-table">
                             <thead>
                               <tr>
@@ -1273,25 +1562,60 @@ export default function HomePage() {
                             </thead>
                             <tbody>
                               {checkedItemsList.map((item) => {
-                                const isOpen = checkedForMeasurement.has(item.WorkAbstractId);
+                                const isOpen = checkedForMeasurement.has(
+                                  item.WorkAbstractId,
+                                );
                                 return (
                                   <>
                                     {/* ── Item row ── */}
-                                    <tr key={item.ItemId} style={isOpen ? { background: theme.colors.accentSoft } : undefined}>
+                                    <tr
+                                      key={item.ItemId}
+                                      style={
+                                        isOpen
+                                          ? {
+                                              background:
+                                                theme.colors.accentSoft,
+                                            }
+                                          : undefined
+                                      }
+                                    >
                                       <td>
                                         {item.CompletedRate && (
                                           <input
                                             type="checkbox"
                                             checked={isOpen}
                                             value={item.WorkAbstractId}
-                                            onChange={(e) => onCheckedItemToggle(item.WorkAbstractId, e.target.checked)}
+                                            onChange={(e) =>
+                                              onCheckedItemToggle(
+                                                item.WorkAbstractId,
+                                                e.target.checked,
+                                              )
+                                            }
                                           />
                                         )}
                                       </td>
-                                      <td style={{ fontFamily: theme.font.mono, color: theme.colors.inkSoft }}>{item.ItemId}</td>
-                                      <td style={{ fontFamily: theme.font.mono }}>{item.ItemNumber}</td>
+                                      <td
+                                        style={{
+                                          fontFamily: theme.font.mono,
+                                          color: theme.colors.inkSoft,
+                                        }}
+                                      >
+                                        {item.ItemId}
+                                      </td>
+                                      <td
+                                        style={{ fontFamily: theme.font.mono }}
+                                      >
+                                        {item.ItemNumber}
+                                      </td>
                                       <td>{item.ItemDescription}</td>
-                                      <td style={{ fontFamily: theme.font.mono, textAlign: "right" }}>{item.CompletedRate}</td>
+                                      <td
+                                        style={{
+                                          fontFamily: theme.font.mono,
+                                          textAlign: "right",
+                                        }}
+                                      >
+                                        {item.CompletedRate}
+                                      </td>
                                     </tr>
 
                                     {/* ── Inline measurement panel — mounts when checked ── */}
@@ -1316,8 +1640,16 @@ export default function HomePage() {
                         </div>
                       </div>
                     ) : (
-                      <p style={{ color: theme.colors.inkSoft, fontSize: 13.5, marginTop: 18, fontStyle: "italic" }}>
-                        Click "View" above to load checked items for the selected project and sub-work.
+                      <p
+                        style={{
+                          color: theme.colors.inkSoft,
+                          fontSize: 13.5,
+                          marginTop: 18,
+                          fontStyle: "italic",
+                        }}
+                      >
+                        Click "View" above to load checked items for the
+                        selected project and sub-work.
                       </p>
                     )}
                   </TabPanel>
@@ -1328,7 +1660,11 @@ export default function HomePage() {
 
           {/* ── Works ── */}
           {activeMaster === "works" && (
-            <Card eyebrow="Master · Work" title="Master Work" subtitle="Works group sub-works and estimates under an optional project.">
+            <Card
+              eyebrow="Master · Work"
+              title="Master Work"
+              subtitle="Works group sub-works and estimates under an optional project."
+            >
               <FormShell onSubmit={insertWork}>
                 <Field label="Select Project (optional)">
                   <select
@@ -1351,7 +1687,12 @@ export default function HomePage() {
                     <input
                       type="text"
                       value={workForm.WorkName}
-                      onChange={(e) => setWorkForm((prev) => ({ ...prev, WorkName: e.target.value }))}
+                      onChange={(e) =>
+                        setWorkForm((prev) => ({
+                          ...prev,
+                          WorkName: e.target.value,
+                        }))
+                      }
                       required
                       style={inputStyle}
                     />
@@ -1367,15 +1708,28 @@ export default function HomePage() {
 
           {/* ── Sub Work ── */}
           {activeMaster === "sub-work" && (
-            <Card eyebrow="Master · Sub Work" title="Master Sub Work" subtitle="Sub-works break a project down into measurable units of work.">
+            <Card
+              eyebrow="Master · Sub Work"
+              title="Master Sub Work"
+              subtitle="Sub-works break a project down into measurable units of work."
+            >
               <FormShell onSubmit={insertSubWork}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 14,
+                  }}
+                >
                   <Field label="Project" required>
                     <select
                       value={subWorkForm.ProjectId}
                       onChange={(e) => {
                         const projectId = e.target.value;
-                        setSubWorkForm((prev) => ({ ...prev, ProjectId: projectId }));
+                        setSubWorkForm((prev) => ({
+                          ...prev,
+                          ProjectId: projectId,
+                        }));
                         loadSubWorks(projectId);
                       }}
                       required
@@ -1383,7 +1737,10 @@ export default function HomePage() {
                     >
                       <option value="">Select Project</option>
                       {projects.map((project) => (
-                        <option key={project.ProjectId} value={project.ProjectId}>
+                        <option
+                          key={project.ProjectId}
+                          value={project.ProjectId}
+                        >
                           {project.ProjectName}
                         </option>
                       ))}
@@ -1394,7 +1751,12 @@ export default function HomePage() {
                     <input
                       type="text"
                       value={subWorkForm.SubWorkName}
-                      onChange={(e) => setSubWorkForm((prev) => ({ ...prev, SubWorkName: e.target.value }))}
+                      onChange={(e) =>
+                        setSubWorkForm((prev) => ({
+                          ...prev,
+                          SubWorkName: e.target.value,
+                        }))
+                      }
                       required
                       style={inputStyle}
                     />
@@ -1406,7 +1768,13 @@ export default function HomePage() {
                 </div>
               </FormShell>
 
-              <div style={{ overflowX: "auto", border: `1px solid ${theme.colors.line}`, borderRadius: 10 }}>
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
                 <table className="wrms-table">
                   <thead>
                     <tr>
@@ -1419,17 +1787,28 @@ export default function HomePage() {
                     {subWorks.length > 0 ? (
                       subWorks.map((subWork) => (
                         <tr key={subWork.SubWorkId}>
-                          <td style={{ fontFamily: theme.font.mono, color: theme.colors.inkSoft }}>{subWork.SubWorkId}</td>
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              color: theme.colors.inkSoft,
+                            }}
+                          >
+                            {subWork.SubWorkId}
+                          </td>
                           <td>{subWork.SubWorkName}</td>
                           <td>
-                            <Badge tone={subWork.MarkForDeletion ? "red" : "green"}>
+                            <Badge
+                              tone={subWork.MarkForDeletion ? "red" : "green"}
+                            >
                               {subWork.MarkForDeletion ? "Yes" : "No"}
                             </Badge>
                           </td>
                         </tr>
                       ))
                     ) : (
-                      <EmptyRow colSpan={3}>No sub works found — add one above.</EmptyRow>
+                      <EmptyRow colSpan={3}>
+                        No sub works found — add one above.
+                      </EmptyRow>
                     )}
                   </tbody>
                 </table>

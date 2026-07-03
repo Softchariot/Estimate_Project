@@ -149,13 +149,18 @@ app.get("/api/ssr-items-load", async (req, res) => {
 });
 
 app.get("/api/work-abstract-get", async (req, res) => {
+  const { workId, subWorkId } = req.query;
+  console.log("Work Id: ", workId);
+  console.log("Sub Work Id: ", subWorkId);
   console.log("Get Checked Items Called");
   try {
     const result = await pool.query(
-      `SELECT "ItemId" FROM "WorkAbstract" ORDER BY "ItemId";`,
+      `SELECT "ItemId" FROM "WorkAbstract" WHERE "ProjectId" = $1 AND "SubWorkId" = $2 ORDER BY "ItemId";`,
+      [workId, subWorkId],
     );
-    const returnData = result.rows.map((row) => row.ItemId);
-    return res.status(200).send({ data: returnData });
+    console.log(result);
+    console.log("Checked Items: ", result.rows);
+    return res.status(200).send({ data: result.rows });
   } catch (err) {
     console.error(err);
   }
@@ -391,7 +396,10 @@ app.get("/api/get-items-checked-list", async (req, res) => {
   }
   try {
     const result = await pool.query(
-      `SELECT w."WorkAbstractId", w."ItemId", i."ItemNumber", i."ItemDescription", i."CompletedRate" FROM "WorkAbstract" w JOIN "MasterItem" i ON i."ItemId" = w."ItemId" WHERE w."ProjectId" = $1 AND w."SubWorkId" = $2 ORDER BY i."ItemNumber" ASC; `,
+      `SELECT w."WorkAbstractId", w."ItemId", i."ItemNumber", i."ItemDescription", i."CompletedRate" 
+      FROM "WorkAbstract" w 
+      JOIN "MasterItem" i ON i."ItemId" = w."ItemId" 
+      WHERE w."ProjectId" = $1 AND w."SubWorkId" = $2 ORDER BY i."ItemNumber" ASC; `,
       [projectId, subWorkId],
     );
     return res.status(200).send({ data: result.rows });
@@ -458,7 +466,16 @@ app.post("/api/auth/validate-organization", async (req, res) => {
 });
 
 app.post("/api/insert-work-measurements", async (req, res) => {
-  const { workAbstractId, description, expression, quantity, number, length, breadth, height } = req.body;
+  const {
+    workAbstractId,
+    description,
+    expression,
+    quantity,
+    number,
+    length,
+    breadth,
+    height,
+  } = req.body;
 
   console.log("Work Abstract Id: ", workAbstractId);
   console.log("Description: ", description);
@@ -474,7 +491,16 @@ app.post("/api/insert-work-measurements", async (req, res) => {
       `INSERT INTO "WorkMeasurement" ("WorkAbstractId", "Description", "Expression", "Quantity", "Number", "Length", "Breadth", "Height") 
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) 
        RETURNING "MeasurementId";`, // ← add RETURNING so frontend gets the new ID
-      [workAbstractId, description, expression, quantity, number, length, breadth, height],
+      [
+        workAbstractId,
+        description,
+        expression,
+        quantity,
+        number,
+        length,
+        breadth,
+        height,
+      ],
     );
     return res.status(200).send({
       message: "Measurements Successfully Recorded.",
@@ -506,7 +532,8 @@ app.get("/api/measurements", async (req, res) => {
 // PUT route for editing existing rows
 app.put("/api/update-work-measurements/:id", async (req, res) => {
   const { id } = req.params;
-  const { description, expression, number, length, breadth, height, quantity } = req.body;
+  const { description, expression, number, length, breadth, height, quantity } =
+    req.body;
 
   try {
     await pool.query(
@@ -592,6 +619,24 @@ app.delete("/api/delete-selected-items", async (req, res) => {
       .send({ message: "Deletion of: " + deleteItems + " successful." });
   } catch (err) {
     console.error(err);
+  }
+});
+
+app.get("/api/get-work-abstract-report", async (req, res) => {
+  const { workId, subWorkId } = req.query;
+
+  try {
+    const result = await pool.query(
+      `SELECT * FROM "WorkAbstract" WHERE "ProjectId" = $1 AND "SubWorkId" = $2`,
+      [workId, subWorkId],
+    );
+
+    return res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch work abstract report." });
   }
 });
 
