@@ -640,6 +640,11 @@ app.get("/api/get-work-abstract-report", async (req, res) => {
   }
 });
 
+app.get("/test", async (req, res) => {
+  console.log("Origin:", req.headers.origin);
+  res.json({ success: true });
+});
+
 app.listen(port, () => {
   console.log(`Backend running on http://localhost:${port}`);
 });
