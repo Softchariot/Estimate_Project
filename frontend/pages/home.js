@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { TabList, Tabs, Tab, TabPanel } from "@mui/joy";
 
-const API_BASE = "https://estimate-project-omega.vercel.app";
+const API_BASE = "http://localhost:4000";
+// const API_BASE = "https://estimate-project-omega.vercel.app";
 
 const mastersMenu = [
   { id: "regions", label: "SSR Regions", status: "active" },
@@ -11,8 +12,9 @@ const mastersMenu = [
   { id: "materials", label: "Materials (Upcoming)", status: "upcoming" },
   { id: "rates", label: "Rates (Upcoming)", status: "upcoming" },
   { id: "items", label: "SSR Items", status: "active" },
-  { id: "projects", label: "Projects Master", status: "active" },
+  { id: "works", label: "Works Master", status: "active" },
   { id: "sub-work", label: "Sub Work Master", status: "active" },
+  { id: "master-projects", label: "Master Projects", status: "active" },
 ];
 
 const initialRegionForm = {
@@ -581,6 +583,7 @@ export default function HomePage() {
   const [subWorks, setSubWorks] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(0);
   const [selectedSubWorkId, setSelectedSubWorkId] = useState(0);
+  const [selectedWorkId, setSelectedWorkId] = useState(0);
   const [selectedItems, setSelectedItems] = useState([]);
   const [checkedItemIds, setCheckedItemIds] = useState([]);
   const [checkedItemsList, setCheckedItemsList] = useState([]);
@@ -588,11 +591,12 @@ export default function HomePage() {
 
   // Which items in the Checked Items tab have their panel open (tied to checkbox)
   const [checkedForMeasurement, setCheckedForMeasurement] = useState(new Set());
-  const initialProjectForm = {
-    ProjectName: "",
+  const initialWorkForm = {
+    WorkName: "",
+    ProjectId: "",
   };
 
-  const [projectForm, setProjectForm] = useState(initialProjectForm);
+  const [workForm, setWorkForm] = useState(initialWorkForm);
 
   const initialSubWorkForm = {
     ProjectId: "",
@@ -629,6 +633,25 @@ export default function HomePage() {
     } finally {
       setLoadingRegions(false);
     }
+  };
+
+  const insertWork = (e) => {
+    e.preventDefault();
+    const user = JSON.parse(sessionStorage.getItem("werms_user"));
+    axios
+      .post(`${API_BASE}/api/insert-work`, {
+        workName: workForm.WorkName,
+        projectId: selectedProjectId,
+        userId: user.UserId,
+        remarks: "",
+      })
+      .then((res) => {
+        if (res.status === 201) {
+          const data = res.data;
+          alert(data.message);
+        }
+      })
+      .catch(console.error);
   };
 
   const loadCategories = async () => {
@@ -682,19 +705,19 @@ export default function HomePage() {
   };
 
   const insertProject = () => {
-    const user = JSON.parse(sessionStorage.getItem("werms_user"));
-    axios
-      .post(`${API_BASE}/api/insert-project`, {
-        projectName: projectForm.ProjectName,
-        userId: user.UserId,
-      })
-      .then((res) => {
-        if (res.status === 201) {
-          const data = res.data;
-          alert(data.message);
-        }
-      })
-      .catch(console.error);
+    // const user = JSON.parse(sessionStorage.getItem("werms_user"));
+    // axios
+    //   .post(`${API_BASE}/api/insert-project`, {
+    //     projectName: projectForm.ProjectName,
+    //     userId: user.UserId,
+    //   })
+    //   .then((res) => {
+    //     if (res.status === 201) {
+    //       const data = res.data;
+    //       alert(data.message);
+    //     }
+    //   })
+    //   .catch(console.error);
   };
 
   const insertSubWork = () => {
@@ -714,10 +737,13 @@ export default function HomePage() {
 
   const loadProjects = () => {
     const user = JSON.parse(sessionStorage.getItem("werms_user"));
-    console.log("User Is: ", user);
-    console.log("User Id: ", user.UserId);
+    const orgId = user.OrganizationId;
     axios
-      .get(`${API_BASE}/api/load-projects/${user.UserId}`)
+      .get(`${API_BASE}/api/load-projects`, {
+        params: {
+          org_id: orgId,
+        },
+      })
       .then((res) => {
         if (res.status === 200) setProjects(res.data.data);
       })
@@ -1358,7 +1384,7 @@ export default function HomePage() {
               }}
             >
               <label style={{ display: "grid", gap: 6 }}>
-                {requiredLabel("Select Project")}
+                {requiredLabel("Select Work")}
                 <select
                   name="Projects"
                   value={selectedProjectId}
@@ -1368,7 +1394,7 @@ export default function HomePage() {
                     loadSubWorks(project);
                   }}
                 >
-                  <option>Select Project Name</option>
+                  <option>Select Work Name</option>
                   {projects.map((project) => (
                     <option key={project.ProjectId} value={project.ProjectId}>
                       {project.ProjectName}
@@ -1624,13 +1650,13 @@ export default function HomePage() {
           </Tabs>
         </>
       )}
-      {activeMaster === "projects" && (
+      {activeMaster === "works" && (
         <>
           <section style={{ marginBottom: 30 }}>
-            <h2>Master Project</h2>
+            <h2>Master Work</h2>
 
             <form
-              onSubmit={insertProject}
+              onSubmit={insertWork}
               style={{
                 background: "#f9fbfd",
                 border: "1px solid #dde5ec",
@@ -1639,17 +1665,43 @@ export default function HomePage() {
                 marginBottom: 20,
               }}
             >
-              <h3>Add New Project</h3>
+              <h3>Add New Work</h3>
 
               <label style={{ display: "grid", gap: 6 }}>
-                Project Name *
+                Select Project {"(optional)"}
+                <select
+                  name="MasterProject"
+                  value={selectedProjectId}
+                  onChange={(e) => {
+                    const projectId = e.target.value;
+                    setSelectedProjectId(projectId);
+                  }}
+                >
+                  <option value="">Select Project</option>
+                  {projects.map((c) => (
+                    <option key={c.ProjectId} value={c.ProjectId}>
+                      {c.ProjectCode + c.ProjectName || c.ProjectName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label
+                style={{
+                  display: "grid",
+                  gap: 6,
+                  marginTop: 6,
+                  marginBottom: 6,
+                }}
+              >
+                Work Name *
                 <input
                   type="text"
-                  value={projectForm.ProjectName}
+                  value={workForm.WorkName}
                   onChange={(e) =>
-                    setProjectForm((prev) => ({
+                    setWorkForm((prev) => ({
                       ...prev,
-                      ProjectName: e.target.value,
+                      WorkName: e.target.value,
                     }))
                   }
                   required
@@ -1657,13 +1709,13 @@ export default function HomePage() {
               </label>
 
               <div style={{ marginTop: 16 }}>
-                <button type="submit">Save Project</button>
+                <button type="submit">Save Work</button>
               </div>
             </form>
 
             {/* Projects Table */}
 
-            <table
+            {/* <table
               border="1"
               cellPadding="8"
               style={{
@@ -1699,7 +1751,7 @@ export default function HomePage() {
                   </tr>
                 )}
               </tbody>
-            </table>
+            </table> */}
           </section>
         </>
       )}

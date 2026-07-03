@@ -217,12 +217,14 @@ app.get("/api/ssr-categories", async (_req, res) => {
   }
 });
 
-app.get("/api/load-projects/:userId", async (req, res) => {
-  const { userId } = req.params;
+app.get("/api/load-projects", async (req, res) => {
+  const { org_id } = req.query;
+  console.log("Projects Load Called.");
+  console.log("Org Id Passed: ", org_id);
   try {
     const result = await pool.query(
-      'SELECT "ProjectId", "ProjectName" FROM "MasterProject" WHERE "UserId" = $1',
-      [userId],
+      'SELECT "ProjectId", "ProjectName", "ProjectCode" FROM "MasterProject" WHERE "OrganizationID" = $1 ORDER BY "ProjectCode"',
+      [org_id],
     );
     return res.status(200).send({ data: result.rows });
   } catch (err) {
@@ -251,6 +253,25 @@ app.post("/api/insert-work-abstract", async (req, res) => {
     return res
       .status(200)
       .send({ message: "Work Abstract Insertion Successful" });
+  } catch (err) {
+    console.error(err);
+  }
+});
+
+app.post("/api/insert-work", async (req, res) => {
+  const { workName, projectId, userId, remarks } = req.body;
+
+  const projectIdValue =
+    projectId === null || projectId === undefined || projectId === 0
+      ? null
+      : projectId;
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO "MasterWork" ("WorkName", "ProjectId", "UserId", "Remarks") VALUES ($1, $2, $3, $4)`,
+      [workName, projectIdValue, userId, remarks],
+    );
+    return res.status(201).send({ message: "Work Created Successfully." });
   } catch (err) {
     console.error(err);
   }
