@@ -122,7 +122,7 @@ app.get("/api/ssr-sub-categories/:categoryId", async (req, res) => {
   console.log("Category ID: ", categoryId);
   try {
     const result = await pool.query(
-      `SELECT "SSRSubCategoryId", "SSRCategoryName" FROM "MasterSSRSubCategory" WHERE "SSRCategoryId" = $1 ORDER BY "DOrder";`,
+      `SELECT "SSRSubCategoryId", "SSRSubCategoryName" FROM "MasterSSRSubCategory" WHERE "SSRCategoryId" = $1 ORDER BY "DOrder";`,
       [categoryId],
     );
     return res.status(200).send({ data: result.rows });
@@ -458,19 +458,23 @@ app.post("/api/auth/validate-organization", async (req, res) => {
 });
 
 app.post("/api/insert-work-measurements", async (req, res) => {
-  const { workAbstractId, description, measurements, quantity } = req.body;
+  const { workAbstractId, description, expression, quantity, number, length, breadth, height } = req.body;
 
   console.log("Work Abstract Id: ", workAbstractId);
   console.log("Description: ", description);
-  console.log("Measurements: ", measurements);
+  console.log("Expression: ", expression);
   console.log("Quantity: ", quantity);
+  console.log("Number: ", number);
+  console.log("Length: ", length);
+  console.log("Breadth: ", breadth);
+  console.log("Height: ", height);
 
   try {
     const result = await pool.query(
-      `INSERT INTO "WorkMeasurement" ("WorkAbstractId", "Description", "Measurements", "Quantity") 
-       VALUES ($1,$2,$3,$4) 
+      `INSERT INTO "WorkMeasurement" ("WorkAbstractId", "Description", "Expression", "Quantity", "Number", "Length", "Breadth", "Height") 
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) 
        RETURNING "MeasurementId";`, // ← add RETURNING so frontend gets the new ID
-      [workAbstractId, description, measurements, quantity],
+      [workAbstractId, description, expression, quantity, number, length, breadth, height],
     );
     return res.status(200).send({
       message: "Measurements Successfully Recorded.",
@@ -490,7 +494,7 @@ app.get("/api/measurements", async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT "MeasurementId", "Description", "Measurements", "Quantity" FROM "WorkMeasurement" WHERE "WorkAbstractId" = $1`,
+      `SELECT "MeasurementId", "Description", "Expression", "Number", "Length", "Breadth", "Height", "Quantity" FROM "WorkMeasurement" WHERE "WorkAbstractId" = $1`,
       [workAbstractId],
     );
     return res.status(200).send({ data: result.rows });
@@ -502,14 +506,14 @@ app.get("/api/measurements", async (req, res) => {
 // PUT route for editing existing rows
 app.put("/api/update-work-measurements/:id", async (req, res) => {
   const { id } = req.params;
-  const { description, measurements, quantity } = req.body;
+  const { description, expression, number, length, breadth, height, quantity } = req.body;
 
   try {
     await pool.query(
       `UPDATE "WorkMeasurement" 
-       SET "Description"=$1, "Measurements"=$2, "Quantity"=$3 
-       WHERE "WorkMeasurementId"=$4;`,
-      [description, measurements, quantity, id],
+       SET "Description"=$1, "Expression"=$2, "Number"=$3, "Length"=$4, "Breadth"=$5, "Height"=$6, "Quantity"=$7 
+       WHERE "WorkMeasurementId"=$8;`,
+      [description, expression, number, length, breadth, height, quantity, id],
     );
     return res.status(200).send({ message: "Measurement Updated." });
   } catch (err) {
