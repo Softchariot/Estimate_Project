@@ -4,7 +4,7 @@ import axios from "axios";
 import { TabList, Tabs, Tab, TabPanel } from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
 
-const API_BASE = "https://estimate-project-omega.vercel.app/";
+const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
