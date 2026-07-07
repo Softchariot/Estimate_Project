@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
 import axios from "axios";
-import { TabList, Tabs, Tab, TabPanel } from "@mui/joy";
+import { TabList, Tabs, Tab, TabPanel, Button } from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
+import GenerateReportModal from "../components/GenerateReportModal";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
@@ -321,6 +322,7 @@ export default function HomePage() {
   const [checkedItemIds, setCheckedItemIds] = useState([]);
   const [checkedItemsList, setCheckedItemsList] = useState([]);
   const [updateSelectedItems, setUpdateSelectedItems] = useState([]);
+  const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
 
   // Which items in the Checked Items tab have their panel open (tied to checkbox)
   const [checkedForMeasurement, setCheckedForMeasurement] = useState(new Set());
@@ -559,6 +561,120 @@ export default function HomePage() {
         }
       })
       .catch(console.error);
+  };
+
+  const handleGenerateRecapReport = async () => {
+    if (!selectedProjectId) {
+      alert("Please select a Work first.");
+      return;
+    }
+
+    try {
+      const res = await axios.get(`${API_BASE}/api/generate-recap-report`, {
+        params: { projectId: selectedProjectId },
+        responseType: "blob", // ← required: tells axios to keep raw binary data, not try to parse as JSON/text
+      });
+
+      // Pull the filename the server sent, if present, otherwise fall back
+      const disposition = res.headers["content-disposition"];
+      let filename = "Recapitulation.pdf";
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate recap report:", err);
+      alert("Failed to generate the recapitulation report. Please try again.");
+    }
+  };
+
+  const handleGenerateMeasurementReport = async () => {
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/generate-measurement-report`,
+        {
+          params: {
+            projectId: selectedProjectId,
+            subWorkId: selectedSubWorkId,
+          },
+          responseType: "blob", // ← required: tells axios to keep raw binary data, not try to parse as JSON/text
+        },
+      );
+
+      // Pull the filename the server sent, if present, otherwise fall back
+      const disposition = res.headers["content-disposition"];
+      let filename = "Measurement.pdf";
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate measurement report:", err);
+      alert("Failed to generate the measurement report. Please try again.");
+    }
+  };
+
+  const handleGenerateItemCatalogueReport = async () => {
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/generate-item-catalog-report`,
+        {
+          params: {
+            ssrYearId: 7,
+            regionId: itemRegion,
+            categoryId: itemCategoryId,
+            subCategoryId: subCategoryItemId,
+          },
+          responseType: "blob",
+        },
+      );
+
+      const disposition = res.headers["content-disposition"];
+      let filename = "Item_Catalogue.pdf";
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate item catalogue report:", err);
+      alert("Failed to generate the item catalogue report. Please try again.");
+    }
   };
 
   useEffect(() => {
@@ -1374,6 +1490,66 @@ export default function HomePage() {
 
                   <div style={{ marginTop: 18 }}>
                     <PrimaryButton>View</PrimaryButton>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => getCheckedItemsList()}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      View Checked Items
+                    </Button>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => handleGenerateItemCatalogueReport()}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Generate Item Catalogue Report
+                    </Button>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => setGenerateReportModalOpen(true)}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Generate Abstract Report
+                    </Button>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => handleGenerateRecapReport()}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Generate Recap Report
+                    </Button>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => handleGenerateMeasurementReport()}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Generate Measurement Report
+                    </Button>
                   </div>
                 </FormShell>
               </Card>
@@ -1817,6 +1993,13 @@ export default function HomePage() {
           )}
         </main>
       </div>
+      <GenerateReportModal
+        open={generateReportModalOpen}
+        onClose={() => setGenerateReportModalOpen(false)}
+        API_BASE={API_BASE}
+        projects={projects}
+        defaultProjectId={selectedProjectId}
+      />
     </>
   );
 }

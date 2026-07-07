@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
-const API_BASE = "http://localhost:4000" || "https://estimate-project-omega.vercel.app";
+const API_BASE = "https://estimate-project-omega.vercel.app";
 
 /** Evaluate a math string like "3.5+2.1*1.8" safely. */
 function calcExpr(expr) {
@@ -115,7 +115,11 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
             saved: true,
           };
           const result = computeQty(base);
-          return { ...base, qty: r.quantity ?? result.val, measErr: result.err };
+          return {
+            ...base,
+            qty: r.quantity ?? result.val,
+            measErr: result.err,
+          };
         });
         // Always end with one blank input row
         setRows([...loaded, { ...measurementRowBase, localId: uid() }]);
@@ -202,7 +206,9 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
 
   // Save ALL unsaved/editing rows in one go
   const saveAll = async () => {
-    const toSave = rows.filter((r) => (!r.saved || r.editing) && rowHasContent(r));
+    const toSave = rows.filter(
+      (r) => (!r.saved || r.editing) && rowHasContent(r),
+    );
     if (!toSave.length) {
       setError("Nothing new to save.");
       return;
@@ -270,6 +276,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
   };
 
   const total = (rows ?? []).reduce((sum, r) => {
+    if (!rowHasContent(r)) return sum; // skip the blank trailing row
     const res = computeQty(r);
     return sum + (res.val ?? 0);
   }, 0);
