@@ -10,7 +10,7 @@ import UserProfileModal from "../components/UserProfileModal";
 const SESSION_KEY = "werms_user";
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  "https://estimate-project-omega.vercel.app" ||
   "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
