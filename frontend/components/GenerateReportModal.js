@@ -14,28 +14,21 @@ import axios from "axios";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GenerateReportModal
-// Loads ALL sub works (across every project) once when the modal opens,
-// then filters them client-side by the selected Work — no extra network
-// round trip when the Work dropdown changes.
-//
-// Assumes a backend endpoint `GET /api/sub-works` that returns every sub
-// work with its owning ProjectId, e.g.:
-//   { data: [{ SubWorkId, SubWorkName, ProjectId }, ...] }
-// If your backend only has the project-scoped `/api/load-sub-works/`,
-// swap the fetch below for that and drop the client-side filter.
+// Loads ALL sub works once when the modal opens, then filters them client-side
+// by the selected MasterWork (WorkId).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function GenerateReportModal({
   open,
   onClose,
   API_BASE,
-  projects, // [{ ProjectId, ProjectName }, ...]
-  defaultProjectId, // optional — pre-select whatever Work the user already has selected
+  works, // [{ MasterWorkId, WorkName }, ...]
+  defaultWorkId, // optional — pre-select whatever Work the user already has selected
 }) {
   const [allSubWorks, setAllSubWorks] = useState([]);
   const [loadingSubWorks, setLoadingSubWorks] = useState(false);
-  const [selectedProjectId, setSelectedProjectId] = useState(
-    defaultProjectId ? String(defaultProjectId) : "",
+  const [selectedWorkId, setSelectedWorkId] = useState(
+    defaultWorkId ? String(defaultWorkId) : "",
   );
   const [selectedSubWorkId, setSelectedSubWorkId] = useState("all");
   const [generating, setGenerating] = useState(false);
@@ -91,26 +84,25 @@ export default function GenerateReportModal({
   //     }
   //   };
 
-  const handleProjectChange = (projectId) => {
-    console.log("Handling Project Change. New ProjectId:", projectId);
-    setSelectedProjectId(projectId);
+  useEffect(() => {
+    if (!open) return;
+    setSelectedWorkId(defaultWorkId ? String(defaultWorkId) : "");
     setSelectedSubWorkId("all");
-    // loadSpecificSubWorks(projectId);
-    // console.log(subWorksForSelectedProject);
+  }, [open, defaultWorkId]);
+
+  const handleWorkChange = (workId) => {
+    setSelectedWorkId(workId);
+    setSelectedSubWorkId("all");
   };
 
-  const subWorksForSelectedProject = selectedProjectId
+  const subWorksForSelectedWork = selectedWorkId
     ? allSubWorks.filter(
-        (sw) => String(sw.ProjectId) === String(selectedProjectId),
+        (sw) => String(sw.WorkId) === String(selectedWorkId),
       )
     : [];
 
-  {
-    console.log("Sub works for selected project:", subWorksForSelectedProject);
-  }
-
   const handleGenerate = async () => {
-    if (!selectedProjectId) {
+    if (!selectedWorkId) {
       setError("Please select a Work first.");
       return;
     }
@@ -118,7 +110,7 @@ export default function GenerateReportModal({
     setError("");
     try {
       const params = new URLSearchParams({
-        projectId: Number(selectedProjectId),
+        projectId: Number(selectedWorkId),
         subWorkId: selectedSubWorkId, // "all" or a specific SubWorkId
       });
 
@@ -131,15 +123,15 @@ export default function GenerateReportModal({
         throw new Error(data.message || "Report generation failed.");
       }
 
-      const projectName =
-        projects?.find((p) => String(p.ProjectId) === String(selectedProjectId))
-          ?.ProjectName || "Abstract";
+      const workName =
+        works?.find((w) => String(w.MasterWorkId) === String(selectedWorkId))
+          ?.WorkName || "Abstract";
 
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const safeName = projectName.replace(/[^\w\-]+/g, "_");
+      const safeName = workName.replace(/[^\w\-]+/g, "_");
       a.download = `${safeName}_Abstract.pdf`;
       document.body.appendChild(a);
       a.click();
@@ -170,12 +162,12 @@ export default function GenerateReportModal({
             <FormLabel sx={{ mb: 0.5 }}>Work</FormLabel>
             <Select
               placeholder="Select Work"
-              value={selectedProjectId}
-              onChange={(_, value) => handleProjectChange(value)}
+              value={selectedWorkId}
+              onChange={(_, value) => handleWorkChange(value)}
             >
-              {(projects || []).map((p) => (
-                <Option key={p.ProjectId} value={String(p.ProjectId)}>
-                  {p.ProjectName}
+              {(works || []).map((w) => (
+                <Option key={w.MasterWorkId} value={String(w.MasterWorkId)}>
+                  {w.WorkName}
                 </Option>
               ))}
             </Select>
@@ -189,7 +181,7 @@ export default function GenerateReportModal({
               disabled={loadingSubWorks}
             >
               <Option value="all">All Sub Works</Option>
-              {subWorksForSelectedProject.map((sw) => (
+              {subWorksForSelectedWork.map((sw) => (
                 <Option key={sw.SubWorkId} value={String(sw.SubWorkId)}>
                   {sw.SubWorkName}
                 </Option>
@@ -213,7 +205,7 @@ export default function GenerateReportModal({
 
           <Button
             loading={generating}
-            disabled={!selectedProjectId}
+            disabled={!selectedWorkId}
             onClick={handleGenerate}
           >
             Generate and Download Report
