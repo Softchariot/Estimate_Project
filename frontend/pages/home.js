@@ -9,9 +9,8 @@ import UserProfileModal from "../components/UserProfileModal";
 
 const SESSION_KEY = "werms_user";
 
-const API_BASE =
-  "https://estimate-project-omega.vercel.app" ||
-  "http://localhost:4000";
+const API_BASE = "https://estimate-project-omega.vercel.app";
+// const API_BASE = "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — drafting-paper / blueprint palette, tuned to an
@@ -574,6 +573,9 @@ export default function HomePage() {
   const [estimateLeadGroups, setEstimateLeadGroups] = useState([]);
   const [savingEstimateAdditions, setSavingEstimateAdditions] = useState(false);
   const [savingEstimateLeads, setSavingEstimateLeads] = useState(false);
+  const [savingWorkMaterials, setSavingWorkMaterials] = useState(false);
+  const [estimateAdditionsSaved, setEstimateAdditionsSaved] = useState(false);
+  const [estimateLeadsSaved, setEstimateLeadsSaved] = useState(false);
   const [calculatingLeadKey, setCalculatingLeadKey] = useState("");
   const [printSsrRegionId, setPrintSsrRegionId] = useState("");
   const [printSsrYearId, setPrintSsrYearId] = useState("");
@@ -893,6 +895,8 @@ export default function HomePage() {
       alert("Please select SSR Region, SSR Year, and SSR Category.");
       return;
     }
+    clearEstimationOutputs();
+    setEstimationTab(0);
     getCheckedItemsList();
     getCheckedItems();
     const params = {
@@ -2084,6 +2088,7 @@ export default function HomePage() {
 
   const listInsert = async (e) => {
     e.preventDefault();
+    clearEstimationOutputs();
     if (!selectedProjectId || !selectedSubWorkId) {
       alert("Please select Work and Sub Work first.");
       return;
@@ -2117,6 +2122,7 @@ export default function HomePage() {
   };
 
   const listUpdate = () => {
+    clearEstimationOutputs();
     axios
       .delete(`${API_BASE}/api/delete-selected-items`, {
         params: { deleteItems: updateSelectedItems },
@@ -2188,6 +2194,7 @@ export default function HomePage() {
   }, [selectedProjectId, selectedSubWorkId]);
 
   const handleGenerateRecapReport = async () => {
+    clearEstimationOutputs();
     if (!selectedProjectId) {
       alert("Please select a Work first.");
       return;
@@ -2224,20 +2231,87 @@ export default function HomePage() {
     }
   };
 
+  const handleGenerateRateAnalysisReport = async () => {
+    clearEstimationOutputs();
+    if (!selectedProjectId) {
+      alert("Please Select Work.");
+      return;
+    }
+
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/generate-rate-analysis-report`,
+        {
+          params: { workId: selectedProjectId },
+          responseType: "blob",
+        },
+      );
+
+      const disposition = res.headers["content-disposition"];
+      let filename = "RateAnalysis.pdf";
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate rate analysis report:", err);
+      let message = "Failed to generate the Rate Analysis report.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) message = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        message = err.response.data.message;
+      }
+      alert(message);
+    }
+  };
+
   const clearEstimatePanel = () => {
     setEstimatePanelOpen(false);
     setEstimateWorkName("");
     setEstimateRegions([]);
     setEstimateLeadGroups([]);
+    setEstimateAdditionsSaved(false);
+    setEstimateLeadsSaved(false);
   };
 
-  const handleGenerateEstimate = async () => {
+  /** Clear previous Estimation action outputs (esp. Generate Estimate panel). */
+  const clearEstimationOutputs = () => {
+    clearEstimatePanel();
+    setMessage("");
+    setGenerateReportModalOpen(false);
+  };
+
+  const handleGenerateEstimate = async (options = {}) => {
+    const { resetFlow = true } = options;
     if (!selectedProjectId) {
       alert("Please select Work first.");
       return;
     }
     setLoadingEstimate(true);
     setMessage("");
+    if (resetFlow) {
+      // Clear other button outputs; then load a fresh estimate panel.
+      setGenerateReportModalOpen(false);
+      setItemList([]);
+      setEstimateAdditionsSaved(false);
+      setEstimateLeadsSaved(false);
+    }
     try {
       const params = { workId: selectedProjectId };
       if (itemRegion) params.regionId = itemRegion;
@@ -2254,6 +2328,7 @@ export default function HomePage() {
               selectedAdditionId: r.selectedAdditionId
                 ? String(r.selectedAdditionId)
                 : "",
+              ApplyForLead: r.ApplyForLead !== false,
             }))
           : [],
       );
@@ -2301,6 +2376,16 @@ export default function HomePage() {
       prev.map((r) =>
         Number(r.SSRRegionId) === Number(regionId)
           ? { ...r, selectedAdditionId: additionId }
+          : r,
+      ),
+    );
+  };
+
+  const onEstimateApplyForLeadChange = (regionId, applyForLead) => {
+    setEstimateRegions((prev) =>
+      prev.map((r) =>
+        Number(r.SSRRegionId) === Number(regionId)
+          ? { ...r, ApplyForLead: applyForLead }
           : r,
       ),
     );
@@ -2381,6 +2466,7 @@ export default function HomePage() {
         SSRRegionId: region.SSRRegionId,
         Description: option.Description,
         Percentage: option.Percentage,
+        ApplyForLead: region.ApplyForLead !== false,
       });
     }
     if (!rows.length) {
@@ -2396,14 +2482,21 @@ export default function HomePage() {
         workId: selectedProjectId,
         rows,
       });
-      setMessage(
-        `Saved ${res.data?.count || rows.length} standard addition(s).`,
-      );
+      const successMsg = `Standard Additions saved successfully (${res.data?.count || rows.length} row(s)). You can now save Lead Details.`;
+      setEstimateAdditionsSaved(true);
+      // If there are no lead materials, unlock Work Material next.
+      if (!estimateLeadGroups.length) {
+        setEstimateLeadsSaved(true);
+      } else {
+        setEstimateLeadsSaved(false);
+      }
+      setMessage(successMsg);
+      alert(successMsg);
     } catch (err) {
       console.error(err);
-      setMessage(
-        `Standard addition save failed: ${err.response?.data?.message || err.message}`,
-      );
+      const failMsg = `Standard addition save failed: ${err.response?.data?.message || err.message}`;
+      setMessage(failMsg);
+      alert(failMsg);
     } finally {
       setSavingEstimateAdditions(false);
     }
@@ -2452,19 +2545,61 @@ export default function HomePage() {
         workId: selectedProjectId,
         rows,
       });
-      setMessage(`Saved ${res.data?.count || rows.length} lead row(s).`);
-      await handleGenerateEstimate();
+      const successMsg = `Lead Details saved successfully (${res.data?.count || rows.length} row(s)). You can now Populate / Update Work Material.`;
+      setEstimateLeadsSaved(true);
+      setMessage(successMsg);
+      alert(successMsg);
+      await handleGenerateEstimate({ resetFlow: false });
     } catch (err) {
       console.error(err);
-      setMessage(
-        `Lead save failed: ${err.response?.data?.message || err.message}`,
-      );
+      const failMsg = `Lead save failed: ${err.response?.data?.message || err.message}`;
+      setMessage(failMsg);
+      alert(failMsg);
     } finally {
       setSavingEstimateLeads(false);
     }
   };
 
+  const populateWorkMaterials = async () => {
+    if (!selectedProjectId) {
+      alert("Please select Work first.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "Populate / update Work Material and Work Abstract rates for this work?",
+      )
+    ) {
+      return;
+    }
+
+    setSavingWorkMaterials(true);
+    setMessage("");
+    try {
+      const res = await axios.post(`${API_BASE}/api/populate-work-materials`, {
+        workId: selectedProjectId,
+      });
+      const successMsg =
+        res.data?.message ||
+        "Work Material and Work Abstract rates updated successfully.";
+      setMessage(successMsg);
+      alert(successMsg);
+      if (estimationTab === 1) {
+        getCheckedItemsList();
+        getCheckedItems();
+      }
+    } catch (err) {
+      console.error(err);
+      const failMsg = `Work Material populate failed: ${err.response?.data?.message || err.message}`;
+      setMessage(failMsg);
+      alert(failMsg);
+    } finally {
+      setSavingWorkMaterials(false);
+    }
+  };
+
   const handleGenerateMeasurementReport = async () => {
+    clearEstimationOutputs();
     try {
       const res = await axios.get(
         `${API_BASE}/api/generate-measurement-report`,
@@ -5575,7 +5710,7 @@ export default function HomePage() {
                           setItemCategories([]);
                           setSubCategories([]);
                           setItemList([]);
-                          clearEstimatePanel();
+                          clearEstimationOutputs();
                           loadSubWorks(workId);
                         }}
                         style={inputStyle}
@@ -5608,6 +5743,7 @@ export default function HomePage() {
                           setItemCategories([]);
                           setSubCategories([]);
                           setItemList([]);
+                          clearEstimationOutputs();
                         }}
                         disabled={!selectedProjectId}
                         style={inputStyle}
@@ -5757,7 +5893,12 @@ export default function HomePage() {
                     <Button
                       color="primary"
                       variant="solid"
-                      onClick={() => getCheckedItemsList()}
+                      onClick={() => {
+                        clearEstimationOutputs();
+                        setEstimationTab(1);
+                        getCheckedItemsList();
+                        getCheckedItems();
+                      }}
                       sx={{
                         marginLeft: 5,
                         fontSize: 13,
@@ -5769,7 +5910,10 @@ export default function HomePage() {
                     <Button
                       color="primary"
                       variant="solid"
-                      onClick={() => setGenerateReportModalOpen(true)}
+                      onClick={() => {
+                        clearEstimationOutputs();
+                        setGenerateReportModalOpen(true);
+                      }}
                       sx={{
                         marginLeft: 5,
                         fontSize: 13,
@@ -5801,6 +5945,23 @@ export default function HomePage() {
                       }}
                     >
                       Generate Measurement Report
+                    </Button>
+                    <Button
+                      color="primary"
+                      variant="solid"
+                      onClick={() => handleGenerateRateAnalysisReport()}
+                      sx={{
+                        marginLeft: 5,
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                      title={
+                        !selectedProjectId
+                          ? "Please Select Work"
+                          : "Rate Analysis Report"
+                      }
+                    >
+                      Rate Analysis Report
                     </Button>
                     <Button
                       color="primary"
@@ -5849,7 +6010,7 @@ export default function HomePage() {
                               key={region.SSRRegionId}
                               style={{
                                 display: "grid",
-                                gridTemplateColumns: "1fr 2fr",
+                                gridTemplateColumns: "1fr 2fr 1fr",
                                 gap: 14,
                                 alignItems: "end",
                                 padding: 12,
@@ -5904,6 +6065,61 @@ export default function HomePage() {
                                   ))}
                                 </select>
                               </Field>
+                              <Field label="Apply For Lead">
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 16,
+                                    minHeight: 42,
+                                  }}
+                                >
+                                  <label
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      fontWeight: 500,
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`applyForLead-${region.SSRRegionId}`}
+                                      checked={region.ApplyForLead !== false}
+                                      onChange={() =>
+                                        onEstimateApplyForLeadChange(
+                                          region.SSRRegionId,
+                                          true,
+                                        )
+                                      }
+                                    />
+                                    Yes
+                                  </label>
+                                  <label
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      fontWeight: 500,
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name={`applyForLead-${region.SSRRegionId}`}
+                                      checked={region.ApplyForLead === false}
+                                      onChange={() =>
+                                        onEstimateApplyForLeadChange(
+                                          region.SSRRegionId,
+                                          false,
+                                        )
+                                      }
+                                    />
+                                    No
+                                  </label>
+                                </div>
+                              </Field>
                             </div>
                           ))}
                         </div>
@@ -5912,11 +6128,26 @@ export default function HomePage() {
                             type="button"
                             onClick={saveEstimateStandardAdditions}
                             disabled={savingEstimateAdditions}
+                            title="Step 1 of 3"
                           >
                             {savingEstimateAdditions
                               ? "Saving…"
                               : "Save Standard Additions"}
                           </PrimaryButton>
+                          {estimateAdditionsSaved && (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                fontSize: 13,
+                                color: theme.colors.green,
+                              }}
+                            >
+                              Standard Additions saved.
+                              {estimateLeadGroups.length > 0
+                                ? " Lead Details is now enabled."
+                                : " Work Material is now enabled."}
+                            </div>
+                          )}
                         </div>
                       </>
                     )}
@@ -6060,14 +6291,83 @@ export default function HomePage() {
                       <PrimaryButton
                         type="button"
                         onClick={saveEstimateLeads}
-                        disabled={savingEstimateLeads}
+                        disabled={
+                          savingEstimateLeads || !estimateAdditionsSaved
+                        }
+                        title={
+                          !estimateAdditionsSaved
+                            ? "Save Standard Additions first"
+                            : "Step 2 of 3"
+                        }
                       >
                         {savingEstimateLeads
                           ? "Saving…"
                           : "Save / Update Lead Details"}
                       </PrimaryButton>
+                      {!estimateAdditionsSaved ? (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            fontSize: 13,
+                            color: theme.colors.inkSoft,
+                          }}
+                        >
+                          Save Standard Additions first to enable this step.
+                        </div>
+                      ) : estimateLeadsSaved ? (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            fontSize: 13,
+                            color: theme.colors.green,
+                          }}
+                        >
+                          Lead Details saved. Work Material is now enabled.
+                        </div>
+                      ) : null}
                     </div>
                   )}
+
+                  <Card
+                    eyebrow="Estimate · Work Material"
+                    title="Populate Work Material & Rates"
+                    subtitle="Deletes existing WorkMaterial for this Work, rebuilds from MasterMaterialComponent + WorkLead, and updates WorkAbstract IsRA / RateString / FinalRate."
+                  >
+                    <PrimaryButton
+                      type="button"
+                      onClick={populateWorkMaterials}
+                      disabled={
+                        savingWorkMaterials ||
+                        !selectedProjectId ||
+                        !estimateAdditionsSaved ||
+                        !estimateLeadsSaved
+                      }
+                      title={
+                        !estimateAdditionsSaved
+                          ? "Save Standard Additions first"
+                          : !estimateLeadsSaved
+                            ? "Save Lead Details first"
+                            : "Step 3 of 3"
+                      }
+                    >
+                      {savingWorkMaterials
+                        ? "Updating…"
+                        : "Populate / Update Work Material"}
+                    </PrimaryButton>
+                    {(!estimateAdditionsSaved || !estimateLeadsSaved) && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          fontSize: 13,
+                          color: theme.colors.inkSoft,
+                        }}
+                      >
+                        {!estimateAdditionsSaved
+                          ? "Save Standard Additions first to enable this step."
+                          : "Save / Update Lead Details first to enable this step."}
+                      </div>
+                    )}
+                  </Card>
                 </>
               )}
 
@@ -6077,6 +6377,7 @@ export default function HomePage() {
                   onChange={(_, value) => {
                     const tab = Number(value);
                     setEstimationTab(tab);
+                    clearEstimationOutputs();
                     if (tab === 1) {
                       if (!selectedProjectId || !selectedSubWorkId) {
                         alert("Please select Work and Sub Work first.");

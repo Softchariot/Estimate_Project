@@ -169,6 +169,18 @@ async function ensureWorkAbstractSchema() {
       ADD COLUMN IF NOT EXISTS "WorkId" integer
   `);
   await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "IsRA" boolean NOT NULL DEFAULT false
+  `);
+  await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "RateString" character varying
+  `);
+  await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "FinalRate" numeric
+  `);
+  await pool.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -183,7 +195,7 @@ async function ensureWorkAbstractSchema() {
   // Do not auto-migrate ProjectId -> WorkId: MasterWorkId can collide with
   // historical MasterProject ids, which would mix old project abstracts into
   // the Estimation Checked Items List.
-  console.log("WorkAbstract schema ensured (WorkId column).");
+  console.log("WorkAbstract schema ensured (WorkId, IsRA, RateString, FinalRate).");
 }
 
 /** Ensure MasterWork.CreationDate exists for Work Master. */
@@ -2904,26 +2916,35 @@ app.get("/api/generate-report", async (req, res) => {
         SELECT
           sw."SubWorkId",
           sw."SubWorkName",
+          wa."WorkAbstractId",
+          wa."Sequence",
+          wa."FinalRate",
+          wa."RateString",
+          wa."IsRA",
           i."ItemId",
           i."ItemNumber",
           i."ItemDescription",
           i."RegionId",
           i."CategoryId",
           u."UnitShortName",
-          i."CompletedRate",
-          SUM(wm."Quantity") AS "Quantity"
-        FROM "MasterItem" i
-        JOIN "WorkAbstract" wa ON wa."ItemId" = i."ItemId"
-        JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
-        JOIN "WorkMeasurement" wm ON wa."WorkAbstractId" = wm."WorkAbstractId"
-        JOIN "MasterSubWork" sw ON wa."SubWorkId" = sw."SubWorkId"
+          COALESCE(SUM(wm."Quantity"), 0) AS "Quantity"
+        FROM "WorkAbstract" wa
+        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+        INNER JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
+        LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+        LEFT JOIN "WorkMeasurement" wm ON wm."WorkAbstractId" = wa."WorkAbstractId"
         WHERE wa."WorkId" = $1
         ${subWorkFilter}
         GROUP BY
-          sw."SubWorkId", sw."SubWorkName", i."ItemId", i."ItemNumber",
-          i."ItemDescription", i."RegionId", i."CategoryId",
-          u."UnitShortName", i."CompletedRate"
-        ORDER BY sw."SubWorkName", MIN(wa."Sequence") NULLS LAST, i."ItemNumber"
+          sw."SubWorkId", sw."SubWorkName",
+          wa."WorkAbstractId", wa."Sequence", wa."FinalRate", wa."RateString", wa."IsRA",
+          i."ItemId", i."ItemNumber", i."ItemDescription", i."RegionId", i."CategoryId",
+          u."UnitShortName"
+        ORDER BY
+          COALESCE(sw."Sequence", 999999) ASC,
+          sw."SubWorkName" ASC,
+          COALESCE(wa."Sequence", 999999) ASC,
+          wa."WorkAbstractId" ASC
       `;
 
     const { rows } = await pool.query(query, params);
@@ -3002,7 +3023,9 @@ app.get("/api/generate-report", async (req, res) => {
         ItemNumber: row.ItemNumber,
         ItemDescription: row.ItemDescription,
         UnitShortName: row.UnitShortName,
-        CompletedRate: row.CompletedRate,
+        FinalRate: Number(row.FinalRate || 0),
+        RateString: row.RateString || "",
+        IsRA: Boolean(row.IsRA),
         Quantity: row.Quantity,
       });
     }
@@ -3078,12 +3101,16 @@ app.get("/api/generate-report", async (req, res) => {
       group.items.forEach((item) => {
         const isParent = Boolean(item.isParentHeading);
         const quantity = isParent ? 0 : Number(item.Quantity || 0);
-        const rate = isParent ? 0 : Number(item.CompletedRate || 0);
+        const rate = isParent ? 0 : Number(item.FinalRate || 0);
         const amount = Math.round(quantity * rate);
         if (!isParent) subWorkTotal += amount;
 
         const itemNoText = item.ItemNumber || "";
-        const descText = item.ItemDescription || "";
+        const rateString = String(item.RateString || "").trim();
+        const baseDesc = String(item.ItemDescription || "").trim();
+        const descText = isParent
+          ? baseDesc
+          : [baseDesc, rateString].filter(Boolean).join("\n");
 
         doc.font(isParent ? "Helvetica-Bold" : "Helvetica").fontSize(9);
         const itemNoHeight = doc.heightOfString(itemNoText, {
@@ -3157,6 +3184,346 @@ app.get("/api/generate-report", async (req, res) => {
       doc.font("Helvetica-Oblique").fontSize(9);
       doc.text(words, colX.itemNo, doc.y, { width: 515 });
     });
+
+    doc.end();
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) {
+      res.status(500).json({ message: err.message });
+    }
+  }
+});
+
+/**
+ * Rate Analysis Report — one block per WorkAbstract where IsRA = true,
+ * using WorkMaterial lead/component lines (layout matches RateAnalysis.pdf).
+ */
+app.get("/api/generate-rate-analysis-report", async (req, res) => {
+  const workId = Number(req.query.workId || req.query.projectId);
+  if (!workId) {
+    return res.status(400).json({ message: "Please Select Work." });
+  }
+
+  try {
+    const workResult = await pool.query(
+      `SELECT "MasterWorkId", "WorkName"
+       FROM "MasterWork"
+       WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    if (!workResult.rows[0]) {
+      return res.status(404).json({ message: "Selected Work was not found." });
+    }
+    const workName = workResult.rows[0].WorkName || "Untitled Work";
+
+    const abstracts = await pool.query(
+      `SELECT wa."WorkAbstractId", wa."WorkId", wa."SubWorkId", wa."ItemId",
+              wa."Sequence", wa."IsRA", wa."RateString", wa."FinalRate",
+              i."ItemNumber", i."ItemDescription", i."PageNumber",
+              i."CompletedRate", i."RegionId", i."SSRYearId",
+              u."UnitShortName",
+              y."Year" AS "SSRYear",
+              r."SSRRegionShortName"
+       FROM "WorkAbstract" wa
+       INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+       LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+       WHERE wa."WorkId" = $1
+         AND wa."IsRA" = true
+       ORDER BY wa."WorkId" ASC, wa."SubWorkId" ASC, wa."Sequence" ASC,
+                wa."WorkAbstractId" ASC`,
+      [workId],
+    );
+
+    if (!abstracts.rows.length) {
+      return res.status(404).json({
+        message:
+          "No Rate Analysis items (IsRA = true) found for the selected Work.",
+      });
+    }
+
+    const additionsResult = await pool.query(
+      `SELECT "SSRRegionId", "Description", "Percentage", "ApplyForLead"
+       FROM "WorkStandardAddition"
+       WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    const additionByRegion = new Map(
+      additionsResult.rows.map((row) => [
+        Number(row.SSRRegionId),
+        {
+          Description: row.Description || "",
+          Percentage: Number(row.Percentage) || 0,
+          ApplyForLead: row.ApplyForLead !== false,
+        },
+      ]),
+    );
+
+    const ssrYears = [
+      ...new Set(
+        abstracts.rows.map((r) => r.SSRYear).filter((y) => y != null && y !== ""),
+      ),
+    ];
+    const ssrYearLabel = ssrYears.length ? ssrYears.join(", ") : "—";
+
+    const money2 = (n) =>
+      Number(n || 0).toLocaleString("en-IN", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    const rs = (n) => `Rs.${money2(n)}`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${String(workName).replace(/[^\w\-]+/g, "_")}_RateAnalysis.pdf"`,
+    );
+
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
+    doc.pipe(res);
+
+    const pageBottom = doc.page.height - doc.page.margins.bottom;
+    const left = 40;
+    const right = 555;
+    const width = right - left;
+
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > pageBottom - 30) {
+        doc.addPage();
+        return true;
+      }
+      return false;
+    };
+
+    const drawRule = () => {
+      doc
+        .moveTo(left, doc.y)
+        .lineTo(right, doc.y)
+        .stroke();
+      doc.moveDown(0.35);
+    };
+
+    // Header
+    doc.font("Helvetica-Bold").fontSize(11);
+    doc.text(`Name of Work:  ${workName}`, left, doc.y, { width });
+    doc.moveDown(0.6);
+    doc.font("Helvetica-Bold").fontSize(13);
+    doc.text("Rate Analysis Report", left, doc.y, {
+      width,
+      align: "center",
+    });
+    doc.moveDown(0.4);
+    doc.font("Helvetica-Bold").fontSize(10);
+    doc.text(`SSR YEAR ${ssrYearLabel}`, left, doc.y, {
+      width,
+      align: "center",
+    });
+    doc.moveDown(0.8);
+
+    let raNo = 0;
+    for (const abstract of abstracts.rows) {
+      raNo += 1;
+      const itemId = Number(abstract.ItemId);
+      const basicRate = Number(abstract.CompletedRate) || 0;
+      const unit = abstract.UnitShortName || "";
+      const itemNumber = abstract.ItemNumber || "";
+      const pageNumber =
+        abstract.PageNumber === null || abstract.PageNumber === undefined
+          ? ""
+          : String(abstract.PageNumber);
+      const description = abstract.ItemDescription || "";
+      const regionId = Number(abstract.RegionId);
+      const addition = additionByRegion.get(regionId) || null;
+
+      const materials = await pool.query(
+        `SELECT wm."Sequence", wm."Component", wm."LeadDistanceKm", wm."Lead",
+                wm."Amount", wm."UnitId",
+                m."MaterialShortDescription", m."MaterialDescription",
+                u."UnitShortName"
+         FROM "WorkMaterial" wm
+         LEFT JOIN "MasterMaterial" m ON m."MaterialId" = wm."MaterialId"
+         LEFT JOIN "MasterUnit" u ON u."UnitId" = wm."UnitId"
+         WHERE wm."WorkId" = $1
+           AND wm."ItemId" = $2
+         ORDER BY COALESCE(wm."Sequence", 999999) ASC, wm."WorkMaterialId" ASC`,
+        [workId, itemId],
+      );
+
+      ensureSpace(120);
+      doc.font("Helvetica-Bold").fontSize(10);
+      doc.text(`R.A. NO. : ${raNo} - ${description}`, left, doc.y, {
+        width,
+        align: "justify",
+      });
+      doc.moveDown(0.35);
+
+      const regionShortName = String(
+        abstract.SSRRegionShortName || "",
+      ).trim();
+      const metaLeft = `INo${itemNumber}${pageNumber ? `, PgNo ${pageNumber}` : ""}${
+        regionShortName ? ` ( ${regionShortName} )` : ""
+      }`;
+      const metaRight = `Basic Rate.......  ${money2(basicRate)} / ${unit}`;
+      doc.font("Helvetica").fontSize(9);
+      const metaY = doc.y;
+      doc.text(metaLeft, left, metaY, { width: width * 0.55 });
+      doc.text(metaRight, left + width * 0.55, metaY, {
+        width: width * 0.45,
+        align: "right",
+      });
+      doc.y = Math.max(doc.y, metaY + 12);
+      doc.moveDown(0.45);
+
+      // Column headers for lead charges
+      const colMat = left;
+      const colQty = left + 175;
+      const colDist = left + 275;
+      const colLead = left + 355;
+      const colAmt = left + 445;
+
+      ensureSpace(40);
+      doc.font("Helvetica-Bold").fontSize(9);
+      const hdrY = doc.y;
+      doc.text("Add For Lead Charges", colMat, hdrY, { width: 170 });
+      doc.text("Qty. / Unit", colQty, hdrY, { width: 95 });
+      doc.text("Distance", colDist, hdrY, { width: 75 });
+      doc.text("Lead Charge", colLead, hdrY, { width: 85 });
+      doc.y = hdrY + 12;
+      doc.moveDown(0.2);
+
+      let sumAmount = 0;
+      doc.font("Helvetica").fontSize(9);
+      if (!materials.rows.length) {
+        doc.text("No WorkMaterial rows for this item.", left, doc.y, {
+          width,
+        });
+        doc.moveDown(0.4);
+      } else {
+        for (const mat of materials.rows) {
+          ensureSpace(28);
+          const matName =
+            mat.MaterialShortDescription ||
+            mat.MaterialDescription ||
+            `Material ${mat.MaterialId || ""}`;
+          const component = Number(mat.Component) || 0;
+          const matUnit = mat.UnitShortName || "";
+          const distance =
+            mat.LeadDistanceKm === null || mat.LeadDistanceKm === undefined
+              ? ""
+              : `${money2(mat.LeadDistanceKm)} Km.`;
+          const lead = Number(mat.Lead) || 0;
+          const amount = Number(mat.Amount) || 0;
+          sumAmount += amount;
+
+          const rowY = doc.y;
+          const matHeight = doc.heightOfString(matName, { width: 165 });
+          doc.text(matName, colMat, rowY, { width: 165 });
+          doc.text(`${money2(component)} / ${matUnit}`, colQty, rowY, {
+            width: 95,
+          });
+          doc.text(distance, colDist, rowY, { width: 75 });
+          doc.text(rs(lead), colLead, rowY, { width: 85 });
+          doc.text(rs(amount), colAmt, rowY, { width: 70, align: "right" });
+          doc.y = rowY + Math.max(matHeight, 12) + 4;
+        }
+      }
+
+      const subTotal = basicRate + sumAmount;
+      let additionAmount = 0;
+      let additionLabel = "";
+      if (addition && Number(addition.Percentage)) {
+        const percentage = Number(addition.Percentage) || 0;
+        if (addition.ApplyForLead) {
+          // % on Basic + Lead Amount
+          additionAmount = subTotal * (percentage / 100);
+          additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}% Including Lead Charges`;
+        } else {
+          // Present logic: % on Basic Rate only
+          additionAmount = basicRate * (percentage / 100);
+          additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}%`;
+        }
+      }
+
+      const totalAmount = subTotal + additionAmount;
+      const rateValue = Number(totalAmount.toFixed(2));
+
+      ensureSpace(90);
+      drawRule();
+      doc.font("Helvetica-Bold").fontSize(9);
+      {
+        const y = doc.y;
+        doc.text("Sub Total", left, y, { width: width * 0.65 });
+        doc.text(rs(subTotal), left + width * 0.65, y, {
+          width: width * 0.35,
+          align: "right",
+        });
+        doc.y = y + 12;
+      }
+      doc.moveDown(0.2);
+      drawRule();
+
+      if (additionLabel) {
+        doc.font("Helvetica").fontSize(9);
+        const labelWidth = width * 0.65;
+        const labelHeight = doc.heightOfString(additionLabel, {
+          width: labelWidth,
+        });
+        ensureSpace(labelHeight + 20);
+        {
+          const y = doc.y;
+          doc.text(additionLabel, left, y, {
+            width: labelWidth,
+            align: "left",
+          });
+          doc.text(rs(additionAmount), left + labelWidth, y, {
+            width: width * 0.35,
+            align: "right",
+          });
+          doc.y = y + Math.max(labelHeight, 12);
+        }
+        doc.moveDown(0.2);
+        drawRule();
+      }
+
+      doc.font("Helvetica-Bold").fontSize(9);
+      {
+        const y = doc.y;
+        doc.text("Total Amount", left, y, { width: width * 0.65 });
+        doc.text(rs(totalAmount), left + width * 0.65, y, {
+          width: width * 0.35,
+          align: "right",
+        });
+        doc.y = y + 12;
+      }
+      doc.moveDown(0.2);
+      drawRule();
+      {
+        const y = doc.y;
+        doc.text("Rate", left, y, { width: width * 0.45 });
+        doc.text(`${rs(rateValue)} / ${unit}`, left + width * 0.45, y, {
+          width: width * 0.55,
+          align: "right",
+        });
+        doc.y = y + 12;
+      }
+      doc.moveDown(0.2);
+      drawRule();
+      doc.moveDown(0.7);
+    }
+
+    // Page numbers
+    const range = doc.bufferedPageRange();
+    for (let i = 0; i < range.count; i += 1) {
+      doc.switchToPage(range.start + i);
+      doc.font("Helvetica").fontSize(8);
+      doc.text(
+        `Page ${i + 1} of ${range.count} of Rate Analysis`,
+        left,
+        doc.page.height - 30,
+        { width, align: "center" },
+      );
+    }
 
     doc.end();
   } catch (err) {
@@ -3899,11 +4266,12 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
   }
 });
 
-/** Keep WorkStandardAddition / WorkLead serials in sync after bulk imports. */
+/** Keep WorkStandardAddition / WorkLead / WorkMaterial serials in sync after bulk imports. */
 async function ensureWorkEstimateSequences() {
   for (const [table, column] of [
     ["WorkStandardAddition", "WorkStandardAdditionId"],
     ["WorkLead", "WorkLeadId"],
+    ["WorkMaterial", "WorkMaterialId"],
   ]) {
     const seqRes = await pool.query(
       `SELECT pg_get_serial_sequence($1, $2) AS seq`,
@@ -4135,7 +4503,7 @@ app.get("/api/generate-estimate", async (req, res) => {
       if (!additions.rows.length) continue;
 
       const existing = await pool.query(
-        `SELECT "WorkStandardAdditionId", "Description", "Percentage"
+        `SELECT "WorkStandardAdditionId", "Description", "Percentage", "ApplyForLead"
          FROM "WorkStandardAddition"
          WHERE "MasterWorkId" = $1 AND "SSRRegionId" = $2
          ORDER BY "WorkStandardAdditionId" ASC
@@ -4144,6 +4512,7 @@ app.get("/api/generate-estimate", async (req, res) => {
       );
 
       let selectedAdditionId = "";
+      let applyForLead = true;
       if (existing.rows[0]) {
         const match = additions.rows.find(
           (a) =>
@@ -4153,6 +4522,7 @@ app.get("/api/generate-estimate", async (req, res) => {
         selectedAdditionId = match
           ? String(match.MasterStandardAdditionId)
           : "";
+        applyForLead = existing.rows[0].ApplyForLead !== false;
       }
 
       regions.push({
@@ -4160,6 +4530,7 @@ app.get("/api/generate-estimate", async (req, res) => {
         SSRRegionName: region.SSRRegionName,
         SSRRegionShortName: region.SSRRegionShortName,
         selectedAdditionId,
+        ApplyForLead: applyForLead,
         options: additions.rows,
       });
     }
@@ -4356,9 +4727,19 @@ app.post("/api/work-leads", async (req, res) => {
           { status: 400 },
         );
       }
-      if (!row.MaterialUnitId) {
+
+      const materialMeta = await client.query(
+        `SELECT "MaterialUnitId"
+         FROM "MasterMaterial"
+         WHERE "MaterialId" = $1`,
+        [Number(row.MaterialId)],
+      );
+      const materialUnitId = Number(materialMeta.rows[0]?.MaterialUnitId);
+      if (!materialUnitId) {
         throw Object.assign(
-          new Error(`Row ${i + 1}: MaterialUnitId is required.`),
+          new Error(
+            `Row ${i + 1}: MaterialUnitId not found on MasterMaterial.`,
+          ),
           { status: 400 },
         );
       }
@@ -4394,7 +4775,7 @@ app.post("/api/work-leads", async (req, res) => {
           Number(workId),
           Number(row.MaterialId),
           Number(leadValue),
-          Number(row.MaterialUnitId),
+          materialUnitId,
           row.QuaryName ? String(row.QuaryName).trim() : null,
           row.Remarks ? String(row.Remarks).trim() : null,
           Number(row.LeadDistanceKm),
@@ -4452,17 +4833,25 @@ app.post("/api/work-standard-additions", async (req, res) => {
           { status: 400 },
         );
       }
+      const applyForLead =
+        row.ApplyForLead === false ||
+        row.ApplyForLead === "false" ||
+        row.ApplyForLead === 0 ||
+        row.ApplyForLead === "0"
+          ? false
+          : true;
       const result = await client.query(
         `INSERT INTO "WorkStandardAddition"
-         ("MasterWorkId", "SSRRegionId", "Description", "Percentage")
-         VALUES ($1, $2, $3, $4)
+         ("MasterWorkId", "SSRRegionId", "Description", "Percentage", "ApplyForLead")
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING "WorkStandardAdditionId", "MasterWorkId", "SSRRegionId",
-                   "Description", "Percentage"`,
+                   "Description", "Percentage", "ApplyForLead"`,
         [
           Number(workId),
           Number(regionId),
           String(description).trim(),
           Number(percentage),
+          applyForLead,
         ],
       );
       inserted.push(result.rows[0]);
@@ -4470,6 +4859,237 @@ app.post("/api/work-standard-additions", async (req, res) => {
 
     await client.query("COMMIT");
     return res.status(201).json({ data: inserted, count: inserted.length });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Populate / update WorkMaterial and WorkAbstract rates for a Work.
+ * Requires WorkStandardAddition (and WorkLead when materials need lead).
+ */
+app.post("/api/populate-work-materials", async (req, res) => {
+  const { workId } = req.body || {};
+  const resolvedWorkId = Number(workId);
+  if (!resolvedWorkId) {
+    return res.status(400).json({ message: "workId is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureWorkEstimateSequences();
+    await client.query("BEGIN");
+
+    const workRow = await client.query(
+      `SELECT "MasterWorkId", "WorkName" FROM "MasterWork" WHERE "MasterWorkId" = $1`,
+      [resolvedWorkId],
+    );
+    if (!workRow.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Selected Work was not found." });
+    }
+
+    const additionsResult = await client.query(
+      `SELECT "WorkStandardAdditionId", "SSRRegionId", "Percentage", "ApplyForLead"
+       FROM "WorkStandardAddition"
+       WHERE "MasterWorkId" = $1`,
+      [resolvedWorkId],
+    );
+    if (!additionsResult.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message:
+          "Save Work Standard Additions for this work before populating Work Material.",
+      });
+    }
+    const additionByRegion = new Map(
+      additionsResult.rows.map((row) => [
+        Number(row.SSRRegionId),
+        {
+          WorkStandardAdditionId: Number(row.WorkStandardAdditionId),
+          Percentage: Number(row.Percentage) || 0,
+          ApplyForLead: row.ApplyForLead !== false,
+        },
+      ]),
+    );
+
+    const leadsResult = await client.query(
+      `SELECT "MaterialId", "LeadDistanceKm", "Lead"
+       FROM "WorkLead"
+       WHERE "MasterWorkId" = $1`,
+      [resolvedWorkId],
+    );
+    const leadByMaterial = new Map(
+      leadsResult.rows.map((row) => [
+        Number(row.MaterialId),
+        {
+          LeadDistanceKm:
+            row.LeadDistanceKm === null || row.LeadDistanceKm === undefined
+              ? null
+              : Number(row.LeadDistanceKm),
+          Lead:
+            row.Lead === null || row.Lead === undefined
+              ? 0
+              : Number(row.Lead) || 0,
+        },
+      ]),
+    );
+
+    await client.query(`DELETE FROM "WorkMaterial" WHERE "WorkId" = $1`, [
+      resolvedWorkId,
+    ]);
+
+    const abstracts = await client.query(
+      `SELECT wa."WorkAbstractId", wa."WorkId", wa."SubWorkId", wa."ItemId",
+              wa."Sequence", i."RegionId", i."CompletedRate"
+       FROM "WorkAbstract" wa
+       INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+       WHERE wa."WorkId" = $1
+       ORDER BY wa."WorkId" ASC, wa."SubWorkId" ASC, wa."Sequence" ASC,
+                wa."WorkAbstractId" ASC`,
+      [resolvedWorkId],
+    );
+
+    let rateAnalysisNo = 0;
+    let materialsInserted = 0;
+    let abstractsUpdated = 0;
+
+    const formatNum = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "0";
+      return String(Number(n.toFixed(4)));
+    };
+
+    for (const abstract of abstracts.rows) {
+      const itemId = Number(abstract.ItemId);
+      const regionId = Number(abstract.RegionId);
+      const completedRate = Number(abstract.CompletedRate) || 0;
+      const addition = additionByRegion.get(regionId);
+      if (!addition) {
+        throw Object.assign(
+          new Error(
+            `No Work Standard Addition found for region of ItemId ${itemId}. Save standard additions first.`,
+          ),
+          { status: 400 },
+        );
+      }
+
+      const percentage = Number(addition.Percentage) || 0;
+      const applyForLead = addition.ApplyForLead !== false;
+
+      const components = await client.query(
+        `SELECT mc."MaterialId",
+                mc."MaterialComponent",
+                m."ConversionFactor",
+                m."MaterialUnitId"
+         FROM "MasterMaterialComponent" mc
+         INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
+         WHERE mc."ItemId" = $1
+         ORDER BY mc."MaterialComponentId" ASC`,
+        [itemId],
+      );
+
+      let isRA = false;
+      let rateString = "";
+      let finalRate = completedRate;
+
+      if (!components.rows.length) {
+        isRA = false;
+        if (applyForLead) {
+          finalRate =
+            completedRate + completedRate * (percentage / 100);
+          rateString = `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`;
+        } else {
+          finalRate = completedRate;
+          rateString = `Final Rate = (${formatNum(completedRate)})`;
+        }
+      } else {
+        isRA = true;
+        rateAnalysisNo += 1;
+        rateString = `Rate Analysis No ${rateAnalysisNo}`;
+
+        let sumAmount = 0;
+        let materialSequence = 0;
+        for (const comp of components.rows) {
+          materialSequence += 1;
+          const materialId = Number(comp.MaterialId);
+          const rawComponent = Number(comp.MaterialComponent) || 0;
+          const conversionFactor = Number(comp.ConversionFactor) || 0;
+          const componentValue = Number(
+            (rawComponent * conversionFactor).toFixed(4),
+          );
+          const unitId = Number(comp.MaterialUnitId) || null;
+          const leadRow = leadByMaterial.get(materialId);
+          const leadDistanceKmRaw = leadRow ? leadRow.LeadDistanceKm : null;
+          const leadRaw = leadRow ? Number(leadRow.Lead) || 0 : 0;
+          const leadDistanceKm =
+            leadDistanceKmRaw === null ||
+            leadDistanceKmRaw === undefined ||
+            !Number.isFinite(Number(leadDistanceKmRaw))
+              ? null
+              : Number(Number(leadDistanceKmRaw).toFixed(2));
+          const lead = Number(Number(leadRaw).toFixed(2));
+          const amount = Number((componentValue * lead).toFixed(2));
+          sumAmount += amount;
+
+          await client.query(
+            `INSERT INTO "WorkMaterial"
+             ("WorkId", "ItemId", "Sequence", "MaterialId",
+              "Component", "UnitId", "LeadDistanceKm", "Lead", "Amount", "Remarks")
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              resolvedWorkId,
+              itemId,
+              materialSequence,
+              materialId,
+              componentValue,
+              unitId,
+              leadDistanceKm,
+              lead,
+              amount,
+              null,
+            ],
+          );
+          materialsInserted += 1;
+        }
+
+        if (applyForLead) {
+          finalRate =
+            completedRate +
+            (sumAmount + sumAmount * (percentage / 100));
+        } else {
+          finalRate = completedRate + sumAmount;
+        }
+      }
+
+      await client.query(
+        `UPDATE "WorkAbstract"
+         SET "IsRA" = $1,
+             "RateString" = $2,
+             "FinalRate" = $3
+         WHERE "WorkAbstractId" = $4`,
+        [isRA, rateString, finalRate, Number(abstract.WorkAbstractId)],
+      );
+      abstractsUpdated += 1;
+    }
+
+    await client.query("COMMIT");
+    return res.status(200).json({
+      message: `Updated ${abstractsUpdated} WorkAbstract row(s); inserted ${materialsInserted} WorkMaterial row(s).`,
+      abstractsUpdated,
+      materialsInserted,
+      rateAnalysisCount: rateAnalysisNo,
+    });
   } catch (error) {
     try {
       await client.query("ROLLBACK");

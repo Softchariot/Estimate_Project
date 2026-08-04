@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 
-const API_BASE =
-  "https://estimate-project-omega.vercel.app" ||
-  "http://localhost:4000";
+const API_BASE = "https://estimate-project-omega.vercel.app";
+// const API_BASE = "http://localhost:4000";
 const SESSION_KEY = "werms_user";
 
 const cardStyle = {
@@ -158,6 +157,16 @@ export default function LoginPage() {
           <h1 style={{ margin: "0 0 8px", fontSize: 28 }}>
             SoftChariot Login
           </h1>
+          <p
+            style={{
+              margin: "0 0 8px",
+              color: "#5d6c7a",
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+          >
+            Version 1.01 Release 04 Aug 26
+          </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization
           </p>
