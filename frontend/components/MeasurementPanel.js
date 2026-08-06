@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  "http://localhost:4000";
-
 /** Evaluate a math string like "3.5+2.1*1.8" safely. */
 function calcExpr(expr) {
   try {
@@ -94,7 +90,11 @@ function mapDbRows(dbRows) {
   });
 }
 
-function MeasurementPanel({ item, projectId, subWorkId }) {
+function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
+  const apiBase =
+    API_BASE ||
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    "http://localhost:4000";
   const [rows, setRows] = useState(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState({});
@@ -103,7 +103,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
   const [dragLocalId, setDragLocalId] = useState(null);
 
   const reloadRows = async () => {
-    const res = await axios.get(`${API_BASE}/api/measurements`, {
+    const res = await axios.get(`${apiBase}/api/measurements`, {
       params: { workAbstractId: item.WorkAbstractId },
     });
     const dbRows = Array.isArray(res.data?.data) ? res.data.data : [];
@@ -111,12 +111,12 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
   };
 
   useEffect(() => {
-    if (!projectId || !subWorkId || !item?.WorkAbstractId) {
+    if (!item?.WorkAbstractId) {
       setRows([{ ...measurementRowBase, localId: uid() }]);
       return;
     }
     axios
-      .get(`${API_BASE}/api/measurements`, {
+      .get(`${apiBase}/api/measurements`, {
         params: { workAbstractId: item.WorkAbstractId },
       })
       .then((res) => {
@@ -127,7 +127,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
         console.error("Failed to load measurements:", err);
         setRows([{ ...measurementRowBase, localId: uid() }]);
       });
-  }, [item?.WorkAbstractId, projectId, subWorkId]);
+  }, [item?.WorkAbstractId, apiBase]);
 
   const updateField = (localId, field, value) => {
     setRows((prev) => {
@@ -163,7 +163,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
     setReordering(true);
     setError("");
     try {
-      await axios.put(`${API_BASE}/api/measurements/reorder`, {
+      await axios.put(`${apiBase}/api/measurements/reorder`, {
         workAbstractId: item.WorkAbstractId,
         orderedIds: saved.map((r) => r.id),
       });
@@ -233,7 +233,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
     if (!window.confirm("Delete this measurement permanently?")) return;
     setDeleting((d) => ({ ...d, [localId]: true }));
     try {
-      await axios.delete(`${API_BASE}/api/measurements/${row.id}`);
+      await axios.delete(`${apiBase}/api/measurements/${row.id}`);
       await reloadRows();
     } catch (err) {
       setError(`Delete failed: ${err.response?.data?.message || err.message}`);
@@ -277,10 +277,10 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
       };
       try {
         if (row.id === null) {
-          await axios.post(`${API_BASE}/api/insert-work-measurements`, payload);
+          await axios.post(`${apiBase}/api/insert-work-measurements`, payload);
         } else {
           await axios.put(
-            `${API_BASE}/api/update-work-measurements/${row.id}`,
+            `${apiBase}/api/update-work-measurements/${row.id}`,
             payload,
           );
         }

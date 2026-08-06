@@ -165,7 +165,7 @@ export default function LoginPage() {
               fontWeight: 500,
             }}
           >
-            Version 1.02 Release 04 Aug 26
+            Version 1.03 Release 06 Aug 26
           </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization

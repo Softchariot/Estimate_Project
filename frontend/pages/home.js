@@ -6866,6 +6866,7 @@ export default function HomePage() {
                                         item={item}
                                         projectId={selectedProjectId}
                                         subWorkId={selectedSubWorkId}
+                                        API_BASE={API_BASE}
                                       />
                                     )}
                                   </Fragment>
