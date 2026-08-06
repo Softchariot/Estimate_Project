@@ -2,7 +2,17 @@ import { Fragment, useEffect, useState } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import axios from "axios";
-import { TabList, Tabs, Tab, TabPanel, Button } from "@mui/joy";
+import {
+  TabList,
+  Tabs,
+  Tab,
+  TabPanel,
+  Button,
+  Dropdown,
+  Menu,
+  MenuButton,
+  MenuItem,
+} from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
 import GenerateReportModal from "../components/GenerateReportModal";
 import UserProfileModal from "../components/UserProfileModal";
@@ -2121,16 +2131,47 @@ export default function HomePage() {
     }
   };
 
-  const listUpdate = () => {
+  const listUpdate = async () => {
     clearEstimationOutputs();
-    axios
-      .delete(`${API_BASE}/api/delete-selected-items`, {
-        params: { deleteItems: updateSelectedItems },
-      })
-      .then((res) => {
-        if (res.status === 200) alert(res.data.message);
-      })
-      .catch(console.error);
+    if (!selectedProjectId || !selectedSubWorkId) {
+      alert("Please select Work and Sub Work first.");
+      return;
+    }
+    if (!updateSelectedItems.length) {
+      alert("Please check at least one item to delete.");
+      return;
+    }
+
+    const subWorkName =
+      subWorks.find(
+        (sw) => Number(sw.SubWorkId) === Number(selectedSubWorkId),
+      )?.SubWorkName || "selected Sub Work";
+
+    const confirmMsg =
+      updateSelectedItems.length === 1
+        ? `This Item will be permanently deleted from ${subWorkName}`
+        : `These Items will be permanently deleted from ${subWorkName}`;
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      const res = await axios.delete(`${API_BASE}/api/delete-selected-items`, {
+        params: {
+          workId: selectedProjectId,
+          subWorkId: selectedSubWorkId,
+          workAbstractIds: updateSelectedItems,
+        },
+      });
+      alert(res.data?.message || "Checked item(s) deleted.");
+      setUpdateSelectedItems([]);
+      setCheckedForMeasurement(new Set());
+      getCheckedItems();
+      getCheckedItemsList();
+    } catch (err) {
+      console.error(err);
+      alert(
+        `Delete failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
   };
 
   const getCheckedItems = () => {
@@ -2179,6 +2220,17 @@ export default function HomePage() {
         setCheckedItemsList([]);
       })
       .finally(() => setLoadingCheckedItems(false));
+  };
+
+  const handleViewCheckedItems = () => {
+    if (!selectedProjectId || !selectedSubWorkId) {
+      alert("Please select Work and Sub Work first.");
+      return;
+    }
+    clearEstimationOutputs();
+    setEstimationTab(1);
+    getCheckedItemsList();
+    getCheckedItems();
   };
 
   // Auto-load checked items whenever Work + Sub Work are selected
@@ -2281,6 +2333,56 @@ export default function HomePage() {
     }
   };
 
+  const handleGenerateLeadStatementReport = async () => {
+    clearEstimationOutputs();
+    if (!selectedProjectId) {
+      alert("Please Select Work.");
+      return;
+    }
+
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/generate-lead-statement-report`,
+        {
+          params: { workId: selectedProjectId },
+          responseType: "blob",
+        },
+      );
+
+      const disposition = res.headers["content-disposition"];
+      let filename = "LeadStatement.pdf";
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate lead statement report:", err);
+      let message = "Failed to generate the Lead Statement report.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) message = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        message = err.response.data.message;
+      }
+      alert(message);
+    }
+  };
+
   const clearEstimatePanel = () => {
     setEstimatePanelOpen(false);
     setEstimateWorkName("");
@@ -2306,18 +2408,17 @@ export default function HomePage() {
     setLoadingEstimate(true);
     setMessage("");
     if (resetFlow) {
-      // Clear other button outputs; then load a fresh estimate panel.
+      // Hide previous estimate details immediately so they are not confusing
+      // while fresh data loads (also used after lead save with resetFlow: false).
+      clearEstimatePanel();
       setGenerateReportModalOpen(false);
       setItemList([]);
-      setEstimateAdditionsSaved(false);
-      setEstimateLeadsSaved(false);
+      setMessage("");
     }
     try {
-      const params = { workId: selectedProjectId };
-      if (itemRegion) params.regionId = itemRegion;
-      if (itemSsrYearId) params.ssrYearId = itemSsrYearId;
+      // Work-scoped: regions/years come from WorkAbstract checked items (not UI Sub Work filters).
       const res = await axios.get(`${API_BASE}/api/generate-estimate`, {
-        params,
+        params: { workId: selectedProjectId },
       });
       const data = res.data || {};
       setEstimateWorkName(data.work?.WorkName || "");
@@ -2445,12 +2546,8 @@ export default function HomePage() {
     }
     const rows = [];
     for (const region of estimateRegions) {
-      if (!region.selectedAdditionId) {
-        alert(
-          `Please select a standard addition for ${region.SSRRegionName || "region"}.`,
-        );
-        return;
-      }
+      // Description + Percentage is optional — skip blank regions
+      if (!region.selectedAdditionId) continue;
       const option = (region.options || []).find(
         (o) =>
           Number(o.MasterStandardAdditionId) ===
@@ -2469,11 +2566,15 @@ export default function HomePage() {
         ApplyForLead: region.ApplyForLead !== false,
       });
     }
-    if (!rows.length) {
-      alert("No standard additions available to save for this work.");
+    if (
+      !window.confirm(
+        rows.length
+          ? `Save ${rows.length} standard addition(s) for this work? Regions left blank will not be saved.`
+          : "No Description + Percentage selected. This will clear existing Work Standard Additions for this work. Continue?",
+      )
+    ) {
       return;
     }
-    if (!window.confirm("Save standard additions for this work?")) return;
 
     setSavingEstimateAdditions(true);
     setMessage("");
@@ -2545,15 +2646,18 @@ export default function HomePage() {
         workId: selectedProjectId,
         rows,
       });
+      // Refresh estimate panel after DB save completes, then notify.
+      await handleGenerateEstimate({ resetFlow: false });
       const successMsg = `Lead Details saved successfully (${res.data?.count || rows.length} row(s)). You can now Populate / Update Work Material.`;
       setEstimateLeadsSaved(true);
       setMessage(successMsg);
+      setSavingEstimateLeads(false);
       alert(successMsg);
-      await handleGenerateEstimate({ resetFlow: false });
     } catch (err) {
       console.error(err);
       const failMsg = `Lead save failed: ${err.response?.data?.message || err.message}`;
       setMessage(failMsg);
+      setSavingEstimateLeads(false);
       alert(failMsg);
     } finally {
       setSavingEstimateLeads(false);
@@ -5888,88 +5992,92 @@ export default function HomePage() {
                     </Field>
                   </div>
 
-                  <div style={{ marginTop: 18 }}>
+                  <div
+                    style={{
+                      marginTop: 18,
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      alignItems: "center",
+                    }}
+                  >
                     <PrimaryButton>View</PrimaryButton>
                     <Button
+                      type="button"
                       color="primary"
                       variant="solid"
-                      onClick={() => {
-                        clearEstimationOutputs();
-                        setEstimationTab(1);
-                        getCheckedItemsList();
-                        getCheckedItems();
-                      }}
+                      onClick={handleViewCheckedItems}
                       sx={{
-                        marginLeft: 5,
                         fontSize: 13,
                         textTransform: "none",
                       }}
                     >
                       View Checked Items
                     </Button>
+                    <Dropdown>
+                      <MenuButton
+                        type="button"
+                        color="primary"
+                        variant="solid"
+                        sx={{
+                          fontSize: 13,
+                          textTransform: "none",
+                        }}
+                      >
+                        Reports
+                      </MenuButton>
+                      <Menu
+                        placement="bottom-start"
+                        sx={{
+                          minWidth: 240,
+                          zIndex: 1300,
+                        }}
+                      >
+                        <MenuItem
+                          onClick={() => {
+                            clearEstimationOutputs();
+                            setGenerateReportModalOpen(true);
+                          }}
+                        >
+                          Generate Abstract Report
+                        </MenuItem>
+                        <MenuItem onClick={() => handleGenerateRecapReport()}>
+                          Generate Recap Report
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => handleGenerateMeasurementReport()}
+                        >
+                          Generate Measurement Report
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => handleGenerateRateAnalysisReport()}
+                          title={
+                            !selectedProjectId
+                              ? "Please Select Work"
+                              : "Rate Analysis Report"
+                          }
+                        >
+                          Rate Analysis Report
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => handleGenerateLeadStatementReport()}
+                          title={
+                            !selectedProjectId
+                              ? "Please Select Work"
+                              : "Lead Statement"
+                          }
+                        >
+                          Lead Statement
+                        </MenuItem>
+                      </Menu>
+                    </Dropdown>
                     <Button
-                      color="primary"
-                      variant="solid"
-                      onClick={() => {
-                        clearEstimationOutputs();
-                        setGenerateReportModalOpen(true);
-                      }}
-                      sx={{
-                        marginLeft: 5,
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                    >
-                      Generate Abstract Report
-                    </Button>
-                    <Button
-                      color="primary"
-                      variant="solid"
-                      onClick={() => handleGenerateRecapReport()}
-                      sx={{
-                        marginLeft: 5,
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                    >
-                      Generate Recap Report
-                    </Button>
-                    <Button
-                      color="primary"
-                      variant="solid"
-                      onClick={() => handleGenerateMeasurementReport()}
-                      sx={{
-                        marginLeft: 5,
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                    >
-                      Generate Measurement Report
-                    </Button>
-                    <Button
-                      color="primary"
-                      variant="solid"
-                      onClick={() => handleGenerateRateAnalysisReport()}
-                      sx={{
-                        marginLeft: 5,
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                      title={
-                        !selectedProjectId
-                          ? "Please Select Work"
-                          : "Rate Analysis Report"
-                      }
-                    >
-                      Rate Analysis Report
-                    </Button>
-                    <Button
+                      type="button"
                       color="primary"
                       variant="solid"
                       onClick={() => handleGenerateEstimate()}
                       disabled={!selectedProjectId || loadingEstimate}
                       sx={{
-                        marginLeft: 5,
                         fontSize: 13,
                         textTransform: "none",
                       }}
@@ -5990,7 +6098,7 @@ export default function HomePage() {
                   <Card
                     eyebrow="Estimate · Standard Addition"
                     title="Work Standard Additions"
-                    subtitle="Description + Percentage options are listed for the selected SSR Region and SSR Year."
+                    subtitle="One row per distinct SSR Region from checked items (and any previously saved WorkStandardAddition). Prior saves are pre-selected; others start blank."
                   >
                     {!estimateRegions.length ? (
                       <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -6036,7 +6144,7 @@ export default function HomePage() {
                                   }}
                                 />
                               </Field>
-                              <Field label="Description + Percentage" required>
+                              <Field label="Description + Percentage">
                                 <select
                                   value={region.selectedAdditionId || ""}
                                   onChange={(e) =>
@@ -6048,7 +6156,7 @@ export default function HomePage() {
                                   style={inputStyle}
                                 >
                                   <option value="">
-                                    Select standard addition
+                                    Select standard addition (optional)
                                   </option>
                                   {(region.options || []).map((opt) => (
                                     <option
@@ -6768,7 +6876,7 @@ export default function HomePage() {
                         </div>
                         <div style={{ marginTop: 14 }}>
                           <PrimaryButton type="button" onClick={listUpdate}>
-                            Update
+                            Delete Checked Items
                           </PrimaryButton>
                         </div>
                       </div>

@@ -428,7 +428,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
   if (rows === null) {
     return (
       <tr>
-        <td colSpan="5" style={{ ...s.cell, color: "#8fa0b5", fontSize: 13 }}>
+        <td colSpan={8} style={{ ...s.cell, color: "#8fa0b5", fontSize: 13 }}>
           Loading measurements…
         </td>
       </tr>
@@ -439,7 +439,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
 
   return (
     <tr>
-      <td colSpan="5" style={s.cell}>
+      <td colSpan={8} style={s.cell}>
         <div
           style={{
             fontSize: 11,
@@ -459,6 +459,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
           }}
         >
           Drag ⠿ to change sequence. Sequence starts at 1 for this item.
+          Empty No./L/B/H are treated as 1 when calculating quantity.
           {reordering ? " Updating sequence…" : ""}
         </div>
 
@@ -478,12 +479,14 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
           </div>
         )}
 
+        <div style={{ overflowX: "auto", minWidth: 0 }}>
         <div
           style={{
             display: "grid",
             gridTemplateColumns: s.rowGrid,
             gap: 6,
             padding: "0 10px 4px",
+            minWidth: 820,
           }}
         >
           <span style={{ ...s.colHdr, textAlign: "center" }}>Seq</span>
@@ -520,6 +523,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
               style={{
                 ...s.row,
                 gridTemplateColumns: s.rowGrid,
+                minWidth: 820,
                 ...(dragLocalId === r.localId ? s.rowDragging : null),
               }}
             >
@@ -548,14 +552,14 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
               </span>
               <input
                 type="text"
-                placeholder="Description…"
+                placeholder="Description (Optional)"
                 value={r.desc}
                 style={s.inputBase}
                 onChange={(e) => updateField(r.localId, "desc", e.target.value)}
               />
               <input
                 type="text"
-                placeholder="e.g. 3.5+2.1+1.8  or  4*(2.5+1.2)"
+                placeholder="Can Enter Expression Here"
                 value={r.meas}
                 title="Measurements expression — multiplied with No./L/B/H"
                 style={{
@@ -568,36 +572,36 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
               <input
                 type="text"
                 inputMode="decimal"
-                placeholder="1"
+                placeholder=""
                 value={r.num}
-                title="Number"
+                title="Number (empty = 1)"
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "num", e.target.value)}
               />
               <input
                 type="text"
                 inputMode="decimal"
-                placeholder="1"
+                placeholder=""
                 value={r.len}
-                title="Length"
+                title="Length (empty = 1)"
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "len", e.target.value)}
               />
               <input
                 type="text"
                 inputMode="decimal"
-                placeholder="1"
+                placeholder=""
                 value={r.brd}
-                title="Breadth"
+                title="Breadth (empty = 1)"
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "brd", e.target.value)}
               />
               <input
                 type="text"
                 inputMode="decimal"
-                placeholder="1"
+                placeholder=""
                 value={r.hgt}
-                title="Height"
+                title="Height (empty = 1)"
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "hgt", e.target.value)}
               />
@@ -622,6 +626,7 @@ function MeasurementPanel({ item, projectId, subWorkId }) {
             </div>
           );
         })}
+        </div>
 
         <div
           style={{

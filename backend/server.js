@@ -2837,27 +2837,107 @@ app.put("/api/master-units/:id", async (req, res) => {
 });
 
 app.delete("/api/delete-selected-items", async (req, res) => {
-  let { deleteItems } = req.query;
+  const workId = Number(req.query.workId || req.query.projectId);
+  const subWorkId = Number(req.query.subWorkId);
+  let rawIds = req.query.workAbstractIds || req.query.deleteItems;
 
+  if (!Array.isArray(rawIds)) {
+    rawIds = rawIds != null && rawIds !== "" ? [rawIds] : [];
+  }
+  const workAbstractIds = [
+    ...new Set(rawIds.map((id) => Number(id)).filter((id) => id > 0)),
+  ];
+
+  if (!workId || !subWorkId) {
+    return res.status(400).json({
+      message: "workId and subWorkId are required.",
+    });
+  }
+  if (!workAbstractIds.length) {
+    return res.status(400).json({
+      message: "Select at least one checked item to delete.",
+    });
+  }
+
+  const client = await pool.connect();
   try {
-    deleteItems = deleteItems.sort();
-    // deleteItems.forEach((itemId) => {
-    //   const query = await pool.query(`DELETE FROM "WorkAbstract" WHERE "ItemId" = $1`,[itemId,])
-    // })
-    let query;
-    for (const itemId of deleteItems) {
-      query = await pool.query(
-        `DELETE FROM "WorkAbstract" WHERE "ItemId" = $1`,
-        [itemId],
-      );
-      console.log("Deleted Item: ", itemId);
+    await client.query("BEGIN");
+
+    const abstracts = await client.query(
+      `SELECT "WorkAbstractId", "ItemId"
+       FROM "WorkAbstract"
+       WHERE "WorkId" = $1
+         AND "SubWorkId" = $2
+         AND "WorkAbstractId" = ANY($3::int[])`,
+      [workId, subWorkId, workAbstractIds],
+    );
+
+    if (!abstracts.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        message: "No matching checked items found for this Work and Sub Work.",
+      });
     }
 
-    return res
-      .status(200)
-      .send({ message: "Deletion of: " + deleteItems + " successful." });
+    const abstractIds = abstracts.rows.map((r) => Number(r.WorkAbstractId));
+    const itemIds = [
+      ...new Set(abstracts.rows.map((r) => Number(r.ItemId)).filter((id) => id > 0)),
+    ];
+
+    // 1) Measurements for these abstract rows only
+    await client.query(
+      `DELETE FROM "WorkMeasurement"
+       WHERE "WorkAbstractId" = ANY($1::int[])`,
+      [abstractIds],
+    );
+
+    // 2) Abstract rows for this Work + Sub Work only
+    await client.query(
+      `DELETE FROM "WorkAbstract"
+       WHERE "WorkId" = $1
+         AND "SubWorkId" = $2
+         AND "WorkAbstractId" = ANY($3::int[])`,
+      [workId, subWorkId, abstractIds],
+    );
+
+    // 3) WorkMaterial only when ItemId is no longer used by any Sub Work of this Work
+    let materialsDeleted = 0;
+    for (const itemId of itemIds) {
+      const stillUsed = await client.query(
+        `SELECT 1
+         FROM "WorkAbstract"
+         WHERE "WorkId" = $1 AND "ItemId" = $2
+         LIMIT 1`,
+        [workId, itemId],
+      );
+      if (stillUsed.rows.length > 0) continue;
+
+      const matDel = await client.query(
+        `DELETE FROM "WorkMaterial"
+         WHERE "WorkId" = $1 AND "ItemId" = $2`,
+        [workId, itemId],
+      );
+      materialsDeleted += matDel.rowCount || 0;
+    }
+
+    await renumberWorkAbstractSequences(workId, subWorkId, client);
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      message: `Deleted ${abstractIds.length} checked item(s) successfully.`,
+      deletedAbstracts: abstractIds.length,
+      materialsDeleted,
+    });
   } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
     console.error(err);
+    return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -3697,6 +3777,317 @@ app.get("/api/generate-recap-report", async (req, res) => {
   }
 });
 
+/**
+ * Lead Statement Report — portrait table grouped by SSR Region.
+ * Columns: Sr.No. | Material Name | Quarry Name | Lead Distance in Km | Lead Charges
+ */
+app.get("/api/generate-lead-statement-report", async (req, res) => {
+  const workId = Number(req.query.workId || req.query.projectId);
+  if (!workId) {
+    return res.status(400).json({ message: "Please Select Work." });
+  }
+
+  try {
+    const workResult = await pool.query(
+      `SELECT "MasterWorkId", "WorkName"
+       FROM "MasterWork"
+       WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    if (!workResult.rows[0]) {
+      return res.status(404).json({ message: "Selected Work was not found." });
+    }
+    const workName = workResult.rows[0].WorkName || "Untitled Work";
+
+    const regionResult = await pool.query(
+      `SELECT DISTINCT i."RegionId" AS "SSRRegionId",
+              r."SSRRegionName", r."SSRRegionShortName"
+       FROM "WorkAbstract" wa
+       INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+       INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+       WHERE wa."WorkId" = $1
+         AND i."RegionId" IS NOT NULL
+       ORDER BY r."SSRRegionName" ASC`,
+      [workId],
+    );
+
+    const leadGroups = [];
+    for (const region of regionResult.rows) {
+      const materialsResult = await pool.query(
+        `
+        SELECT DISTINCT ON (mc."MaterialId")
+          mc."MaterialId",
+          m."MaterialShortDescription",
+          u."UnitShortName",
+          wl."QuaryName",
+          wl."LeadDistanceKm",
+          wl."Remarks",
+          wl."Lead"
+        FROM "WorkAbstract" wa
+        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+        INNER JOIN "MasterMaterialComponent" mc ON mc."ItemId" = i."ItemId"
+        INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
+        LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
+        LEFT JOIN "WorkLead" wl
+          ON wl."MasterWorkId" = $1
+         AND wl."MaterialId" = mc."MaterialId"
+        WHERE wa."WorkId" = $1
+          AND i."RegionId" = $2
+        ORDER BY mc."MaterialId", m."MaterialShortDescription" ASC NULLS LAST
+        `,
+        [workId, region.SSRRegionId],
+      );
+
+      if (!materialsResult.rows.length) continue;
+
+      const rows = [...materialsResult.rows].sort((a, b) =>
+        String(a.MaterialShortDescription || "").localeCompare(
+          String(b.MaterialShortDescription || ""),
+        ),
+      );
+
+      leadGroups.push({
+        SSRRegionId: region.SSRRegionId,
+        SSRRegionName: region.SSRRegionName,
+        SSRRegionShortName: region.SSRRegionShortName,
+        rows,
+      });
+    }
+
+    if (!leadGroups.length) {
+      return res.status(404).json({
+        message:
+          "No lead materials found for this work. Add abstract items with material components first.",
+      });
+    }
+
+    const fmtNum = (value, digits = 2) => {
+      if (value === null || value === undefined || value === "") return "";
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "";
+      return n.toLocaleString("en-IN", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    };
+
+    const fmtLeadKm = (value) => {
+      if (value === null || value === undefined || value === "") return "";
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "";
+      const text = Number.isInteger(n) ? String(n) : fmtNum(n, 2);
+      return `${text} Km.`;
+    };
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${String(workName).replace(/[^\w\-]+/g, "_")}_LeadStatement.pdf"`,
+    );
+
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+      bufferPages: true,
+    });
+    doc.pipe(res);
+
+    const left = 40;
+    const right = doc.page.width - 40;
+    const width = right - left;
+    const pageBottom = doc.page.height - doc.page.margins.bottom;
+
+    // Portrait columns:
+    // 1 Sr.No. | 2 Material Name | 3 Quarry Name | 4 Lead Distance in Km | 5 Lead Charges
+    const col = {
+      sr: left,
+      material: left + 40,
+      quarry: left + 220,
+      leadKm: left + 355,
+      lead: left + 445,
+    };
+    const colW = {
+      sr: 40,
+      material: 180,
+      quarry: 135,
+      leadKm: 90,
+      lead: right - (left + 445),
+    };
+    const xLines = [
+      left,
+      col.material,
+      col.quarry,
+      col.leadKm,
+      col.lead,
+      right,
+    ];
+
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > pageBottom - 24) {
+        doc.addPage();
+        return true;
+      }
+      return false;
+    };
+
+    const drawOuterBoxTop = (y) => {
+      doc.moveTo(left, y).lineTo(right, y).stroke();
+    };
+
+    const drawRowBorders = (yTop, yBottom) => {
+      doc.moveTo(left, yBottom).lineTo(right, yBottom).stroke();
+      for (const x of xLines) {
+        doc.moveTo(x, yTop).lineTo(x, yBottom).stroke();
+      }
+    };
+
+    const drawPageHeader = () => {
+      doc.font("Helvetica-Bold").fontSize(14);
+      doc.text("Lead Statement", left, doc.y, { width, align: "center" });
+      doc.moveDown(0.55);
+      doc.font("Helvetica-Bold").fontSize(10);
+      doc.text(`Name of Work : ${workName}`, left, doc.y, { width });
+      doc.moveDown(0.7);
+    };
+
+    const drawColumnHeader = () => {
+      const pad = 4;
+      const headerLines = [
+        { x: col.sr, w: colW.sr, t: "Sr.No.", align: "center" },
+        { x: col.material, w: colW.material, t: "Material Name", align: "left" },
+        { x: col.quarry, w: colW.quarry, t: "Quarry Name", align: "left" },
+        {
+          x: col.leadKm,
+          w: colW.leadKm,
+          t: "Lead Distance\n(in Km.)",
+          align: "center",
+        },
+        {
+          x: col.lead,
+          w: colW.lead,
+          t: "Lead Charges\n(In Rs.)",
+          align: "center",
+        },
+      ];
+      const h = Math.max(
+        28,
+        ...headerLines.map(
+          (c) => doc.heightOfString(c.t, { width: c.w - pad * 2 }) + pad * 2,
+        ),
+      );
+      const yTop = doc.y;
+      drawOuterBoxTop(yTop);
+      doc.font("Helvetica-Bold").fontSize(8);
+      for (const c of headerLines) {
+        doc.text(c.t, c.x + pad, yTop + pad, {
+          width: c.w - pad * 2,
+          align: c.align,
+        });
+      }
+      const yBottom = yTop + h;
+      drawRowBorders(yTop, yBottom);
+      doc.y = yBottom;
+    };
+
+    const drawRegionRow = (regionLabel) => {
+      const pad = 4;
+      const h = 18;
+      const yTop = doc.y;
+      doc.font("Helvetica-Bold").fontSize(9);
+      doc.text(regionLabel, left + pad, yTop + pad, {
+        width: width - pad * 2,
+        align: "left",
+      });
+      const yBottom = yTop + h;
+      doc.moveTo(left, yBottom).lineTo(right, yBottom).stroke();
+      doc.moveTo(left, yTop).lineTo(left, yBottom).stroke();
+      doc.moveTo(right, yTop).lineTo(right, yBottom).stroke();
+      doc.y = yBottom;
+    };
+
+    drawPageHeader();
+    drawColumnHeader();
+
+    for (const group of leadGroups) {
+      const regionLabel =
+        group.SSRRegionName || group.SSRRegionShortName || "Region";
+
+      if (ensureSpace(50)) {
+        drawPageHeader();
+        drawColumnHeader();
+      }
+      drawRegionRow(regionLabel);
+
+      let sr = 0;
+      for (const row of group.rows) {
+        sr += 1;
+        const material =
+          row.MaterialShortDescription || String(row.MaterialId || "");
+        const quarry = row.QuaryName || "";
+        const leadKm = fmtLeadKm(row.LeadDistanceKm);
+        const leadCharges = fmtNum(row.Lead, 2);
+        const pad = 3;
+
+        doc.font("Helvetica").fontSize(8);
+        const rowHeight = Math.max(
+          16,
+          doc.heightOfString(material, { width: colW.material - pad * 2 }) +
+            pad * 2,
+          doc.heightOfString(quarry, { width: colW.quarry - pad * 2 }) +
+            pad * 2,
+        );
+
+        if (ensureSpace(rowHeight + 4)) {
+          drawPageHeader();
+          drawColumnHeader();
+          drawRegionRow(`${regionLabel} (contd.)`);
+          doc.font("Helvetica").fontSize(8);
+        }
+
+        const yTop = doc.y;
+        doc.text(String(sr), col.sr + pad, yTop + pad, {
+          width: colW.sr - pad * 2,
+          align: "center",
+        });
+        doc.text(material, col.material + pad, yTop + pad, {
+          width: colW.material - pad * 2,
+        });
+        doc.text(quarry, col.quarry + pad, yTop + pad, {
+          width: colW.quarry - pad * 2,
+        });
+        doc.text(leadKm, col.leadKm + pad, yTop + pad, {
+          width: colW.leadKm - pad * 2,
+          align: "center",
+        });
+        doc.text(leadCharges, col.lead + pad, yTop + pad, {
+          width: colW.lead - pad * 2,
+          align: "right",
+        });
+        const yBottom = yTop + rowHeight;
+        drawRowBorders(yTop, yBottom);
+        doc.y = yBottom;
+      }
+    }
+
+    const pageCount = doc.bufferedPageRange().count;
+    for (let i = 0; i < pageCount; i += 1) {
+      doc.switchToPage(i);
+      doc.font("Helvetica").fontSize(8);
+      doc.text(`Page ${i + 1} of ${pageCount}`, left, doc.page.height - 28, {
+        width,
+        align: "center",
+      });
+    }
+
+    doc.end();
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) {
+      res.status(500).json({ message: err.message });
+    }
+  }
+});
+
 app.get("/api/generate-measurement-report", async (req, res) => {
   const { projectId, subWorkId } = req.query;
 
@@ -4450,41 +4841,46 @@ app.get("/api/generate-estimate", async (req, res) => {
       return res.status(404).json({ message: "Work not found." });
     }
 
-    let yearLabel = null;
-    if (ssrYearId !== undefined && ssrYearId !== null && String(ssrYearId).trim() !== "") {
-      const yearResult = await pool.query(
-        `SELECT "Year" FROM "MasterYear" WHERE "YearId" = $1`,
-        [Number(ssrYearId)],
-      );
-      yearLabel = yearResult.rows[0]?.Year || null;
-    }
-
-    const regionParams = [Number(workId)];
-    let regionFilters = `
-      WHERE wa."WorkId" = $1
-        AND i."RegionId" IS NOT NULL`;
-    if (regionId !== undefined && regionId !== null && String(regionId).trim() !== "") {
-      regionParams.push(Number(regionId));
-      regionFilters += ` AND i."RegionId" = $${regionParams.length}`;
-    }
-    if (ssrYearId !== undefined && ssrYearId !== null && String(ssrYearId).trim() !== "") {
-      regionParams.push(Number(ssrYearId));
-      regionFilters += ` AND i."SSRYearId" = $${regionParams.length}`;
-    }
-
+    // Distinct SSR regions from WorkAbstract checked items
+    // PLUS any region previously saved in WorkStandardAddition for this Work
     const regionResult = await pool.query(
-      `SELECT DISTINCT i."RegionId" AS "SSRRegionId",
-              r."SSRRegionName", r."SSRRegionShortName"
-       FROM "WorkAbstract" wa
-       INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
-       INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
-       ${regionFilters}
-       ORDER BY r."SSRRegionName" ASC`,
-      regionParams,
+      `
+      SELECT DISTINCT x."SSRRegionId", r."SSRRegionName", r."SSRRegionShortName"
+      FROM (
+        SELECT DISTINCT i."RegionId" AS "SSRRegionId"
+        FROM "WorkAbstract" wa
+        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+        WHERE wa."WorkId" = $1
+          AND i."RegionId" IS NOT NULL
+        UNION
+        SELECT DISTINCT wsa."SSRRegionId"
+        FROM "WorkStandardAddition" wsa
+        WHERE wsa."MasterWorkId" = $1
+          AND wsa."SSRRegionId" IS NOT NULL
+      ) x
+      INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = x."SSRRegionId"
+      ORDER BY r."SSRRegionName" ASC
+      `,
+      [Number(workId)],
     );
 
     const regions = [];
     for (const region of regionResult.rows) {
+      // Years used by checked items of this Work in this region (via MasterItem.SSRYearId)
+      const yearsResult = await pool.query(
+        `SELECT DISTINCT y."Year"
+         FROM "WorkAbstract" wa
+         INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+         INNER JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+         WHERE wa."WorkId" = $1
+           AND i."RegionId" = $2
+           AND y."Year" IS NOT NULL`,
+        [Number(workId), region.SSRRegionId],
+      );
+      const yearLabels = yearsResult.rows
+        .map((row) => row.Year)
+        .filter((y) => y != null && String(y).trim() !== "");
+
       const additionParams = [region.SSRRegionId];
       let additionQuery = `
         SELECT msa."MasterStandardAdditionId", msa."SSRRegionId",
@@ -4493,14 +4889,13 @@ app.get("/api/generate-estimate", async (req, res) => {
         FROM "MasterStandardAddition" msa
         INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = msa."SSRRegionId"
         WHERE msa."SSRRegionId" = $1`;
-      if (yearLabel) {
-        additionParams.push(yearLabel);
-        additionQuery += ` AND msa."Year" = $${additionParams.length}`;
+      if (yearLabels.length > 0) {
+        additionParams.push(yearLabels);
+        additionQuery += ` AND msa."Year" = ANY($${additionParams.length}::text[])`;
       }
       additionQuery += ` ORDER BY msa."Year" ASC, msa."Description" ASC`;
 
       const additions = await pool.query(additionQuery, additionParams);
-      if (!additions.rows.length) continue;
 
       const existing = await pool.query(
         `SELECT "WorkStandardAdditionId", "Description", "Percentage", "ApplyForLead"
@@ -4525,6 +4920,7 @@ app.get("/api/generate-estimate", async (req, res) => {
         applyForLead = existing.rows[0].ApplyForLead !== false;
       }
 
+      // Always show the region row: pre-filled if previously saved, otherwise blank
       regions.push({
         SSRRegionId: region.SSRRegionId,
         SSRRegionName: region.SSRRegionName,
@@ -4806,9 +5202,9 @@ app.post("/api/work-standard-additions", async (req, res) => {
   if (!workId) {
     return res.status(400).json({ message: "workId is required." });
   }
-  if (!Array.isArray(rows) || rows.length === 0) {
+  if (!Array.isArray(rows)) {
     return res.status(400).json({
-      message: "Select at least one standard addition.",
+      message: "rows must be an array (blank regions are omitted).",
     });
   }
 
@@ -4876,7 +5272,7 @@ app.post("/api/work-standard-additions", async (req, res) => {
 
 /**
  * Populate / update WorkMaterial and WorkAbstract rates for a Work.
- * Requires WorkStandardAddition (and WorkLead when materials need lead).
+ * WorkStandardAddition is optional per region (blank regions use % = 0).
  */
 app.post("/api/populate-work-materials", async (req, res) => {
   const { workId } = req.body || {};
@@ -4905,13 +5301,6 @@ app.post("/api/populate-work-materials", async (req, res) => {
        WHERE "MasterWorkId" = $1`,
       [resolvedWorkId],
     );
-    if (!additionsResult.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        message:
-          "Save Work Standard Additions for this work before populating Work Material.",
-      });
-    }
     const additionByRegion = new Map(
       additionsResult.rows.map((row) => [
         Number(row.SSRRegionId),
@@ -4974,18 +5363,14 @@ app.post("/api/populate-work-materials", async (req, res) => {
       const itemId = Number(abstract.ItemId);
       const regionId = Number(abstract.RegionId);
       const completedRate = Number(abstract.CompletedRate) || 0;
-      const addition = additionByRegion.get(regionId);
-      if (!addition) {
-        throw Object.assign(
-          new Error(
-            `No Work Standard Addition found for region of ItemId ${itemId}. Save standard additions first.`,
-          ),
-          { status: 400 },
-        );
-      }
+      // Optional: if no WorkStandardAddition for this region, use 0% / no lead add-on
+      const addition = additionByRegion.get(regionId) || {
+        Percentage: 0,
+        ApplyForLead: false,
+      };
 
       const percentage = Number(addition.Percentage) || 0;
-      const applyForLead = addition.ApplyForLead !== false;
+      const applyForLead = addition.ApplyForLead === true;
 
       const components = await client.query(
         `SELECT mc."MaterialId",
