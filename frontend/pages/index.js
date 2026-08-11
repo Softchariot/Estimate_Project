@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
-//const API_BASE = "http://localhost:4000";
+// const API_BASE = "http://localhost:4000";
 const SESSION_KEY = "werms_user";
 
 const cardStyle = {
@@ -165,7 +165,7 @@ export default function LoginPage() {
               fontWeight: 500,
             }}
           >
-            Version 1.04 Release 07 Aug 26
+            Version 1.05 Release 11 Aug 26
           </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization

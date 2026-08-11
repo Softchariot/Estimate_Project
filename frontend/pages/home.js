@@ -20,7 +20,7 @@ import UserProfileModal from "../components/UserProfileModal";
 const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
-// const API_BASE = "http://localhost:4000";
+//const API_BASE = "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — drafting-paper / blueprint palette, tuned to an
@@ -90,6 +90,12 @@ const superAdminMenu = [
 ];
 
 const allUsersMenu = [
+  {
+    id: "item-master",
+    label: "Item Master",
+    status: "active",
+    icon: "📑",
+  },
   {
     id: "master-projects",
     label: "Project Master",
@@ -201,6 +207,30 @@ function isOrgAdminUser(user) {
   return category === "orgadmin";
 }
 
+function isIndvUserUser(user) {
+  const category = String(user?.UserCategoryName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  return category === "indvuser";
+}
+
+/** NON SSR region locks for Item Master (OrgAdmin=3, IndvUser=4). */
+const ITEM_MASTER_ORG_ADMIN_REGION_ID = 3;
+const ITEM_MASTER_INDV_USER_REGION_ID = 4;
+
+function getItemMasterAllowedRegionId(user) {
+  if (isOrgAdminUser(user)) return ITEM_MASTER_ORG_ADMIN_REGION_ID;
+  if (isIndvUserUser(user)) return ITEM_MASTER_INDV_USER_REGION_ID;
+  return null;
+}
+
+function canAccessItemMaster(user) {
+  return (
+    isSuperAdminUser(user) || isOrgAdminUser(user) || isIndvUserUser(user)
+  );
+}
+
 const initialRegionForm = {
   SSRRegionName: "",
   SSRRegionShortName: "",
@@ -236,6 +266,22 @@ const initialUnitForm = {
   DOrder1: "",
   Remarks: "",
   MarkForDeletion: false,
+};
+
+const initialItemMasterForm = {
+  ItemId: "",
+  UserId: "",
+  RegionId: "",
+  CategoryId: "",
+  SubCategoryId: "",
+  SSRYearId: "",
+  UnitId: "",
+  ItemNumber: "",
+  ItemDescription: "",
+  ItemShortDescription: "",
+  CompletedRate: "",
+  LabourRate: "",
+  PageNumber: "",
 };
 
 const initialMaterialComponentForm = {
@@ -499,6 +545,24 @@ export default function HomePage() {
   const [loadingUnits, setLoadingUnits] = useState(false);
   const [savingUnit, setSavingUnit] = useState(false);
   const [editingUnitId, setEditingUnitId] = useState(null);
+  const [itemMasterForm, setItemMasterForm] = useState(initialItemMasterForm);
+  const [itemMasterList, setItemMasterList] = useState([]);
+  const [loadingItemMaster, setLoadingItemMaster] = useState(false);
+  const [savingItemMaster, setSavingItemMaster] = useState(false);
+  const [editingItemMasterId, setEditingItemMasterId] = useState(null);
+  const [itemMasterYears, setItemMasterYears] = useState([]);
+  const [itemMasterCategories, setItemMasterCategories] = useState([]);
+  const [itemMasterSubCategories, setItemMasterSubCategories] = useState([]);
+  const [itemMasterFilterRegionId, setItemMasterFilterRegionId] = useState("");
+  const [itemMasterFilterYearId, setItemMasterFilterYearId] = useState("");
+  const [itemMasterFilterCategoryId, setItemMasterFilterCategoryId] =
+    useState("");
+  const [itemMasterFilterSubCategoryId, setItemMasterFilterSubCategoryId] =
+    useState("");
+  const [itemMasterListYears, setItemMasterListYears] = useState([]);
+  const [itemMasterListCategories, setItemMasterListCategories] = useState([]);
+  const [itemMasterListSubCategories, setItemMasterListSubCategories] =
+    useState([]);
   const [materialRegionId, setMaterialRegionId] = useState("");
   const [materialSsrYearId, setMaterialSsrYearId] = useState("");
   const [materialSsrYears, setMaterialSsrYears] = useState([]);
@@ -2969,6 +3033,22 @@ export default function HomePage() {
         loadProjectFormOrgUsers(user.OrganizationId);
       }
       loadWorksMaster();
+      if (canAccessItemMaster(user)) {
+        const allowed = getItemMasterAllowedRegionId(user);
+        setItemMasterForm({
+          ...initialItemMasterForm,
+          UserId: user.UserId ? String(user.UserId) : "",
+          RegionId: allowed ? String(allowed) : "",
+        });
+        loadItemMasterYears();
+        if (allowed) {
+          setItemMasterFilterRegionId(String(allowed));
+          loadItemMasterCategories(allowed);
+          loadItemMasterListCategories(allowed);
+          loadItemMasterListYears(allowed);
+        }
+        setItemMasterList([]);
+      }
     } catch {
       sessionStorage.removeItem(SESSION_KEY);
       router.replace("/");
@@ -3193,6 +3273,274 @@ export default function HomePage() {
     }
   };
 
+  const loadItemMasterYears = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-years`);
+      setItemMasterYears(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterYears([]);
+    }
+  };
+
+  const loadItemMasterCategories = async (regionId) => {
+    if (!regionId) {
+      setItemMasterCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setItemMasterCategories(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterCategories([]);
+    }
+  };
+
+  const loadItemMasterSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setItemMasterSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setItemMasterSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      console.error(err);
+      setItemMasterSubCategories([]);
+    }
+  };
+
+  const loadItemMasterList = async (
+    user = currentUser,
+    filters = {
+      regionId: itemMasterFilterRegionId,
+      ssrYearId: itemMasterFilterYearId,
+      categoryId: itemMasterFilterCategoryId,
+      subCategoryId: itemMasterFilterSubCategoryId,
+    },
+  ) => {
+    if (!user?.UserId || !canAccessItemMaster(user)) {
+      setItemMasterList([]);
+      return;
+    }
+    const regionId = filters.regionId;
+    const ssrYearId = filters.ssrYearId;
+    const categoryId = filters.categoryId;
+    const subCategoryId = filters.subCategoryId;
+    if (!regionId || !ssrYearId || !categoryId || !subCategoryId) {
+      setItemMasterList([]);
+      return;
+    }
+    setLoadingItemMaster(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-items`, {
+        params: {
+          userId: user.UserId,
+          regionId,
+          ssrYearId,
+          categoryId,
+          subCategoryId,
+        },
+      });
+      setItemMasterList(Array.isArray(res.data?.data) ? res.data.data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterList([]);
+      setMessage(
+        `Item Master load failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoadingItemMaster(false);
+    }
+  };
+
+  const loadItemMasterListYears = async (regionId) => {
+    if (!regionId) {
+      setItemMasterListYears([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-years`, {
+        params: { regionId },
+      });
+      setItemMasterListYears(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterListYears([]);
+    }
+  };
+
+  const loadItemMasterListCategories = async (regionId) => {
+    if (!regionId) {
+      setItemMasterListCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setItemMasterListCategories(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterListCategories([]);
+    }
+  };
+
+  const loadItemMasterListSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setItemMasterListSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setItemMasterListSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      console.error(err);
+      setItemMasterListSubCategories([]);
+    }
+  };
+
+  const resetItemMasterEdit = () => {
+    const allowedRegionId = getItemMasterAllowedRegionId(currentUser);
+    setEditingItemMasterId(null);
+    setItemMasterForm({
+      ...initialItemMasterForm,
+      UserId: currentUser?.UserId ? String(currentUser.UserId) : "",
+      RegionId: allowedRegionId ? String(allowedRegionId) : "",
+    });
+    setItemMasterCategories([]);
+    setItemMasterSubCategories([]);
+    if (allowedRegionId) {
+      loadItemMasterCategories(allowedRegionId);
+    }
+  };
+
+  const onItemMasterChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    const nextValue = type === "checkbox" ? checked : value;
+    setItemMasterForm((prev) => {
+      const next = { ...prev, [name]: nextValue };
+      if (name === "RegionId") {
+        next.CategoryId = "";
+        next.SubCategoryId = "";
+        loadItemMasterCategories(value);
+        setItemMasterSubCategories([]);
+      }
+      if (name === "CategoryId") {
+        next.SubCategoryId = "";
+        loadItemMasterSubCategories(value);
+      }
+      return next;
+    });
+  };
+
+  const startItemMasterEdit = async (row) => {
+    if (!isSuperAdminUser(currentUser)) {
+      const allowed = getItemMasterAllowedRegionId(currentUser);
+      if (!allowed || Number(row.RegionId) !== Number(allowed)) {
+        alert("You can only edit NON SSR items for your allowed region.");
+        return;
+      }
+    }
+    setEditingItemMasterId(row.ItemId);
+    setItemMasterForm({
+      ItemId: String(row.ItemId),
+      UserId: row.UserId != null ? String(row.UserId) : "",
+      RegionId: row.RegionId != null ? String(row.RegionId) : "",
+      CategoryId: row.CategoryId != null ? String(row.CategoryId) : "",
+      SubCategoryId:
+        row.SubCategoryId != null ? String(row.SubCategoryId) : "",
+      SSRYearId: row.SSRYearId != null ? String(row.SSRYearId) : "",
+      UnitId: row.UnitId != null ? String(row.UnitId) : "",
+      ItemNumber: row.ItemNumber || "",
+      ItemDescription: row.ItemDescription || "",
+      ItemShortDescription: row.ItemShortDescription || "",
+      CompletedRate:
+        row.CompletedRate === null || row.CompletedRate === undefined
+          ? ""
+          : String(row.CompletedRate),
+      LabourRate:
+        row.LabourRate === null || row.LabourRate === undefined
+          ? ""
+          : String(row.LabourRate),
+      PageNumber: row.PageNumber != null ? String(row.PageNumber) : "",
+    });
+    if (row.RegionId) await loadItemMasterCategories(row.RegionId);
+    if (row.CategoryId) await loadItemMasterSubCategories(row.CategoryId);
+  };
+
+  const onItemMasterSubmit = async (e) => {
+    e.preventDefault();
+    if (!currentUser?.UserId || !canAccessItemMaster(currentUser)) {
+      setMessage("Item Master save failed: not authorised.");
+      return;
+    }
+    const isEdit = Boolean(editingItemMasterId);
+    if (
+      !window.confirm(
+        `Please review the details.\nDo you want to ${isEdit ? "update this item" : "save this new item"}?`,
+      )
+    ) {
+      setMessage("Save canceled. You can continue editing the form.");
+      return;
+    }
+    setSavingItemMaster(true);
+    setMessage("");
+    const payload = {
+      ...itemMasterForm,
+      actingUserId: currentUser.UserId,
+      userId: currentUser.UserId,
+    };
+    try {
+      const res = await fetch(
+        isEdit
+          ? `${API_BASE}/api/master-items/${editingItemMasterId}`
+          : `${API_BASE}/api/master-items`,
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to save item.");
+      setMessage(
+        isEdit ? "Item updated successfully." : "Item saved successfully.",
+      );
+      resetItemMasterEdit();
+      if (
+        itemMasterFilterRegionId &&
+        itemMasterFilterYearId &&
+        itemMasterFilterCategoryId &&
+        itemMasterFilterSubCategoryId
+      ) {
+        await loadItemMasterList(currentUser, {
+          regionId: itemMasterFilterRegionId,
+          ssrYearId: itemMasterFilterYearId,
+          categoryId: itemMasterFilterCategoryId,
+          subCategoryId: itemMasterFilterSubCategoryId,
+        });
+      } else {
+        setItemMasterList([]);
+      }
+    } catch (error) {
+      setMessage(`Item Master save failed: ${error.message}`);
+    } finally {
+      setSavingItemMaster(false);
+    }
+  };
+
   const startRegionEdit = (row) => {
     setActiveMaster("regions");
     setEditingRegionId(row.SSRRegionId);
@@ -3359,8 +3707,21 @@ export default function HomePage() {
 
   const isSuperAdmin = isSuperAdminUser(currentUser);
   const isOrgAdmin = isOrgAdminUser(currentUser);
+  const isIndvUser = isIndvUserUser(currentUser);
   const canManageProjects = isOrgAdmin || isSuperAdmin;
   const canManageMaterials = isSuperAdmin;
+  const canManageItemMaster = canAccessItemMaster(currentUser);
+  const itemMasterAllowedRegionId = getItemMasterAllowedRegionId(currentUser);
+  const itemMasterRegionOptions = isSuperAdmin
+    ? regions
+    : regions.filter(
+        (r) => Number(r.SSRRegionId) === Number(itemMasterAllowedRegionId),
+      );
+  const itemMasterRoleBanner = isOrgAdmin
+    ? "Organization Admins can only add data for NON SSR items"
+    : isIndvUser
+      ? "Individual Users can only add data for NON SSR items"
+      : "";
   const activeMasterMeta = mastersMenu.find((m) => m.id === activeMaster);
   const isErrorMessage = /failed/i.test(message);
   const sessionOrgId = currentUser?.OrganizationId
@@ -3616,7 +3977,12 @@ export default function HomePage() {
             >
               All Users
             </div>
-            {allUsersMenu.map((item) => renderMenuItem(item))}
+            {allUsersMenu.map((item) =>
+              renderMenuItem(item, {
+                forceDisabled:
+                  item.id === "item-master" ? !canManageItemMaster : false,
+              }),
+            )}
           </div>
 
           {currentUser && (
@@ -5218,6 +5584,548 @@ export default function HomePage() {
                     ) : (
                       <EmptyRow colSpan={8}>
                         No unit rows yet — add one above.
+                      </EmptyRow>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {/* ── Item Master ── */}
+          {activeMaster === "item-master" && canManageItemMaster && (
+            <Card
+              eyebrow="Master · Item"
+              title={
+                editingItemMasterId
+                  ? `Edit item #${editingItemMasterId}`
+                  : "Item Master"
+              }
+              subtitle="Add / edit MasterItem rows. FK fields use short names from lookup tables."
+            >
+              {itemMasterRoleBanner && (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: `1px solid ${theme.colors.line}`,
+                    background: "#fff8e8",
+                    color: "#8a5a00",
+                    fontSize: 13.5,
+                    fontWeight: 600,
+                  }}
+                >
+                  {itemMasterRoleBanner}
+                </div>
+              )}
+
+              <FormShell onSubmit={onItemMasterSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 14,
+                  }}
+                >
+                  <Field label="Item Id">
+                    <input
+                      value={itemMasterForm.ItemId || "(New)"}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="User Id">
+                    <input
+                      value={itemMasterForm.UserId || ""}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Region" required>
+                    <select
+                      name="RegionId"
+                      value={itemMasterForm.RegionId}
+                      onChange={onItemMasterChange}
+                      required
+                      disabled={!isSuperAdmin}
+                      style={{
+                        ...inputStyle,
+                        ...(!isSuperAdmin
+                          ? {
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : null),
+                      }}
+                    >
+                      <option value="">Select Region</option>
+                      {itemMasterRegionOptions.map((r) => (
+                        <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                          {r.SSRRegionShortName || r.SSRRegionName}
+                          {r.SSRRegionShortName && r.SSRRegionName
+                            ? ` — ${r.SSRRegionName}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="SSR Year">
+                    <select
+                      name="SSRYearId"
+                      value={itemMasterForm.SSRYearId}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Year</option>
+                      {itemMasterYears.map((y) => (
+                        <option key={y.YearId} value={y.YearId}>
+                          {y.Year}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Category">
+                    <select
+                      name="CategoryId"
+                      value={itemMasterForm.CategoryId}
+                      onChange={onItemMasterChange}
+                      disabled={!itemMasterForm.RegionId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Category</option>
+                      {itemMasterCategories.map((c) => (
+                        <option
+                          key={c.SSRCategoryId}
+                          value={c.SSRCategoryId}
+                        >
+                          {c.SSRCategoryShortName || c.SSRCategoryName}
+                          {c.SSRCategoryShortName && c.SSRCategoryName
+                            ? ` — ${c.SSRCategoryName}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Sub Category">
+                    <select
+                      name="SubCategoryId"
+                      value={itemMasterForm.SubCategoryId}
+                      onChange={onItemMasterChange}
+                      disabled={!itemMasterForm.CategoryId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Sub Category</option>
+                      {itemMasterSubCategories.map((sc) => (
+                        <option
+                          key={sc.SSRSubCategoryId}
+                          value={sc.SSRSubCategoryId}
+                        >
+                          {sc.SSRSubCategoryShortName ||
+                            sc.SSRSubCategoryName}
+                          {sc.SSRSubCategoryShortName &&
+                          sc.SSRSubCategoryName
+                            ? ` — ${sc.SSRSubCategoryName}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Unit">
+                    <select
+                      name="UnitId"
+                      value={itemMasterForm.UnitId}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Unit</option>
+                      {[...unitList]
+                        .sort((a, b) =>
+                          String(a.UnitShortName || a.UnitName || "").localeCompare(
+                            String(b.UnitShortName || b.UnitName || ""),
+                          ),
+                        )
+                        .map((u) => (
+                          <option key={u.UnitId} value={u.UnitId}>
+                            {u.UnitShortName || u.UnitName}
+                            {u.UnitShortName && u.UnitName
+                              ? ` — ${u.UnitName}`
+                              : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                  <Field label="Item Number" required>
+                    <input
+                      name="ItemNumber"
+                      value={itemMasterForm.ItemNumber}
+                      onChange={onItemMasterChange}
+                      required
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Item Description" required span>
+                    <textarea
+                      name="ItemDescription"
+                      value={itemMasterForm.ItemDescription}
+                      onChange={onItemMasterChange}
+                      required
+                      rows={4}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 96,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Item Short Description" span>
+                    <input
+                      name="ItemShortDescription"
+                      value={itemMasterForm.ItemShortDescription}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Completed Rate">
+                    <input
+                      name="CompletedRate"
+                      type="number"
+                      step="any"
+                      value={itemMasterForm.CompletedRate}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Labour Rate">
+                    <input
+                      name="LabourRate"
+                      type="number"
+                      step="any"
+                      value={itemMasterForm.LabourRate}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Page Number">
+                    <input
+                      name="PageNumber"
+                      value={itemMasterForm.PageNumber}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                  <PrimaryButton disabled={savingItemMaster}>
+                    {savingItemMaster
+                      ? "Saving…"
+                      : editingItemMasterId
+                        ? "Update item"
+                        : "Save item"}
+                  </PrimaryButton>
+                  {editingItemMasterId && (
+                    <SecondaryButton onClick={resetItemMasterEdit}>
+                      Cancel edit
+                    </SecondaryButton>
+                  )}
+                </div>
+              </FormShell>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+                  gap: 12,
+                  alignItems: "end",
+                  marginBottom: 12,
+                }}
+              >
+                <Field label="SSR Region">
+                  <select
+                    value={itemMasterFilterRegionId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setItemMasterFilterRegionId(value);
+                      setItemMasterFilterYearId("");
+                      setItemMasterFilterCategoryId("");
+                      setItemMasterFilterSubCategoryId("");
+                      setItemMasterListYears([]);
+                      setItemMasterListSubCategories([]);
+                      setItemMasterList([]);
+                      loadItemMasterListYears(value);
+                      loadItemMasterListCategories(value);
+                    }}
+                    disabled={!isSuperAdmin}
+                    style={{
+                      ...inputStyle,
+                      ...(!isSuperAdmin
+                        ? {
+                            background: "#EEF1F4",
+                            color: theme.colors.inkSoft,
+                            cursor: "not-allowed",
+                          }
+                        : null),
+                    }}
+                  >
+                    {isSuperAdmin && (
+                      <option value="">Select SSR Region</option>
+                    )}
+                    {(isSuperAdmin ? regions : itemMasterRegionOptions).map(
+                      (r) => (
+                        <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                          {r.SSRRegionShortName || r.SSRRegionName}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </Field>
+                <Field label="SSR Year">
+                  <select
+                    value={itemMasterFilterYearId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setItemMasterFilterYearId(value);
+                      if (
+                        itemMasterFilterRegionId &&
+                        value &&
+                        itemMasterFilterCategoryId &&
+                        itemMasterFilterSubCategoryId
+                      ) {
+                        loadItemMasterList(currentUser, {
+                          regionId: itemMasterFilterRegionId,
+                          ssrYearId: value,
+                          categoryId: itemMasterFilterCategoryId,
+                          subCategoryId: itemMasterFilterSubCategoryId,
+                        });
+                      } else {
+                        setItemMasterList([]);
+                      }
+                    }}
+                    disabled={!itemMasterFilterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">
+                      {itemMasterFilterRegionId
+                        ? "Select SSR Year"
+                        : "Select SSR Region first"}
+                    </option>
+                    {itemMasterListYears.map((y) => (
+                      <option key={y.YearId} value={y.YearId}>
+                        {y.Year}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Category">
+                  <select
+                    value={itemMasterFilterCategoryId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setItemMasterFilterCategoryId(value);
+                      setItemMasterFilterSubCategoryId("");
+                      setItemMasterList([]);
+                      loadItemMasterListSubCategories(value);
+                    }}
+                    disabled={!itemMasterFilterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">Select SSR Category</option>
+                    {itemMasterListCategories.map((c) => (
+                      <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                        {c.SSRCategoryShortName || c.SSRCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Sub Category">
+                  <select
+                    value={itemMasterFilterSubCategoryId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setItemMasterFilterSubCategoryId(value);
+                      if (
+                        itemMasterFilterRegionId &&
+                        itemMasterFilterYearId &&
+                        itemMasterFilterCategoryId &&
+                        value
+                      ) {
+                        loadItemMasterList(currentUser, {
+                          regionId: itemMasterFilterRegionId,
+                          ssrYearId: itemMasterFilterYearId,
+                          categoryId: itemMasterFilterCategoryId,
+                          subCategoryId: value,
+                        });
+                      } else {
+                        setItemMasterList([]);
+                      }
+                    }}
+                    disabled={!itemMasterFilterCategoryId}
+                    style={inputStyle}
+                  >
+                    <option value="">Select SSR Sub Category</option>
+                    {itemMasterListSubCategories.map((sc) => (
+                      <option
+                        key={sc.SSRSubCategoryId}
+                        value={sc.SSRSubCategoryId}
+                      >
+                        {sc.SSRSubCategoryShortName || sc.SSRSubCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <SecondaryButton
+                  type="button"
+                  disabled={
+                    !itemMasterFilterRegionId ||
+                    !itemMasterFilterYearId ||
+                    !itemMasterFilterCategoryId ||
+                    !itemMasterFilterSubCategoryId
+                  }
+                  onClick={() =>
+                    loadItemMasterList(currentUser, {
+                      regionId: itemMasterFilterRegionId,
+                      ssrYearId: itemMasterFilterYearId,
+                      categoryId: itemMasterFilterCategoryId,
+                      subCategoryId: itemMasterFilterSubCategoryId,
+                    })
+                  }
+                >
+                  Refresh list
+                </SecondaryButton>
+              </div>
+
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: theme.colors.inkSoft,
+                  marginBottom: 8,
+                }}
+              >
+                Select SSR Region, SSR Year, SSR Category and SSR Sub Category
+                to load the item list.
+              </div>
+
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
+                <table className="wrms-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Region</th>
+                      <th>Category</th>
+                      <th>Sub Category</th>
+                      <th>Number</th>
+                      <th style={{ minWidth: 360, width: "40%" }}>
+                        Description
+                      </th>
+                      <th>Unit</th>
+                      <th>Rate</th>
+                      <th>User</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingItemMaster ? (
+                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
+                    ) : !itemMasterFilterRegionId ||
+                      !itemMasterFilterYearId ||
+                      !itemMasterFilterCategoryId ||
+                      !itemMasterFilterSubCategoryId ? (
+                      <EmptyRow colSpan={10}>
+                        Select SSR Region, SSR Year, SSR Category and SSR Sub
+                        Category above to view items.
+                      </EmptyRow>
+                    ) : itemMasterList.length ? (
+                      itemMasterList.map((row) => {
+                        const canEditRow =
+                          isSuperAdmin ||
+                          (itemMasterAllowedRegionId &&
+                            Number(row.RegionId) ===
+                              Number(itemMasterAllowedRegionId));
+                        return (
+                          <tr key={row.ItemId}>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                color: theme.colors.inkSoft,
+                              }}
+                            >
+                              {row.ItemId}
+                            </td>
+                            <td>
+                              {row.SSRRegionShortName ||
+                                row.SSRRegionName ||
+                                row.RegionId ||
+                                "—"}
+                            </td>
+                            <td>
+                              {row.SSRCategoryShortName ||
+                                row.SSRCategoryName ||
+                                "—"}
+                            </td>
+                            <td>
+                              {row.SSRSubCategoryShortName ||
+                                row.SSRSubCategoryName ||
+                                "—"}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.ItemNumber}
+                            </td>
+                            <td style={{ minWidth: 360, width: "40%" }}>
+                              {row.ItemDescription}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.UnitShortName ?? ""}
+                            </td>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                textAlign: "right",
+                              }}
+                            >
+                              {formatRupees(row.CompletedRate)}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.UserId ?? "—"}
+                            </td>
+                            <td>
+                              {canEditRow ? (
+                                <GhostIconButton
+                                  tone={theme.colors.accent}
+                                  onClick={() => startItemMasterEdit(row)}
+                                >
+                                  ✎ Edit
+                                </GhostIconButton>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <EmptyRow colSpan={10}>
+                        No items found — add one above.
                       </EmptyRow>
                     )}
                   </tbody>

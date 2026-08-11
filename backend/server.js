@@ -480,7 +480,10 @@ app.get("/api/ssr-sub-categories/:categoryId", async (req, res) => {
   console.log("Category ID: ", categoryId);
   try {
     const result = await pool.query(
-      `SELECT "SSRSubCategoryId", "SSRSubCategoryName" FROM "MasterSSRSubCategory" WHERE "SSRCategoryId" = $1 ORDER BY "DOrder";`,
+      `SELECT "SSRSubCategoryId", "SSRSubCategoryName", "SSRSubCategoryShortName"
+       FROM "MasterSSRSubCategory"
+       WHERE "SSRCategoryId" = $1
+       ORDER BY "DOrder";`,
       [categoryId],
     );
     return res.status(200).send({ data: result.rows });
@@ -643,9 +646,6 @@ app.get("/api/ssr-items-load", async (req, res) => {
         i."ItemDescription",
         i."CompletedRate",
         i."UnitId",
-        i."IsFinal",
-        i."IsChild",
-        i."ParentId",
         i."SSRYearId",
         u."UnitShortName"
       FROM "MasterItem" i
@@ -2994,6 +2994,386 @@ app.put("/api/master-units/:id", async (req, res) => {
   }
 });
 
+/** OrgAdmin / IndvUser NON-SSR region locks for Item Master. */
+const ITEM_MASTER_ORG_ADMIN_REGION_ID = 3;
+const ITEM_MASTER_INDV_USER_REGION_ID = 4;
+
+async function ensureMasterItemUserId() {
+  await pool.query(`
+    ALTER TABLE "MasterItem"
+      ADD COLUMN IF NOT EXISTS "UserId" integer
+  `);
+}
+
+function normalizeUserCategoryName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+/** Resolve actor for Item Master (SuperAdmin / OrgAdmin / IndvUser). */
+async function requireItemMasterAccess(userId) {
+  if (!userId) {
+    return { error: { status: 400, message: "userId is required." } };
+  }
+  const result = await pool.query(
+    `SELECT u."UserId", u."OrganizationId", uc."UserCategoryName"
+     FROM "MasterUser" u
+     INNER JOIN "MasterUserCategory" uc
+       ON uc."UserCategoryId" = u."UserCategoryId"
+     WHERE u."UserId" = $1
+       AND COALESCE(u."MarkForDeletion", false) = false`,
+    [Number(userId)],
+  );
+  const actor = result.rows[0];
+  if (!actor) {
+    return { error: { status: 403, message: "User not found or inactive." } };
+  }
+  const category = normalizeUserCategoryName(actor.UserCategoryName);
+  const isSuperAdmin = category === "superadmin";
+  const isOrgAdmin = category === "orgadmin";
+  const isIndvUser = category === "indvuser";
+  if (!isSuperAdmin && !isOrgAdmin && !isIndvUser) {
+    return {
+      error: {
+        status: 403,
+        message:
+          "Only SuperAdmin, OrgAdmin, or IndvUser can access Item Master.",
+      },
+    };
+  }
+  let allowedRegionId = null;
+  if (isOrgAdmin) allowedRegionId = ITEM_MASTER_ORG_ADMIN_REGION_ID;
+  if (isIndvUser) allowedRegionId = ITEM_MASTER_INDV_USER_REGION_ID;
+  return {
+    actor,
+    isSuperAdmin,
+    isOrgAdmin,
+    isIndvUser,
+    allowedRegionId,
+  };
+}
+
+const MASTER_ITEM_SELECT = `
+  SELECT i."ItemId", i."UserId", i."RegionId", i."CategoryId", i."SubCategoryId",
+         i."SSRYearId", i."UnitId", i."ItemNumber", i."ItemDescription",
+         i."ItemShortDescription", i."CompletedRate", i."LabourRate",
+         i."PageNumber", i."MarkForDeletion",
+         i."ItemCode", i."Number", i."SubNumber", i."ItemSpecification",
+         i."EffectiveDate",
+         r."SSRRegionShortName", r."SSRRegionName",
+         c."SSRCategoryShortName", c."SSRCategoryName",
+         sc."SSRSubCategoryShortName", sc."SSRSubCategoryName",
+         y."Year" AS "SSRYear",
+         u."UnitShortName", u."UnitName",
+         mu."UserName", mu."UserLoginName"
+  FROM "MasterItem" i
+  LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+  LEFT JOIN "MasterSSRCategory" c ON c."SSRCategoryId" = i."CategoryId"
+  LEFT JOIN "MasterSSRSubCategory" sc ON sc."SSRSubCategoryId" = i."SubCategoryId"
+  LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+  LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+  LEFT JOIN "MasterUser" mu ON mu."UserId" = i."UserId"
+`;
+
+app.get("/api/master-items", async (req, res) => {
+  const userId = Number(req.query.userId);
+  const regionIdFilter =
+    req.query.regionId !== undefined &&
+    req.query.regionId !== null &&
+    String(req.query.regionId).trim() !== ""
+      ? Number(req.query.regionId)
+      : null;
+  const categoryIdFilter =
+    req.query.categoryId !== undefined &&
+    req.query.categoryId !== null &&
+    String(req.query.categoryId).trim() !== ""
+      ? Number(req.query.categoryId)
+      : null;
+  const subCategoryIdFilter =
+    req.query.subCategoryId !== undefined &&
+    req.query.subCategoryId !== null &&
+    String(req.query.subCategoryId).trim() !== ""
+      ? Number(req.query.subCategoryId)
+      : null;
+  const ssrYearIdFilter =
+    req.query.ssrYearId !== undefined &&
+    req.query.ssrYearId !== null &&
+    String(req.query.ssrYearId).trim() !== ""
+      ? Number(req.query.ssrYearId)
+      : null;
+
+  const auth = await requireItemMasterAccess(userId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (
+    !regionIdFilter ||
+    !ssrYearIdFilter ||
+    !categoryIdFilter ||
+    !subCategoryIdFilter
+  ) {
+    return res.status(400).json({
+      message:
+        "SSR Region, SSR Year, SSR Category and SSR Sub Category are all required to list items.",
+    });
+  }
+  if (
+    auth.allowedRegionId &&
+    Number(auth.allowedRegionId) !== Number(regionIdFilter)
+  ) {
+    return res.status(403).json({
+      message: "You can only list items for your allowed NON SSR region.",
+    });
+  }
+
+  try {
+    await ensureMasterItemUserId();
+    const params = [
+      regionIdFilter,
+      ssrYearIdFilter,
+      categoryIdFilter,
+      subCategoryIdFilter,
+    ];
+    const sql =
+      MASTER_ITEM_SELECT +
+      ` WHERE i."RegionId" = $1
+          AND i."SSRYearId" = $2
+          AND i."CategoryId" = $3
+          AND i."SubCategoryId" = $4
+        ORDER BY i."ItemNumber" ASC NULLS LAST, i."ItemId" ASC
+        LIMIT 500`;
+    const result = await pool.query(sql, params);
+    return res.json({
+      data: result.rows,
+      meta: {
+        isSuperAdmin: auth.isSuperAdmin,
+        isOrgAdmin: auth.isOrgAdmin,
+        isIndvUser: auth.isIndvUser,
+        allowedRegionId: auth.allowedRegionId,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/master-items/:id", async (req, res) => {
+  const userId = Number(req.query.userId);
+  const itemId = Number(req.params.id);
+  if (!itemId) {
+    return res.status(400).json({ message: "Valid ItemId is required." });
+  }
+
+  const auth = await requireItemMasterAccess(userId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  try {
+    await ensureMasterItemUserId();
+    const params = [itemId];
+    let sql = `${MASTER_ITEM_SELECT} WHERE i."ItemId" = $1`;
+    if (auth.allowedRegionId) {
+      params.push(auth.allowedRegionId);
+      sql += ` AND i."RegionId" = $2`;
+    }
+    const result = await pool.query(sql, params);
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+    return res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+function parseOptionalNumber(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseOptionalBool(value) {
+  if (value === true || value === "true" || value === 1 || value === "1") {
+    return true;
+  }
+  if (value === false || value === "false" || value === 0 || value === "0") {
+    return false;
+  }
+  return null;
+}
+
+app.post("/api/master-items", async (req, res) => {
+  const body = req.body || {};
+  const actingUserId = Number(body.actingUserId || body.userId);
+  const auth = await requireItemMasterAccess(actingUserId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  const regionId = Number(body.RegionId || body.regionId);
+  if (!regionId) {
+    return res.status(400).json({ message: "Region is required." });
+  }
+  if (auth.allowedRegionId && Number(auth.allowedRegionId) !== regionId) {
+    return res.status(403).json({
+      message: auth.isOrgAdmin
+        ? "Organization Admins can only add data for NON SSR items (Region Id 3)."
+        : "Individual Users can only add data for NON SSR items (Region Id 4).",
+    });
+  }
+  if (!body.ItemNumber || !String(body.ItemNumber).trim()) {
+    return res.status(400).json({ message: "Item Number is required." });
+  }
+  if (!body.ItemDescription || !String(body.ItemDescription).trim()) {
+    return res.status(400).json({ message: "Item Description is required." });
+  }
+
+  try {
+    await ensureMasterItemUserId();
+    const result = await pool.query(
+      `INSERT INTO "MasterItem"
+        ("UserId", "RegionId", "CategoryId", "SubCategoryId", "SSRYearId", "UnitId",
+         "ItemNumber", "ItemDescription", "ItemShortDescription",
+         "CompletedRate", "LabourRate", "PageNumber", "MarkForDeletion")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING "ItemId"`,
+      [
+        Number(auth.actor.UserId),
+        regionId,
+        parseOptionalNumber(body.CategoryId),
+        parseOptionalNumber(body.SubCategoryId),
+        parseOptionalNumber(body.SSRYearId),
+        parseOptionalNumber(body.UnitId),
+        String(body.ItemNumber).trim(),
+        String(body.ItemDescription).trim(),
+        body.ItemShortDescription
+          ? String(body.ItemShortDescription).trim()
+          : null,
+        parseOptionalNumber(body.CompletedRate),
+        parseOptionalNumber(body.LabourRate),
+        body.PageNumber === "" || body.PageNumber == null
+          ? null
+          : String(body.PageNumber).trim(),
+        false,
+      ],
+    );
+    const createdId = result.rows[0].ItemId;
+    const joined = await pool.query(
+      `${MASTER_ITEM_SELECT} WHERE i."ItemId" = $1`,
+      [createdId],
+    );
+    return res.status(201).json({
+      message: "Item created successfully.",
+      data: joined.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.put("/api/master-items/:id", async (req, res) => {
+  const itemId = Number(req.params.id);
+  const body = req.body || {};
+  const actingUserId = Number(body.actingUserId || body.userId);
+  if (!itemId) {
+    return res.status(400).json({ message: "Valid ItemId is required." });
+  }
+
+  const auth = await requireItemMasterAccess(actingUserId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  try {
+    await ensureMasterItemUserId();
+    const existing = await pool.query(
+      `SELECT "ItemId", "RegionId", "UserId" FROM "MasterItem" WHERE "ItemId" = $1`,
+      [itemId],
+    );
+    if (!existing.rows[0]) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+    if (
+      auth.allowedRegionId &&
+      Number(existing.rows[0].RegionId) !== Number(auth.allowedRegionId)
+    ) {
+      return res.status(403).json({
+        message: "You can only update NON SSR items for your allowed region.",
+      });
+    }
+
+    const regionId = Number(body.RegionId || body.regionId);
+    if (!regionId) {
+      return res.status(400).json({ message: "Region is required." });
+    }
+    if (auth.allowedRegionId && Number(auth.allowedRegionId) !== regionId) {
+      return res.status(403).json({
+        message: "You cannot change Region outside your allowed NON SSR region.",
+      });
+    }
+    if (!body.ItemNumber || !String(body.ItemNumber).trim()) {
+      return res.status(400).json({ message: "Item Number is required." });
+    }
+    if (!body.ItemDescription || !String(body.ItemDescription).trim()) {
+      return res.status(400).json({ message: "Item Description is required." });
+    }
+
+    await pool.query(
+      `UPDATE "MasterItem"
+       SET "RegionId" = $1,
+           "CategoryId" = $2,
+           "SubCategoryId" = $3,
+           "SSRYearId" = $4,
+           "UnitId" = $5,
+           "ItemNumber" = $6,
+           "ItemDescription" = $7,
+           "ItemShortDescription" = $8,
+           "CompletedRate" = $9,
+           "LabourRate" = $10,
+           "PageNumber" = $11,
+           "MarkForDeletion" = false
+       WHERE "ItemId" = $12`,
+      [
+        regionId,
+        parseOptionalNumber(body.CategoryId),
+        parseOptionalNumber(body.SubCategoryId),
+        parseOptionalNumber(body.SSRYearId),
+        parseOptionalNumber(body.UnitId),
+        String(body.ItemNumber).trim(),
+        String(body.ItemDescription).trim(),
+        body.ItemShortDescription
+          ? String(body.ItemShortDescription).trim()
+          : null,
+        parseOptionalNumber(body.CompletedRate),
+        parseOptionalNumber(body.LabourRate),
+        body.PageNumber === "" || body.PageNumber == null
+          ? null
+          : String(body.PageNumber).trim(),
+        itemId,
+      ],
+    );
+
+    const joined = await pool.query(
+      `${MASTER_ITEM_SELECT} WHERE i."ItemId" = $1`,
+      [itemId],
+    );
+    return res.json({
+      message: "Item updated successfully.",
+      data: joined.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.delete("/api/delete-selected-items", async (req, res) => {
   const workId = Number(req.query.workId || req.query.projectId);
   const subWorkId = Number(req.query.subWorkId);
@@ -4571,33 +4951,25 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
       extraFilters += ` AND i."SubCategoryId" = $${params.length}`;
     }
 
-    // NOTE: assumes MasterSSRCategory has a "CategoryName" column, following
-    // the same naming convention as ProjectName / SubWorkName elsewhere.
-    // Adjust the join/column name if that's not the case.
     const query = `
         SELECT
           i."ItemId",
           i."ItemNumber",
           i."ItemDescription",
           i."ItemShortDescription",
-          i."ParentId",
-          i."IsChild",
-          i."IsFinal",
           i."CompletedRate",
           i."LabourRate",
           i."CategoryId",
           cat."SSRCategoryName",
-          i."DOrder",
-          i."DOrder1",
           u."UnitShortName"
         FROM "MasterItem" i
         LEFT JOIN "MasterSSRCategory" cat ON cat."SSRCategoryId" = i."CategoryId"
         LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
         WHERE i."SSRYearId" = $1
           AND i."RegionId" = $2
-          AND i."MarkForDeletion" = false
+          AND COALESCE(i."MarkForDeletion", false) = false
           ${extraFilters}
-        ORDER BY i."CategoryId", i."DOrder", i."DOrder1", i."ItemNumber"
+        ORDER BY i."CategoryId", i."ItemNumber" ASC NULLS LAST, i."ItemId" ASC
       `;
 
     const { rows } = await pool.query(query, params);
@@ -4623,21 +4995,20 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
         });
       }
       const cat = categories[categoryIndexById.get(catKey)];
-      // Rows are pre-sorted by DOrder/DOrder1/ItemNumber, so insertion order
-      // into this map already reflects display order.
+      // Rows are pre-sorted by ItemNumber, so insertion order already
+      // reflects display order.
       const key = row.ItemNumber || `__no_number_${row.ItemId}`;
       cat.itemsByNumber.set(key, { ...row, children: [] });
     }
 
-    // ── Build parent/child links from ItemNumber's dot-notation, NOT
-    //    ParentId (ParentId wasn't reliably linking rows in practice).
+    // ── Build parent/child links from ItemNumber's dot-notation.
     //    "4.1.10"  -> parent "4.1"
     //    "4.1.10A" -> parent "4.1"  (letter suffix stays on the last
     //                                segment, so it's a SIBLING of 4.1.10,
     //                                not its child) ──
     categories.forEach((cat) => {
       for (const [itemNumber, item] of cat.itemsByNumber) {
-        const segments = itemNumber.split(".");
+        const segments = String(itemNumber).split(".");
         const parentNumber = segments.slice(0, -1).join(".");
         if (parentNumber && cat.itemsByNumber.has(parentNumber)) {
           cat.itemsByNumber.get(parentNumber).children.push(item);
@@ -4647,14 +5018,17 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
       }
     });
 
-    // ── A non-final node is rendered bold ONLY if every one of its children
-    //    is a final (priced) leaf — i.e. it's a heading directly above
-    //    priced rows, rather than a paragraph with further sub-headings
-    //    beneath it. Matches "5.33" (paragraph) vs "5.33.1" (bold) pattern. ──
+    const isPricedItem = (item) =>
+      item.CompletedRate !== null &&
+      item.CompletedRate !== undefined &&
+      Number.isFinite(Number(item.CompletedRate));
+
+    // ── Heading style / rate columns: IsFinal no longer exists on MasterItem,
+    //    so infer from tree + CompletedRate. ──
     const isBoldHeading = (item) =>
-      !item.IsFinal &&
       item.children.length > 0 &&
-      item.children.every((c) => c.IsFinal);
+      !isPricedItem(item) &&
+      item.children.every((c) => isPricedItem(c) || c.children.length === 0);
 
     // ── Stream the PDF back as a download ──
     res.setHeader("Content-Type", "application/pdf");
@@ -4735,7 +5109,8 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
       const codeWidth = Math.max(28, descX - codeX - 4);
 
       const bold = isBoldHeading(item);
-      const isLeaf = item.IsFinal;
+      // Show unit/rates on tree leaves (IsFinal column no longer exists).
+      const isLeaf = item.children.length === 0;
       const label = String(
         item.ItemDescription || item.ItemShortDescription || "",
       );
@@ -6066,6 +6441,7 @@ app.listen(port, async () => {
     await ensureWorkMeasurementSequence();
     await ensureMaterialComponentIdSequence();
     await ensureWorkStandardAdditionSchema();
+    await ensureMasterItemUserId();
     await ensureWorkEstimateSequences();
   } catch (err) {
     console.error("Failed to ensure schema:", err);
