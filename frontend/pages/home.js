@@ -574,7 +574,10 @@ export default function HomePage() {
   const [checkedItemIds, setCheckedItemIds] = useState([]);
   const [checkedItemsList, setCheckedItemsList] = useState([]);
   const [checkedListDragId, setCheckedListDragId] = useState(null);
-  const [reorderingCheckedList, setReorderingCheckedList] = useState(false);  const [updateSelectedItems, setUpdateSelectedItems] = useState([]);
+  const [reorderingCheckedList, setReorderingCheckedList] = useState(false);
+  const [updateSelectedItems, setUpdateSelectedItems] = useState([]);
+  const [subWorkListDragId, setSubWorkListDragId] = useState(null);
+  const [reorderingSubWorks, setReorderingSubWorks] = useState(false);
   const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [loadingEstimate, setLoadingEstimate] = useState(false);
@@ -1289,6 +1292,56 @@ export default function HomePage() {
       ...initialSubWorkForm,
       WorkId: prev.WorkId,
     }));
+  };
+
+  const persistSubWorkOrder = async (orderedList) => {
+    const workId = subWorkForm.WorkId;
+    if (!workId || !orderedList.length) return;
+    setReorderingSubWorks(true);
+    try {
+      await axios.put(`${API_BASE}/api/master-sub-works/reorder`, {
+        workId,
+        orderedIds: orderedList.map((row) => row.SubWorkId),
+      });
+      setSubWorksMasterList(
+        orderedList.map((row, idx) => ({
+          ...row,
+          Sequence: idx + 1,
+        })),
+      );
+      // Keep Estimation Sub Work dropdown in sync when same work is selected
+      if (Number(selectedProjectId) === Number(workId)) {
+        loadSubWorks(workId);
+      }
+    } catch (err) {
+      console.error(err);
+      alert(
+        `Sub Work reorder failed: ${err.response?.data?.message || err.message}`,
+      );
+      loadSubWorksMaster(workId);
+    } finally {
+      setReorderingSubWorks(false);
+    }
+  };
+
+  const moveSubWorkItem = (fromSubWorkId, toSubWorkId) => {
+    if (!fromSubWorkId || !toSubWorkId || fromSubWorkId === toSubWorkId) {
+      return;
+    }
+    setSubWorksMasterList((prev) => {
+      const fromIdx = prev.findIndex(
+        (r) => Number(r.SubWorkId) === Number(fromSubWorkId),
+      );
+      const toIdx = prev.findIndex(
+        (r) => Number(r.SubWorkId) === Number(toSubWorkId),
+      );
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      queueMicrotask(() => persistSubWorkOrder(next));
+      return next;
+    });
   };
 
   const onSubWorkChange = (e) => {
@@ -2430,6 +2483,11 @@ export default function HomePage() {
                 ? String(r.selectedAdditionId)
                 : "",
               ApplyForLead: r.ApplyForLead !== false,
+              ApplyLabourCess: r.ApplyLabourCess === true,
+              LabourCess:
+                r.LabourCess === null || r.LabourCess === undefined
+                  ? ""
+                  : String(r.LabourCess),
             }))
           : [],
       );
@@ -2487,6 +2545,30 @@ export default function HomePage() {
       prev.map((r) =>
         Number(r.SSRRegionId) === Number(regionId)
           ? { ...r, ApplyForLead: applyForLead }
+          : r,
+      ),
+    );
+  };
+
+  const onEstimateApplyLabourCessChange = (regionId, applyLabourCess) => {
+    setEstimateRegions((prev) =>
+      prev.map((r) =>
+        Number(r.SSRRegionId) === Number(regionId)
+          ? {
+              ...r,
+              ApplyLabourCess: applyLabourCess,
+              LabourCess: applyLabourCess ? r.LabourCess || "" : "",
+            }
+          : r,
+      ),
+    );
+  };
+
+  const onEstimateLabourCessChange = (regionId, labourCess) => {
+    setEstimateRegions((prev) =>
+      prev.map((r) =>
+        Number(r.SSRRegionId) === Number(regionId)
+          ? { ...r, LabourCess: labourCess }
           : r,
       ),
     );
@@ -2559,11 +2641,27 @@ export default function HomePage() {
         );
         return;
       }
+      const applyLabourCess = region.ApplyLabourCess === true;
+      if (applyLabourCess) {
+        if (
+          region.LabourCess === "" ||
+          region.LabourCess === null ||
+          region.LabourCess === undefined ||
+          Number.isNaN(Number(region.LabourCess))
+        ) {
+          alert(
+            `Labour Cess (%) is required for ${region.SSRRegionName || "region"} when Apply Labour Cess is Yes.`,
+          );
+          return;
+        }
+      }
       rows.push({
         SSRRegionId: region.SSRRegionId,
         Description: option.Description,
         Percentage: option.Percentage,
         ApplyForLead: region.ApplyForLead !== false,
+        ApplyLabourCess: applyLabourCess,
+        LabourCess: applyLabourCess ? Number(region.LabourCess) : null,
       });
     }
     if (
@@ -6118,116 +6216,233 @@ export default function HomePage() {
                               key={region.SSRRegionId}
                               style={{
                                 display: "grid",
-                                gridTemplateColumns: "1fr 2fr 1fr",
                                 gap: 14,
-                                alignItems: "end",
                                 padding: 12,
                                 border: `1px solid ${theme.colors.line}`,
                                 borderRadius: 8,
                                 background: theme.colors.paper,
                               }}
                             >
-                              <Field label="SSR Region">
-                                <input
-                                  value={
-                                    region.SSRRegionName ||
-                                    region.SSRRegionShortName ||
-                                    ""
-                                  }
-                                  disabled
-                                  readOnly
-                                  style={{
-                                    ...inputStyle,
-                                    background: "#EEF1F4",
-                                    color: theme.colors.inkSoft,
-                                    cursor: "not-allowed",
-                                  }}
-                                />
-                              </Field>
-                              <Field label="Description + Percentage">
-                                <select
-                                  value={region.selectedAdditionId || ""}
-                                  onChange={(e) =>
-                                    onEstimateAdditionChange(
-                                      region.SSRRegionId,
-                                      e.target.value,
-                                    )
-                                  }
-                                  style={inputStyle}
-                                >
-                                  <option value="">
-                                    Select standard addition (optional)
-                                  </option>
-                                  {(region.options || []).map((opt) => (
-                                    <option
-                                      key={opt.MasterStandardAdditionId}
-                                      value={opt.MasterStandardAdditionId}
-                                    >
-                                      {opt.Description}
-                                      {opt.Percentage !== null &&
-                                      opt.Percentage !== undefined
-                                        ? ` — ${opt.Percentage}%`
-                                        : ""}
-                                      {opt.Year ? ` (${opt.Year})` : ""}
+                              <div
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "1fr 2fr",
+                                  gap: 14,
+                                  alignItems: "end",
+                                }}
+                              >
+                                <Field label="SSR Region">
+                                  <input
+                                    value={
+                                      region.SSRRegionName ||
+                                      region.SSRRegionShortName ||
+                                      ""
+                                    }
+                                    disabled
+                                    readOnly
+                                    style={{
+                                      ...inputStyle,
+                                      background: "#EEF1F4",
+                                      color: theme.colors.inkSoft,
+                                      cursor: "not-allowed",
+                                    }}
+                                  />
+                                </Field>
+                                <Field label="Description + Percentage">
+                                  <select
+                                    value={region.selectedAdditionId || ""}
+                                    onChange={(e) =>
+                                      onEstimateAdditionChange(
+                                        region.SSRRegionId,
+                                        e.target.value,
+                                      )
+                                    }
+                                    style={inputStyle}
+                                  >
+                                    <option value="">
+                                      Select standard addition (optional)
                                     </option>
-                                  ))}
-                                </select>
-                              </Field>
-                              <Field label="Apply For Lead">
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 16,
-                                    minHeight: 42,
-                                  }}
-                                >
-                                  <label
+                                    {(region.options || []).map((opt) => (
+                                      <option
+                                        key={opt.MasterStandardAdditionId}
+                                        value={opt.MasterStandardAdditionId}
+                                      >
+                                        {opt.Description}
+                                        {opt.Percentage !== null &&
+                                        opt.Percentage !== undefined
+                                          ? ` — ${opt.Percentage}%`
+                                          : ""}
+                                        {opt.Year ? ` (${opt.Year})` : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </Field>
+                              </div>
+                              <div
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns:
+                                    region.ApplyLabourCess === true
+                                      ? "1fr 1fr 1fr"
+                                      : "1fr 1fr",
+                                  gap: 14,
+                                  alignItems: "end",
+                                }}
+                              >
+                                <Field label="Apply For Lead">
+                                  <div
                                     style={{
                                       display: "flex",
                                       alignItems: "center",
-                                      gap: 6,
-                                      fontWeight: 500,
-                                      cursor: "pointer",
+                                      gap: 16,
+                                      minHeight: 42,
                                     }}
                                   >
-                                    <input
-                                      type="radio"
-                                      name={`applyForLead-${region.SSRRegionId}`}
-                                      checked={region.ApplyForLead !== false}
-                                      onChange={() =>
-                                        onEstimateApplyForLeadChange(
-                                          region.SSRRegionId,
-                                          true,
-                                        )
-                                      }
-                                    />
-                                    Yes
-                                  </label>
-                                  <label
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        fontWeight: 500,
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name={`applyForLead-${region.SSRRegionId}`}
+                                        checked={region.ApplyForLead !== false}
+                                        onChange={() =>
+                                          onEstimateApplyForLeadChange(
+                                            region.SSRRegionId,
+                                            true,
+                                          )
+                                        }
+                                      />
+                                      Yes
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        fontWeight: 500,
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name={`applyForLead-${region.SSRRegionId}`}
+                                        checked={region.ApplyForLead === false}
+                                        onChange={() =>
+                                          onEstimateApplyForLeadChange(
+                                            region.SSRRegionId,
+                                            false,
+                                          )
+                                        }
+                                      />
+                                      No
+                                    </label>
+                                  </div>
+                                </Field>
+                                <Field label="Apply Labour Cess">
+                                  <div
                                     style={{
                                       display: "flex",
                                       alignItems: "center",
-                                      gap: 6,
-                                      fontWeight: 500,
-                                      cursor: "pointer",
+                                      gap: 16,
+                                      minHeight: 42,
                                     }}
                                   >
-                                    <input
-                                      type="radio"
-                                      name={`applyForLead-${region.SSRRegionId}`}
-                                      checked={region.ApplyForLead === false}
-                                      onChange={() =>
-                                        onEstimateApplyForLeadChange(
-                                          region.SSRRegionId,
-                                          false,
-                                        )
-                                      }
-                                    />
-                                    No
-                                  </label>
-                                </div>
-                              </Field>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        fontWeight: 500,
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name={`applyLabourCess-${region.SSRRegionId}`}
+                                        checked={
+                                          region.ApplyLabourCess === true
+                                        }
+                                        onChange={() =>
+                                          onEstimateApplyLabourCessChange(
+                                            region.SSRRegionId,
+                                            true,
+                                          )
+                                        }
+                                      />
+                                      Yes
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        fontWeight: 500,
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name={`applyLabourCess-${region.SSRRegionId}`}
+                                        checked={
+                                          region.ApplyLabourCess !== true
+                                        }
+                                        onChange={() =>
+                                          onEstimateApplyLabourCessChange(
+                                            region.SSRRegionId,
+                                            false,
+                                          )
+                                        }
+                                      />
+                                      No
+                                    </label>
+                                  </div>
+                                </Field>
+                                {region.ApplyLabourCess === true && (
+                                  <Field label="Labour Cess">
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                      }}
+                                    >
+                                      <input
+                                        type="number"
+                                        step="any"
+                                        min="0"
+                                        value={region.LabourCess ?? ""}
+                                        onChange={(e) =>
+                                          onEstimateLabourCessChange(
+                                            region.SSRRegionId,
+                                            e.target.value,
+                                          )
+                                        }
+                                        placeholder="e.g. 1.5"
+                                        required
+                                        style={{
+                                          ...inputStyle,
+                                          flex: 1,
+                                        }}
+                                      />
+                                      <span
+                                        style={{
+                                          fontWeight: 700,
+                                          color: theme.colors.inkSoft,
+                                          minWidth: 18,
+                                        }}
+                                      >
+                                        %
+                                      </span>
+                                    </div>
+                                  </Field>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -6555,15 +6770,12 @@ export default function HomePage() {
                             </thead>
                             <tbody>
                               {itemList.map((item) => {
-                                // ItemNumber: chapter.parent.child...
-                                // Only final (root) child items are selectable;
-                                // parent wording rows stay visible but not checkable.
+                                // Selectable when item has a CompletedRate.
+                                // Parent wording rows usually have no rate.
                                 const canSelect =
-                                  (item.IsFinal === true ||
-                                    item.IsFinal === "t" ||
-                                    item.IsFinal === 1) &&
                                   item.CompletedRate != null &&
-                                  item.CompletedRate !== "";
+                                  item.CompletedRate !== "" &&
+                                  Number.isFinite(Number(item.CompletedRate));
                                 return (
                                   <tr
                                     key={item.ItemId}
@@ -6574,7 +6786,7 @@ export default function HomePage() {
                                     }
                                   >
                                     <td>
-                                      {canSelect && (
+                                      {canSelect ? (
                                         <input
                                           type="checkbox"
                                           value={item.ItemId}
@@ -6601,7 +6813,7 @@ export default function HomePage() {
                                             }
                                           }}
                                         />
-                                      )}
+                                      ) : null}
                                     </td>
                                     <td
                                       style={{
@@ -6781,19 +6993,17 @@ export default function HomePage() {
                                       }}
                                     >
                                       <td>
-                                        {item.CompletedRate && (
-                                          <input
-                                            type="checkbox"
-                                            checked={isOpen}
-                                            value={item.WorkAbstractId}
-                                            onChange={(e) =>
-                                              onCheckedItemToggle(
-                                                item.WorkAbstractId,
-                                                e.target.checked,
-                                              )
-                                            }
-                                          />
-                                        )}
+                                        <input
+                                          type="checkbox"
+                                          checked={isOpen}
+                                          value={item.WorkAbstractId}
+                                          onChange={(e) =>
+                                            onCheckedItemToggle(
+                                              item.WorkAbstractId,
+                                              e.target.checked,
+                                            )
+                                          }
+                                        />
                                       </td>
                                       <td
                                         style={{
@@ -6867,6 +7077,16 @@ export default function HomePage() {
                                         projectId={selectedProjectId}
                                         subWorkId={selectedSubWorkId}
                                         API_BASE={API_BASE}
+                                        onCommentSaved={(workAbstractId, comment) => {
+                                          setCheckedItemsList((prev) =>
+                                            prev.map((row) =>
+                                              Number(row.WorkAbstractId) ===
+                                              Number(workAbstractId)
+                                                ? { ...row, Comment: comment }
+                                                : row,
+                                            ),
+                                          );
+                                        }}
                                       />
                                     )}
                                   </Fragment>
@@ -7488,9 +7708,14 @@ export default function HomePage() {
                   <Field label="Sequence">
                     <input
                       name="Sequence"
+                      type="number"
+                      min="1"
+                      step="1"
                       value={subWorkForm.Sequence}
                       onChange={onSubWorkChange}
+                      placeholder="Optional — auto by entry order"
                       style={inputStyle}
+                      title="Leave blank to assign next Sequence for this Work"
                     />
                   </Field>
                   <Field label="Mark for deletion">
@@ -7560,6 +7785,19 @@ export default function HomePage() {
                 </Field>
               </div>
 
+              {subWorkForm.WorkId && subWorksMasterList.length > 0 && (
+                <div
+                  style={{
+                    fontSize: 12.5,
+                    color: theme.colors.inkSoft,
+                    marginBottom: 8,
+                  }}
+                >
+                  Drag ⠿ to change Sub Work sequence (starts at 1 for this
+                  Work).
+                  {reorderingSubWorks ? " Updating sequence…" : ""}
+                </div>
+              )}
               <div
                 style={{
                   overflowX: "auto",
@@ -7570,24 +7808,77 @@ export default function HomePage() {
                 <table className="wrms-table">
                   <thead>
                     <tr>
+                      <th style={{ width: 40 }}>Seq</th>
+                      <th style={{ width: 28 }} />
                       <th>ID</th>
                       <th>Work</th>
                       <th>Sub Work Name</th>
-                      <th>Sequence</th>
                       <th>Deleted</th>
                       <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {!subWorkForm.WorkId ? (
-                      <EmptyRow colSpan={6}>
+                      <EmptyRow colSpan={7}>
                         Select a work above to list sub-works.
                       </EmptyRow>
                     ) : loadingSubWorksMaster ? (
-                      <EmptyRow colSpan={6}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={7}>Loading…</EmptyRow>
                     ) : subWorksMasterList.length ? (
                       subWorksMasterList.map((subWork) => (
-                        <tr key={subWork.SubWorkId}>
+                        <tr
+                          key={subWork.SubWorkId}
+                          onDragOver={(e) => {
+                            if (!subWorkListDragId) return;
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const fromId =
+                              e.dataTransfer.getData("text/plain") ||
+                              subWorkListDragId;
+                            moveSubWorkItem(fromId, subWork.SubWorkId);
+                            setSubWorkListDragId(null);
+                          }}
+                          style={
+                            Number(subWorkListDragId) ===
+                            Number(subWork.SubWorkId)
+                              ? { opacity: 0.55 }
+                              : undefined
+                          }
+                        >
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              fontWeight: 700,
+                              color: theme.colors.accent,
+                              textAlign: "center",
+                            }}
+                          >
+                            {subWork.Sequence ?? ""}
+                          </td>
+                          <td
+                            draggable={!reorderingSubWorks}
+                            onDragStart={(e) => {
+                              setSubWorkListDragId(subWork.SubWorkId);
+                              e.dataTransfer.effectAllowed = "move";
+                              e.dataTransfer.setData(
+                                "text/plain",
+                                String(subWork.SubWorkId),
+                              );
+                            }}
+                            onDragEnd={() => setSubWorkListDragId(null)}
+                            title="Drag to reorder"
+                            style={{
+                              cursor: reorderingSubWorks ? "default" : "grab",
+                              color: theme.colors.inkSoft,
+                              textAlign: "center",
+                              userSelect: "none",
+                            }}
+                          >
+                            ⠿
+                          </td>
                           <td
                             style={{
                               fontFamily: theme.font.mono,
@@ -7606,9 +7897,6 @@ export default function HomePage() {
                               "—"}
                           </td>
                           <td>{subWork.SubWorkName}</td>
-                          <td style={{ fontFamily: theme.font.mono }}>
-                            {subWork.Sequence ?? "—"}
-                          </td>
                           <td>
                             <Badge
                               tone={subWork.MarkForDeletion ? "red" : "green"}
@@ -7626,7 +7914,7 @@ export default function HomePage() {
                         </tr>
                       ))
                     ) : (
-                      <EmptyRow colSpan={6}>
+                      <EmptyRow colSpan={7}>
                         No sub works found for this work — add one above.
                       </EmptyRow>
                     )}

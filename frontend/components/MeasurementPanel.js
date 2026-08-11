@@ -90,7 +90,13 @@ function mapDbRows(dbRows) {
   });
 }
 
-function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
+function MeasurementPanel({
+  item,
+  projectId,
+  subWorkId,
+  API_BASE,
+  onCommentSaved,
+}) {
   const apiBase =
     API_BASE ||
     process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -101,6 +107,10 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
   const [reordering, setReordering] = useState(false);
   const [error, setError] = useState("");
   const [dragLocalId, setDragLocalId] = useState(null);
+  const COMMENT_MAX_LEN = 500;
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [commentText, setCommentText] = useState("");
+  const [savingComment, setSavingComment] = useState(false);
 
   const reloadRows = async () => {
     const res = await axios.get(`${apiBase}/api/measurements`, {
@@ -242,6 +252,7 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
     }
   };
 
+  // Any typed content (used for auto-adding the next blank row)
   const rowHasContent = (r) =>
     r.desc.trim() ||
     r.meas.trim() ||
@@ -250,10 +261,60 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
     r.brd.trim() ||
     r.hgt.trim();
 
+  // Must have measurement fields — description-only rows are not saved
+  const rowHasMeasurementData = (r) =>
+    Boolean(
+      r.meas.trim() ||
+        r.num.trim() ||
+        r.len.trim() ||
+        r.brd.trim() ||
+        r.hgt.trim(),
+    );
+
+  const openCommentModal = () => {
+    const existing =
+      item?.Comment != null ? String(item.Comment).slice(0, COMMENT_MAX_LEN) : "";
+    setCommentText(existing);
+    setCommentOpen(true);
+    setError("");
+  };
+
+  const saveComment = async () => {
+    if (!item?.WorkAbstractId) return;
+    setSavingComment(true);
+    setError("");
+    try {
+      const res = await axios.put(
+        `${apiBase}/api/work-abstract/${item.WorkAbstractId}/comment`,
+        { comment: commentText },
+      );
+      const saved =
+        res.data?.data?.Comment ?? (commentText.trim() || null);
+      if (typeof onCommentSaved === "function") {
+        onCommentSaved(item.WorkAbstractId, saved);
+      }
+      setCommentOpen(false);
+      alert("Comment saved successfully.");
+    } catch (err) {
+      setError(
+        `Comment save failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setSavingComment(false);
+    }
+  };
+
   const saveAll = async () => {
-    const toSave = rows.filter((r) => r.dirty && rowHasContent(r));
+    const toSave = rows.filter((r) => r.dirty && rowHasMeasurementData(r));
+    const descOnlySkipped = rows.filter(
+      (r) => r.dirty && r.desc.trim() && !rowHasMeasurementData(r),
+    );
     if (!toSave.length) {
-      setError("Nothing new to save.");
+      setError(
+        descOnlySkipped.length
+          ? "Nothing to save. Rows with only Description are not saved."
+          : "Nothing new to save.",
+      );
       return;
     }
     setError("");
@@ -310,7 +371,7 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
   };
 
   const total = (rows ?? []).reduce((sum, r) => {
-    if (!rowHasContent(r)) return sum;
+    if (!rowHasMeasurementData(r)) return sum;
     const res = computeQty(r);
     return sum + (res.val ?? 0);
   }, 0);
@@ -435,21 +496,50 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
     );
   }
 
-  const dirtyCount = rows.filter((r) => r.dirty && rowHasContent(r)).length;
+  const dirtyCount = rows.filter(
+    (r) => r.dirty && rowHasMeasurementData(r),
+  ).length;
 
   return (
     <tr>
       <td colSpan={8} style={s.cell}>
         <div
           style={{
-            fontSize: 11,
-            fontWeight: 700,
-            color: "#3a6fbf",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            flexWrap: "wrap",
             marginBottom: 6,
-            letterSpacing: "0.03em",
           }}
         >
-          📐 MEASUREMENTS — Item #{item.ItemId} · {item.ItemNumber}
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: "#3a6fbf",
+              letterSpacing: "0.03em",
+            }}
+          >
+            📐 MEASUREMENTS — Item #{item.ItemId} · {item.ItemNumber}
+          </div>
+          <button
+            type="button"
+            onClick={openCommentModal}
+            title="Add Comment Max 500 Characters"
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "6px 12px",
+              borderRadius: 6,
+              border: "1px solid #9bb8e0",
+              background: "#eef5ff",
+              color: "#185FA5",
+              cursor: "pointer",
+            }}
+          >
+            Add Comment Max 500 Characters
+          </button>
         </div>
         <div
           style={{
@@ -460,6 +550,7 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
         >
           Drag ⠿ to change sequence. Sequence starts at 1 for this item.
           Empty No./L/B/H are treated as 1 when calculating quantity.
+          Rows with only Description are not saved.
           {reordering ? " Updating sequence…" : ""}
         </div>
 
@@ -653,7 +744,7 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
               : `✓ Save measurements${dirtyCount > 0 ? ` (${dirtyCount})` : ""}`}
           </button>
 
-          {rows.filter(rowHasContent).length > 0 && (
+          {rows.filter(rowHasMeasurementData).length > 0 && (
             <div
               style={{
                 padding: "6px 14px",
@@ -672,6 +763,141 @@ function MeasurementPanel({ item, projectId, subWorkId, API_BASE }) {
             </div>
           )}
         </div>
+
+        {commentOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(20, 30, 45, 0.45)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 2000,
+              padding: 16,
+            }}
+            onClick={() => !savingComment && setCommentOpen(false)}
+          >
+            <div
+              role="dialog"
+              aria-label="Add Comment Max 500 Characters"
+              style={{
+                width: "100%",
+                maxWidth: 480,
+                background: "#fff",
+                borderRadius: 12,
+                border: "1px solid #c5d5ee",
+                boxShadow: "0 12px 40px rgba(36, 50, 63, 0.18)",
+                padding: 20,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  fontSize: 15,
+                  fontWeight: 700,
+                  color: "#24323f",
+                  marginBottom: 4,
+                }}
+              >
+                Add Comment Max 500 Characters
+              </div>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#5d6c7a",
+                  marginBottom: 12,
+                }}
+              >
+                Item #{item.ItemId} · {item.ItemNumber}
+              </div>
+              <textarea
+                value={commentText}
+                onChange={(e) =>
+                  setCommentText(e.target.value.slice(0, COMMENT_MAX_LEN))
+                }
+                maxLength={COMMENT_MAX_LEN}
+                rows={5}
+                placeholder="Enter comment for this checked item…"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  fontSize: 13,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #c5d5ee",
+                  color: "#24323f",
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                }}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginTop: 6,
+                  fontSize: 12,
+                  color:
+                    commentText.length >= COMMENT_MAX_LEN
+                      ? "#cc2222"
+                      : "#5d6c7a",
+                }}
+              >
+                <span>
+                  {commentText.length} / {COMMENT_MAX_LEN} characters
+                </span>
+                <span>
+                  {COMMENT_MAX_LEN - commentText.length} remaining
+                </span>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: 8,
+                  marginTop: 14,
+                }}
+              >
+                <button
+                  type="button"
+                  disabled={savingComment}
+                  onClick={() => setCommentOpen(false)}
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    padding: "7px 14px",
+                    borderRadius: 6,
+                    border: "1px solid #c5d5ee",
+                    background: "#fff",
+                    color: "#5d6c7a",
+                    cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={savingComment}
+                  onClick={saveComment}
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    padding: "7px 14px",
+                    borderRadius: 6,
+                    border: "1px solid #185FA5",
+                    background: "#185FA5",
+                    color: "#fff",
+                    cursor: savingComment ? "default" : "pointer",
+                    opacity: savingComment ? 0.7 : 1,
+                  }}
+                >
+                  {savingComment ? "Saving…" : "Save Comment"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </td>
     </tr>
   );

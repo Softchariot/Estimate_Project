@@ -11,6 +11,7 @@ import {
   Select,
   Option,
   Stack,
+  Box,
 } from "@mui/joy";
 
 async function readApiJson(res) {
@@ -45,7 +46,7 @@ function toDateInputValue(value) {
 
 function displayValue(value) {
   if (value === null || value === undefined || value === "") return "";
-  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value);
 }
 
@@ -76,10 +77,11 @@ function FieldLabel({ children, editable, editing, onToggleEdit }) {
         alignItems: "center",
         justifyContent: "space-between",
         gap: 1,
-        mb: 0.5,
+        mb: 0.45,
         fontWeight: 600,
-        fontSize: 12.5,
-        color: "#24323f",
+        fontSize: 12,
+        color: "#3d4f60",
+        letterSpacing: "0.01em",
       }}
     >
       <span>{children}</span>
@@ -93,8 +95,8 @@ function FieldLabel({ children, editable, editing, onToggleEdit }) {
             border: "1px solid #c8d4df",
             background: editing ? "#eaf2ff" : "#fff",
             borderRadius: 6,
-            width: 28,
-            height: 28,
+            width: 26,
+            height: 26,
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
@@ -109,56 +111,94 @@ function FieldLabel({ children, editable, editing, onToggleEdit }) {
   );
 }
 
-// MasterUser columns in table order. Editable: Address, DOJ, DOB, Designation.
-const PROFILE_FIELDS = [
-  { key: "UserId", label: "User Id", editable: false },
-  { key: "UserCategoryId", label: "User Category Id", editable: false },
-  { key: "OrganizationId", label: "Organization Id", editable: false },
-  {
-    key: "DesignationId",
-    label: "Designation",
-    editable: true,
-    control: "designation",
-  },
-  { key: "UserLoginName", label: "User Login Name", editable: false },
-  { key: "UserName", label: "User Name", editable: false },
-  {
-    key: "UserAddress",
-    label: "User Address",
-    editable: true,
-    control: "textarea",
-  },
-  {
-    key: "UserDateOfJoining",
-    label: "Date of Joining",
-    editable: true,
-    control: "date",
-  },
-  {
-    key: "UserDateOfBirth",
-    label: "Date of Birth",
-    editable: true,
-    control: "date",
-  },
-  { key: "UserContact", label: "User Contact", editable: false },
-  { key: "UserEmail", label: "User Email", editable: false },
-  { key: "MarkForDeletion", label: "Mark For Deletion", editable: false },
-  {
-    key: "UserPWD",
-    label: "User Password",
-    editable: false,
-    inputType: "password",
-  },
-  { key: "IsActive", label: "Is Active", editable: false },
-  {
-    key: "DateOfRelieving",
-    label: "Date Of Relieving",
-    editable: false,
-    control: "date",
-  },
-  { key: "DOrder", label: "DOrder", editable: false },
-  { key: "Remarks", label: "Remarks", editable: false },
+/**
+ * Row groups — multiple fields per row based on typical value width.
+ * displayKey: joined name from API (e.g. UserCategoryName, OrgName)
+ */
+const PROFILE_ROWS = [
+  [
+    { key: "UserId", label: "User Id", span: 1 },
+    {
+      key: "UserCategoryId",
+      label: "User Category",
+      displayKey: "UserCategoryName",
+      span: 1,
+    },
+    {
+      key: "OrganizationId",
+      label: "Organization",
+      displayKey: "OrgName",
+      span: 2,
+    },
+  ],
+  [
+    { key: "UserLoginName", label: "User Login Name", span: 1 },
+    { key: "UserName", label: "User Name", span: 1 },
+    {
+      key: "DesignationId",
+      label: "Designation",
+      editable: true,
+      control: "designation",
+      span: 2,
+    },
+  ],
+  [
+    { key: "UserContact", label: "User Contact", span: 1 },
+    { key: "UserEmail", label: "User Email", span: 2 },
+    {
+      key: "UserPWD",
+      label: "User Password",
+      inputType: "password",
+      span: 1,
+    },
+  ],
+  [
+    {
+      key: "UserDateOfJoining",
+      label: "Date of Joining",
+      editable: true,
+      control: "date",
+      span: 1,
+    },
+    {
+      key: "UserDateOfBirth",
+      label: "Date of Birth",
+      editable: true,
+      control: "date",
+      span: 1,
+    },
+    {
+      key: "DateOfRelieving",
+      label: "Date Of Relieving",
+      control: "date",
+      span: 1,
+    },
+    { key: "DOrder", label: "DOrder", span: 1 },
+  ],
+  [
+    {
+      key: "UserAddress",
+      label: "User Address",
+      editable: true,
+      control: "textarea",
+      span: 4,
+    },
+  ],
+  [
+    { key: "IsActive", label: "Is Active", span: 1 },
+    { key: "MarkForDeletion", label: "Mark For Deletion", span: 1 },
+    { key: "Remarks", label: "Remarks", span: 2 },
+  ],
 ];
+
+const GRID_COLS = 4;
+
+const disabledInputSx = {
+  "--Input-focusedThickness": "0px",
+  backgroundColor: "#f3f6f9",
+  color: "#4a5a6a",
+  cursor: "not-allowed",
+};
 
 export default function UserProfileModal({
   open,
@@ -290,10 +330,19 @@ export default function UserProfileModal({
       form.UserDateOfBirth !== toDateInputValue(profile.UserDateOfBirth) ||
       String(form.DesignationId || "") !== String(profile.DesignationId || ""));
 
+  const fieldBoxSx = (span) => ({
+    gridColumn: {
+      xs: "span 4",
+      sm: `span ${Math.min(span * 2, GRID_COLS)}`,
+      md: `span ${span}`,
+    },
+    minWidth: 0,
+  });
+
   const renderField = (field) => {
     if (field.editable && field.control === "textarea") {
       return (
-        <div key={field.key}>
+        <Box key={field.key} sx={fieldBoxSx(field.span)}>
           <FieldLabel
             editable
             editing={editFlags.UserAddress}
@@ -309,14 +358,15 @@ export default function UserProfileModal({
             onChange={(e) =>
               setForm((prev) => ({ ...prev, UserAddress: e.target.value }))
             }
+            sx={!editFlags.UserAddress ? disabledInputSx : undefined}
           />
-        </div>
+        </Box>
       );
     }
 
     if (field.editable && field.control === "date") {
       return (
-        <div key={field.key}>
+        <Box key={field.key} sx={fieldBoxSx(field.span)}>
           <FieldLabel
             editable
             editing={editFlags[field.key]}
@@ -332,14 +382,15 @@ export default function UserProfileModal({
             onChange={(e) =>
               setForm((prev) => ({ ...prev, [field.key]: e.target.value }))
             }
+            sx={!editFlags[field.key] ? disabledInputSx : undefined}
           />
-        </div>
+        </Box>
       );
     }
 
     if (field.editable && field.control === "designation") {
       return (
-        <div key={field.key}>
+        <Box key={field.key} sx={fieldBoxSx(field.span)}>
           <FieldLabel
             editable
             editing={editFlags.DesignationId}
@@ -358,6 +409,7 @@ export default function UserProfileModal({
               }))
             }
             placeholder="Select designation"
+            sx={!editFlags.DesignationId ? disabledInputSx : undefined}
           >
             {designations.map((d) => (
               <Option key={d.DesignationId} value={String(d.DesignationId)}>
@@ -365,17 +417,21 @@ export default function UserProfileModal({
               </Option>
             ))}
           </Select>
-        </div>
+        </Box>
       );
     }
 
+    const raw =
+      field.displayKey && profile?.[field.displayKey] != null
+        ? profile[field.displayKey]
+        : profile?.[field.key];
     const value =
       field.control === "date"
         ? toDateInputValue(profile?.[field.key])
-        : displayValue(profile?.[field.key]);
+        : displayValue(raw);
 
     return (
-      <div key={field.key}>
+      <Box key={field.key} sx={fieldBoxSx(field.span)}>
         <FieldLabel>{field.label}</FieldLabel>
         <Input
           size="sm"
@@ -383,8 +439,9 @@ export default function UserProfileModal({
           value={value}
           disabled
           readOnly
+          sx={disabledInputSx}
         />
-      </div>
+      </Box>
     );
   };
 
@@ -392,19 +449,25 @@ export default function UserProfileModal({
     <Modal open={open} onClose={onClose}>
       <ModalDialog
         sx={{
-          width: "min(720px, calc(100vw - 24px))",
+          width: "min(980px, calc(100vw - 24px))",
           maxHeight: "calc(100vh - 32px)",
           overflow: "auto",
-          p: 3,
+          p: { xs: 2, md: 3 },
+          background:
+            "linear-gradient(180deg, #f7fafc 0%, #ffffff 120px, #ffffff 100%)",
+          border: "1px solid #d7e0e8",
         }}
       >
         <ModalClose />
-        <Typography level="h4" sx={{ mb: 0.5 }}>
+        <Typography
+          level="h4"
+          sx={{ mb: 0.25, color: "#1f3344", fontWeight: 750 }}
+        >
           User Profile
         </Typography>
-        <Typography level="body-sm" sx={{ mb: 2, color: "#5d6c7a" }}>
-          All MasterUser fields. Click the pen to edit Address, Date of Joining,
-          Date of Birth, or Designation.
+        <Typography level="body-sm" sx={{ mb: 2.25, color: "#5d6c7a" }}>
+          View your account details. Use the pen icon to edit Address, Date of
+          Joining, Date of Birth, or Designation.
         </Typography>
 
         {loading && (
@@ -444,10 +507,30 @@ export default function UserProfileModal({
         )}
 
         {!loading && profile && (
-          <Stack spacing={1.5}>
-            {PROFILE_FIELDS.map(renderField)}
+          <Stack spacing={2}>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                gap: 1.5,
+                p: { xs: 1.5, md: 2 },
+                borderRadius: 10,
+                border: "1px solid #dde5ec",
+                background: "#fff",
+                boxShadow: "0 1px 0 rgba(36, 50, 63, 0.04)",
+              }}
+            >
+              {PROFILE_ROWS.flatMap((row) => row.map(renderField))}
+            </Box>
 
-            <Stack direction="row" spacing={1} sx={{ pt: 1 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ pt: 0.5, justifyContent: "flex-end" }}
+            >
+              <Button variant="outlined" color="neutral" onClick={onClose}>
+                Close
+              </Button>
               <Button
                 variant="solid"
                 loading={saving}
@@ -455,9 +538,6 @@ export default function UserProfileModal({
                 onClick={onSave}
               >
                 Save Changes
-              </Button>
-              <Button variant="outlined" color="neutral" onClick={onClose}>
-                Close
               </Button>
             </Stack>
           </Stack>

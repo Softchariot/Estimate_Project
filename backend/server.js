@@ -181,6 +181,10 @@ async function ensureWorkAbstractSchema() {
       ADD COLUMN IF NOT EXISTS "FinalRate" numeric
   `);
   await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "Comment" character varying
+  `);
+  await pool.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -195,7 +199,9 @@ async function ensureWorkAbstractSchema() {
   // Do not auto-migrate ProjectId -> WorkId: MasterWorkId can collide with
   // historical MasterProject ids, which would mix old project abstracts into
   // the Estimation Checked Items List.
-  console.log("WorkAbstract schema ensured (WorkId, IsRA, RateString, FinalRate).");
+  console.log(
+    "WorkAbstract schema ensured (WorkId, IsRA, RateString, FinalRate, Comment).",
+  );
 }
 
 /** Ensure MasterWork.CreationDate exists for Work Master. */
@@ -1730,7 +1736,7 @@ app.get("/api/get-items-checked-list", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT w."WorkAbstractId", w."ItemId", w."Sequence",
+      `SELECT w."WorkAbstractId", w."ItemId", w."Sequence", w."Comment",
               i."ItemNumber", i."ItemDescription",
               i."CompletedRate", u."UnitShortName"
        FROM "WorkAbstract" w
@@ -1741,6 +1747,48 @@ app.get("/api/get-items-checked-list", async (req, res) => {
       [resolvedWorkId, resolvedSubWorkId],
     );
     return res.status(200).send({ data: result.rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+/** Save Comment on a WorkAbstract row (checked item). Max 500 characters. */
+app.put("/api/work-abstract/:workAbstractId/comment", async (req, res) => {
+  const workAbstractId = Number(req.params.workAbstractId);
+  if (!workAbstractId) {
+    return res.status(400).json({ message: "workAbstractId is required." });
+  }
+  const COMMENT_MAX_LEN = 500;
+  let comment =
+    req.body?.comment === null || req.body?.comment === undefined
+      ? null
+      : String(req.body.comment);
+  if (comment !== null) {
+    if (comment.length > COMMENT_MAX_LEN) {
+      return res.status(400).json({
+        message: `Comment cannot exceed ${COMMENT_MAX_LEN} characters.`,
+      });
+    }
+    comment = comment.trim() || null;
+  }
+
+  try {
+    await ensureWorkAbstractSchema();
+    const result = await pool.query(
+      `UPDATE "WorkAbstract"
+       SET "Comment" = $1
+       WHERE "WorkAbstractId" = $2
+       RETURNING "WorkAbstractId", "ItemId", "Comment"`,
+      [comment, workAbstractId],
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Checked item was not found." });
+    }
+    return res.status(200).json({
+      message: "Comment saved successfully.",
+      data: result.rows[0],
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: err.message });
@@ -2024,6 +2072,17 @@ app.put("/api/master-projects/:id", async (req, res) => {
   }
 });
 
+/** Next MasterSubWork.Sequence for a Work (entry order). */
+async function nextMasterSubWorkSequence(workId, client = pool) {
+  const maxSeq = await client.query(
+    `SELECT COALESCE(MAX("Sequence"), 0) + 1 AS "NextSequence"
+     FROM "MasterSubWork"
+     WHERE "WorkId" = $1`,
+    [Number(workId)],
+  );
+  return Number(maxSeq.rows[0]?.NextSequence || 1);
+}
+
 app.post("/api/insert-subwork", async (req, res) => {
   const { workId, masterWorkId, subWorkName, sequence, markForDeletion } =
     req.body || {};
@@ -2045,6 +2104,18 @@ app.post("/api/insert-subwork", async (req, res) => {
       return res.status(400).json({ message: "Selected work was not found." });
     }
 
+    let resolvedSequence =
+      sequence === "" || sequence === null || sequence === undefined
+        ? null
+        : Number(sequence);
+    if (
+      resolvedSequence === null ||
+      Number.isNaN(resolvedSequence)
+    ) {
+      // No Sequence entered — assign next by entry order for this Work
+      resolvedSequence = await nextMasterSubWorkSequence(resolvedWorkId);
+    }
+
     const result = await pool.query(
       `INSERT INTO "MasterSubWork"
         ("WorkId", "SubWorkName", "Sequence", "MarkForDeletion")
@@ -2053,9 +2124,7 @@ app.post("/api/insert-subwork", async (req, res) => {
       [
         resolvedWorkId,
         String(subWorkName).trim(),
-        sequence === "" || sequence === null || sequence === undefined
-          ? null
-          : Number(sequence),
+        resolvedSequence,
         Boolean(markForDeletion),
       ],
     );
@@ -2066,6 +2135,73 @@ app.post("/api/insert-subwork", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: err.message });
+  }
+});
+
+/** Reorder MasterSubWork.Sequence for a Work (1, 2, 3…). */
+app.put("/api/master-sub-works/reorder", async (req, res) => {
+  const { workId, masterWorkId, orderedIds } = req.body || {};
+  const resolvedWorkId = Number(workId || masterWorkId);
+  const ids = Array.isArray(orderedIds)
+    ? orderedIds.map((id) => Number(id)).filter((id) => id > 0)
+    : [];
+
+  if (!resolvedWorkId || ids.length === 0) {
+    return res.status(400).json({
+      message: "workId and orderedIds are required.",
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const existing = await client.query(
+      `SELECT "SubWorkId" FROM "MasterSubWork" WHERE "WorkId" = $1`,
+      [resolvedWorkId],
+    );
+    const existingIds = new Set(
+      existing.rows.map((r) => Number(r.SubWorkId)),
+    );
+    if (
+      ids.length !== existingIds.size ||
+      ids.some((id) => !existingIds.has(id))
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message:
+          "orderedIds must include every Sub Work for this Work exactly once.",
+      });
+    }
+
+    await client.query(
+      `UPDATE "MasterSubWork"
+       SET "Sequence" = "Sequence" + 100000
+       WHERE "WorkId" = $1`,
+      [resolvedWorkId],
+    );
+
+    for (let i = 0; i < ids.length; i += 1) {
+      await client.query(
+        `UPDATE "MasterSubWork"
+         SET "Sequence" = $1
+         WHERE "SubWorkId" = $2 AND "WorkId" = $3`,
+        [i + 1, ids[i], resolvedWorkId],
+      );
+    }
+
+    await client.query("COMMIT");
+    return res.status(200).json({ message: "Sub Work sequence updated." });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -2095,6 +2231,30 @@ app.put("/api/master-sub-works/:id", async (req, res) => {
       return res.status(400).json({ message: "Selected work was not found." });
     }
 
+    const existing = await pool.query(
+      `SELECT "Sequence" FROM "MasterSubWork" WHERE "SubWorkId" = $1`,
+      [subWorkId],
+    );
+    if (!existing.rows[0]) {
+      return res.status(404).json({ message: "Sub Work not found." });
+    }
+
+    let resolvedSequence =
+      sequence === "" || sequence === null || sequence === undefined
+        ? null
+        : Number(sequence);
+    if (
+      resolvedSequence === null ||
+      Number.isNaN(resolvedSequence)
+    ) {
+      // Keep existing Sequence; if it was never set, assign next by entry order
+      const existingSeq = existing.rows[0].Sequence;
+      resolvedSequence =
+        existingSeq === null || existingSeq === undefined
+          ? await nextMasterSubWorkSequence(resolvedWorkId)
+          : Number(existingSeq);
+    }
+
     const result = await pool.query(
       `UPDATE "MasterSubWork"
        SET "WorkId" = $1,
@@ -2106,9 +2266,7 @@ app.put("/api/master-sub-works/:id", async (req, res) => {
       [
         resolvedWorkId,
         String(subWorkName).trim(),
-        sequence === "" || sequence === null || sequence === undefined
-          ? null
-          : Number(sequence),
+        resolvedSequence,
         Boolean(markForDeletion),
         subWorkId,
       ],
@@ -4657,6 +4815,19 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
   }
 });
 
+/** Ensure WorkStandardAddition labour-cess columns exist. */
+async function ensureWorkStandardAdditionSchema() {
+  await pool.query(`
+    ALTER TABLE "WorkStandardAddition"
+      ADD COLUMN IF NOT EXISTS "ApplyLabourCess" boolean NOT NULL DEFAULT false
+  `);
+  await pool.query(`
+    ALTER TABLE "WorkStandardAddition"
+      ADD COLUMN IF NOT EXISTS "LabourCess" numeric
+  `);
+  console.log("WorkStandardAddition schema ensured (ApplyLabourCess, LabourCess).");
+}
+
 /** Keep WorkStandardAddition / WorkLead / WorkMaterial serials in sync after bulk imports. */
 async function ensureWorkEstimateSequences() {
   for (const [table, column] of [
@@ -4829,6 +5000,7 @@ app.get("/api/generate-estimate", async (req, res) => {
   }
 
   try {
+    await ensureWorkStandardAdditionSchema();
     const workResult = await pool.query(
       `SELECT "MasterWorkId", "WorkName"
        FROM "MasterWork"
@@ -4898,7 +5070,8 @@ app.get("/api/generate-estimate", async (req, res) => {
       const additions = await pool.query(additionQuery, additionParams);
 
       const existing = await pool.query(
-        `SELECT "WorkStandardAdditionId", "Description", "Percentage", "ApplyForLead"
+        `SELECT "WorkStandardAdditionId", "Description", "Percentage", "ApplyForLead",
+                "ApplyLabourCess", "LabourCess"
          FROM "WorkStandardAddition"
          WHERE "MasterWorkId" = $1 AND "SSRRegionId" = $2
          ORDER BY "WorkStandardAdditionId" ASC
@@ -4908,6 +5081,8 @@ app.get("/api/generate-estimate", async (req, res) => {
 
       let selectedAdditionId = "";
       let applyForLead = true;
+      let applyLabourCess = false;
+      let labourCess = "";
       if (existing.rows[0]) {
         const match = additions.rows.find(
           (a) =>
@@ -4918,6 +5093,12 @@ app.get("/api/generate-estimate", async (req, res) => {
           ? String(match.MasterStandardAdditionId)
           : "";
         applyForLead = existing.rows[0].ApplyForLead !== false;
+        applyLabourCess = existing.rows[0].ApplyLabourCess === true;
+        labourCess =
+          existing.rows[0].LabourCess === null ||
+          existing.rows[0].LabourCess === undefined
+            ? ""
+            : String(existing.rows[0].LabourCess);
       }
 
       // Always show the region row: pre-filled if previously saved, otherwise blank
@@ -4927,6 +5108,8 @@ app.get("/api/generate-estimate", async (req, res) => {
         SSRRegionShortName: region.SSRRegionShortName,
         selectedAdditionId,
         ApplyForLead: applyForLead,
+        ApplyLabourCess: applyLabourCess,
+        LabourCess: labourCess,
         options: additions.rows,
       });
     }
@@ -5210,6 +5393,7 @@ app.post("/api/work-standard-additions", async (req, res) => {
 
   const client = await pool.connect();
   try {
+    await ensureWorkStandardAdditionSchema();
     await ensureWorkEstimateSequences();
     await client.query("BEGIN");
 
@@ -5236,18 +5420,44 @@ app.post("/api/work-standard-additions", async (req, res) => {
         row.ApplyForLead === "0"
           ? false
           : true;
+      const applyLabourCess =
+        row.ApplyLabourCess === true ||
+        row.ApplyLabourCess === "true" ||
+        row.ApplyLabourCess === 1 ||
+        row.ApplyLabourCess === "1";
+      let labourCess = null;
+      if (applyLabourCess) {
+        if (
+          row.LabourCess === "" ||
+          row.LabourCess === null ||
+          row.LabourCess === undefined ||
+          Number.isNaN(Number(row.LabourCess))
+        ) {
+          throw Object.assign(
+            new Error(
+              "Labour Cess (%) is required when Apply Labour Cess is Yes.",
+            ),
+            { status: 400 },
+          );
+        }
+        labourCess = Number(row.LabourCess);
+      }
       const result = await client.query(
         `INSERT INTO "WorkStandardAddition"
-         ("MasterWorkId", "SSRRegionId", "Description", "Percentage", "ApplyForLead")
-         VALUES ($1, $2, $3, $4, $5)
+         ("MasterWorkId", "SSRRegionId", "Description", "Percentage",
+          "ApplyForLead", "ApplyLabourCess", "LabourCess")
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING "WorkStandardAdditionId", "MasterWorkId", "SSRRegionId",
-                   "Description", "Percentage", "ApplyForLead"`,
+                   "Description", "Percentage", "ApplyForLead",
+                   "ApplyLabourCess", "LabourCess"`,
         [
           Number(workId),
           Number(regionId),
           String(description).trim(),
           Number(percentage),
           applyForLead,
+          applyLabourCess,
+          labourCess,
         ],
       );
       inserted.push(result.rows[0]);
@@ -5855,6 +6065,7 @@ app.listen(port, async () => {
     await ensureWorkAbstractSequence();
     await ensureWorkMeasurementSequence();
     await ensureMaterialComponentIdSequence();
+    await ensureWorkStandardAdditionSchema();
     await ensureWorkEstimateSequences();
   } catch (err) {
     console.error("Failed to ensure schema:", err);
