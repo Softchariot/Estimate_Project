@@ -1405,7 +1405,7 @@ app.post("/api/insert-work", async (req, res) => {
         projectIdValue,
         Number(userId),
         remarks ? String(remarks).trim() : null,
-        Boolean(markForDeletion),
+        false,
         creationDateValue,
       ],
     );
@@ -1420,7 +1420,14 @@ app.post("/api/insert-work", async (req, res) => {
 });
 
 app.get("/api/load-works", async (req, res) => {
-  const { userId, organizationId, userCategory } = req.query;
+  const {
+    userId,
+    organizationId,
+    userCategory,
+    filterUserId,
+    includeDeleted,
+    ownerOnly,
+  } = req.query;
 
   if (!userId) {
     return res.status(400).json({ message: "userId is required." });
@@ -1432,6 +1439,18 @@ app.get("/api/load-works", async (req, res) => {
     .replace(/\s+/g, "");
   const isSuperAdmin = category === "superadmin";
   const isOrgAdmin = category === "orgadmin";
+  const showDeleted =
+    String(includeDeleted || "").toLowerCase() === "true" ||
+    String(includeDeleted || "") === "1";
+  const onlyOwned =
+    String(ownerOnly || "").toLowerCase() === "true" ||
+    String(ownerOnly || "") === "1";
+  const targetUserId =
+    filterUserId !== undefined &&
+    filterUserId !== null &&
+    String(filterUserId).trim() !== ""
+      ? Number(filterUserId)
+      : null;
 
   try {
     await ensureMasterWorkCreationDate();
@@ -1451,14 +1470,50 @@ app.get("/api/load-works", async (req, res) => {
       LEFT JOIN "MasterOrganization" uo ON uo."OrganizationId" = u."OrganizationId"
     `;
 
+    const notDeletedClause = `COALESCE(w."MarkForDeletion", false) = false`;
     let result;
-    if (isSuperAdmin) {
+
+    // Estimation / own-works lists: always restrict to the logged-in user,
+    // regardless of SuperAdmin / OrgAdmin privileges.
+    if (onlyOwned) {
       result = await pool.query(
         `${selectSql}
-         ORDER BY COALESCE(p."OrganizationID", u."OrganizationId") ASC NULLS LAST,
-                  p."ProjectCode" ASC NULLS LAST,
+         WHERE w."UserId" = $1
+           AND ${notDeletedClause}
+         ORDER BY p."ProjectCode" ASC NULLS LAST,
                   w."MasterWorkId" ASC`,
+        [Number(userId)],
       );
+      return res.status(200).send({ data: result.rows });
+    }
+
+    if (isSuperAdmin) {
+      // Work Master SuperAdmin: list only after Organization + User are chosen.
+      // includeDeleted=true keeps soft-deleted rows so SuperAdmin can undelete.
+      if (targetUserId) {
+        const whereParts = [`w."UserId" = $1`];
+        if (!showDeleted) whereParts.push(notDeletedClause);
+        result = await pool.query(
+          `${selectSql}
+           WHERE ${whereParts.join(" AND ")}
+           ORDER BY p."ProjectCode" ASC NULLS LAST,
+                    w."MasterWorkId" ASC`,
+          [targetUserId],
+        );
+      } else if (showDeleted) {
+        // No user filter yet on Work Master screen → empty list
+        result = { rows: [] };
+      } else {
+        // Fallback general listing: only the logged-in SuperAdmin's own works
+        result = await pool.query(
+          `${selectSql}
+           WHERE w."UserId" = $1
+             AND ${notDeletedClause}
+           ORDER BY p."ProjectCode" ASC NULLS LAST,
+                    w."MasterWorkId" ASC`,
+          [Number(userId)],
+        );
+      }
     } else if (isOrgAdmin) {
       if (!organizationId) {
         return res
@@ -1468,6 +1523,7 @@ app.get("/api/load-works", async (req, res) => {
       result = await pool.query(
         `${selectSql}
          WHERE COALESCE(p."OrganizationID", u."OrganizationId") = $1
+           AND ${notDeletedClause}
          ORDER BY p."ProjectCode" ASC NULLS LAST,
                   w."MasterWorkId" ASC`,
         [Number(organizationId)],
@@ -1476,6 +1532,7 @@ app.get("/api/load-works", async (req, res) => {
       result = await pool.query(
         `${selectSql}
          WHERE w."UserId" = $1
+           AND ${notDeletedClause}
          ORDER BY p."ProjectCode" ASC NULLS LAST,
                   w."MasterWorkId" ASC`,
         [Number(userId)],
@@ -1515,51 +1572,186 @@ app.put("/api/master-works/:id", async (req, res) => {
       ? String(creationDate).trim().slice(0, 10)
       : null;
 
+  const client = await pool.connect();
   try {
+    await client.query("BEGIN");
     await ensureMasterWorkCreationDate();
-    const result = await pool.query(
-      `UPDATE "MasterWork"
-       SET "WorkName" = $1,
-           "ProjectId" = $2,
-           "Remarks" = $3,
-           "MarkForDeletion" = $4,
-           "CreationDate" = COALESCE($5::date, CURRENT_DATE)
-       WHERE "MasterWorkId" = $6
-       RETURNING "MasterWorkId", "WorkName", "ProjectId", "UserId", "Remarks",
-                 "MarkForDeletion",
-                 to_char("CreationDate", 'YYYY-MM-DD') AS "CreationDate"`,
-      [
-        String(workName).trim(),
-        projectIdValue,
-        remarks ? String(remarks).trim() : null,
-        Boolean(markForDeletion),
-        creationDateValue,
-        workId,
-      ],
-    );
+
+    const markDeleted =
+      markForDeletion === undefined || markForDeletion === null
+        ? null
+        : Boolean(markForDeletion);
+
+    let result;
+    if (markDeleted === null) {
+      result = await client.query(
+        `UPDATE "MasterWork"
+         SET "WorkName" = $1,
+             "ProjectId" = $2,
+             "Remarks" = $3,
+             "CreationDate" = COALESCE($4::date, CURRENT_DATE)
+         WHERE "MasterWorkId" = $5
+         RETURNING "MasterWorkId", "WorkName", "ProjectId", "UserId", "Remarks",
+                   "MarkForDeletion",
+                   to_char("CreationDate", 'YYYY-MM-DD') AS "CreationDate"`,
+        [
+          String(workName).trim(),
+          projectIdValue,
+          remarks ? String(remarks).trim() : null,
+          creationDateValue,
+          workId,
+        ],
+      );
+    } else {
+      result = await client.query(
+        `UPDATE "MasterWork"
+         SET "WorkName" = $1,
+             "ProjectId" = $2,
+             "Remarks" = $3,
+             "MarkForDeletion" = $4,
+             "CreationDate" = COALESCE($5::date, CURRENT_DATE)
+         WHERE "MasterWorkId" = $6
+         RETURNING "MasterWorkId", "WorkName", "ProjectId", "UserId", "Remarks",
+                   "MarkForDeletion",
+                   to_char("CreationDate", 'YYYY-MM-DD') AS "CreationDate"`,
+        [
+          String(workName).trim(),
+          projectIdValue,
+          remarks ? String(remarks).trim() : null,
+          markDeleted,
+          creationDateValue,
+          workId,
+        ],
+      );
+      await client.query(
+        `UPDATE "MasterSubWork"
+         SET "MarkForDeletion" = $1
+         WHERE "WorkId" = $2`,
+        [markDeleted, workId],
+      );
+    }
 
     if (!result.rows[0]) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ message: "Work not found." });
     }
 
+    await client.query("COMMIT");
     return res.json({
       message: "Work updated successfully.",
       data: result.rows[0],
     });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/api/master-works/:id/soft-delete", async (req, res) => {
+  const workId = Number(req.params.id);
+  if (!workId) {
+    return res.status(400).json({ message: "Valid work id is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `UPDATE "MasterWork"
+       SET "MarkForDeletion" = true
+       WHERE "MasterWorkId" = $1
+       RETURNING "MasterWorkId", "WorkName", "ProjectId", "UserId", "Remarks",
+                 "MarkForDeletion",
+                 to_char("CreationDate", 'YYYY-MM-DD') AS "CreationDate"`,
+      [workId],
+    );
+    if (!result.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Work not found." });
+    }
+    await client.query(
+      `UPDATE "MasterSubWork"
+       SET "MarkForDeletion" = true
+       WHERE "WorkId" = $1`,
+      [workId],
+    );
+    await client.query("COMMIT");
+    return res.json({
+      message: "Work and its sub-works marked for deletion.",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/api/master-works/:id/undelete", async (req, res) => {
+  const workId = Number(req.params.id);
+  if (!workId) {
+    return res.status(400).json({ message: "Valid work id is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `UPDATE "MasterWork"
+       SET "MarkForDeletion" = false
+       WHERE "MasterWorkId" = $1
+       RETURNING "MasterWorkId", "WorkName", "ProjectId", "UserId", "Remarks",
+                 "MarkForDeletion",
+                 to_char("CreationDate", 'YYYY-MM-DD') AS "CreationDate"`,
+      [workId],
+    );
+    if (!result.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Work not found." });
+    }
+    await client.query(
+      `UPDATE "MasterSubWork"
+       SET "MarkForDeletion" = false
+       WHERE "WorkId" = $1`,
+      [workId],
+    );
+    await client.query("COMMIT");
+    return res.json({
+      message: "Work and its sub-works restored.",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
   }
 });
 
 app.get("/api/load-sub-works", async (req, res) => {
-  const { projectId, workId, masterWorkId } = req.query;
+  const { projectId, workId, masterWorkId, includeDeleted } = req.query;
   const resolvedWorkId = workId || masterWorkId;
+  const showDeleted =
+    String(includeDeleted || "").toLowerCase() === "true" ||
+    String(includeDeleted || "") === "1";
   console.log("Project Id: ", projectId);
   console.log("Work Id: ", resolvedWorkId);
 
   try {
     if (resolvedWorkId) {
+      const whereParts = [
+        `sw."WorkId" = $1`,
+        `COALESCE(w."MarkForDeletion", false) = false`,
+      ];
+      if (!showDeleted) {
+        whereParts.push(`COALESCE(sw."MarkForDeletion", false) = false`);
+      }
       const result = await pool.query(
         `SELECT sw."SubWorkId", sw."SubWorkName", sw."WorkId",
                 sw."Sequence", sw."MarkForDeletion",
@@ -1567,7 +1759,7 @@ app.get("/api/load-sub-works", async (req, res) => {
          FROM "MasterSubWork" sw
          INNER JOIN "MasterWork" w ON w."MasterWorkId" = sw."WorkId"
          LEFT JOIN "MasterProject" p ON p."ProjectId" = w."ProjectId"
-         WHERE sw."WorkId" = $1
+         WHERE ${whereParts.join(" AND ")}
          ORDER BY COALESCE(sw."Sequence", 999999), sw."SubWorkId"`,
         [Number(resolvedWorkId)],
       );
@@ -1588,6 +1780,8 @@ app.get("/api/load-sub-works", async (req, res) => {
        FROM "MasterSubWork" sw
        INNER JOIN "MasterWork" w ON w."MasterWorkId" = sw."WorkId"
        WHERE w."ProjectId" = $1
+         AND COALESCE(w."MarkForDeletion", false) = false
+         AND COALESCE(sw."MarkForDeletion", false) = false
        ORDER BY COALESCE(sw."Sequence", 999999), sw."SubWorkId"`,
       [Number(projectId)],
     );
@@ -1607,6 +1801,8 @@ app.get("/api/load-all-sub-works", async (req, res) => {
               w."WorkName"
        FROM "MasterSubWork" sw
        LEFT JOIN "MasterWork" w ON w."MasterWorkId" = sw."WorkId"
+       WHERE COALESCE(sw."MarkForDeletion", false) = false
+         AND COALESCE(w."MarkForDeletion", false) = false
        ORDER BY sw."SubWorkId"`,
     );
     return res.status(200).send({ data: result.rows });
@@ -2077,7 +2273,8 @@ async function nextMasterSubWorkSequence(workId, client = pool) {
   const maxSeq = await client.query(
     `SELECT COALESCE(MAX("Sequence"), 0) + 1 AS "NextSequence"
      FROM "MasterSubWork"
-     WHERE "WorkId" = $1`,
+     WHERE "WorkId" = $1
+       AND COALESCE("MarkForDeletion", false) = false`,
     [Number(workId)],
   );
   return Number(maxSeq.rows[0]?.NextSequence || 1);
@@ -2125,7 +2322,7 @@ app.post("/api/insert-subwork", async (req, res) => {
         resolvedWorkId,
         String(subWorkName).trim(),
         resolvedSequence,
-        Boolean(markForDeletion),
+        false,
       ],
     );
     return res.status(201).send({
@@ -2157,7 +2354,9 @@ app.put("/api/master-sub-works/reorder", async (req, res) => {
     await client.query("BEGIN");
 
     const existing = await client.query(
-      `SELECT "SubWorkId" FROM "MasterSubWork" WHERE "WorkId" = $1`,
+      `SELECT "SubWorkId" FROM "MasterSubWork"
+       WHERE "WorkId" = $1
+         AND COALESCE("MarkForDeletion", false) = false`,
       [resolvedWorkId],
     );
     const existingIds = new Set(
@@ -2177,7 +2376,8 @@ app.put("/api/master-sub-works/reorder", async (req, res) => {
     await client.query(
       `UPDATE "MasterSubWork"
        SET "Sequence" = "Sequence" + 100000
-       WHERE "WorkId" = $1`,
+       WHERE "WorkId" = $1
+         AND COALESCE("MarkForDeletion", false) = false`,
       [resolvedWorkId],
     );
 
@@ -2259,15 +2459,13 @@ app.put("/api/master-sub-works/:id", async (req, res) => {
       `UPDATE "MasterSubWork"
        SET "WorkId" = $1,
            "SubWorkName" = $2,
-           "Sequence" = $3,
-           "MarkForDeletion" = $4
-       WHERE "SubWorkId" = $5
+           "Sequence" = $3
+       WHERE "SubWorkId" = $4
        RETURNING "SubWorkId", "WorkId", "SubWorkName", "Sequence", "MarkForDeletion"`,
       [
         resolvedWorkId,
         String(subWorkName).trim(),
         resolvedSequence,
-        Boolean(markForDeletion),
         subWorkId,
       ],
     );
@@ -2278,6 +2476,60 @@ app.put("/api/master-sub-works/:id", async (req, res) => {
 
     return res.json({
       message: "Sub Work updated successfully.",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.post("/api/master-sub-works/:id/soft-delete", async (req, res) => {
+  const subWorkId = Number(req.params.id);
+  if (!subWorkId) {
+    return res.status(400).json({ message: "Valid sub work id is required." });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE "MasterSubWork"
+       SET "MarkForDeletion" = true
+       WHERE "SubWorkId" = $1
+       RETURNING "SubWorkId", "WorkId", "SubWorkName", "Sequence", "MarkForDeletion"`,
+      [subWorkId],
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Sub Work not found." });
+    }
+    return res.json({
+      message: "Sub Work marked for deletion.",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.post("/api/master-sub-works/:id/undelete", async (req, res) => {
+  const subWorkId = Number(req.params.id);
+  if (!subWorkId) {
+    return res.status(400).json({ message: "Valid sub work id is required." });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE "MasterSubWork"
+       SET "MarkForDeletion" = false
+       WHERE "SubWorkId" = $1
+       RETURNING "SubWorkId", "WorkId", "SubWorkName", "Sequence", "MarkForDeletion"`,
+      [subWorkId],
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Sub Work not found." });
+    }
+    return res.json({
+      message: "Sub Work restored.",
       data: result.rows[0],
     });
   } catch (err) {
@@ -4059,7 +4311,7 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
         } else {
           // Present logic: % on Basic Rate only
           additionAmount = basicRate * (percentage / 100);
-          additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}%`;
+          additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}% Excluding Lead Charges`;
         }
       }
 
@@ -5468,12 +5720,30 @@ app.get("/api/generate-estimate", async (req, res) => {
           ? String(match.MasterStandardAdditionId)
           : "";
         applyForLead = existing.rows[0].ApplyForLead !== false;
-        applyLabourCess = existing.rows[0].ApplyLabourCess === true;
-        labourCess =
-          existing.rows[0].LabourCess === null ||
-          existing.rows[0].LabourCess === undefined
-            ? ""
-            : String(existing.rows[0].LabourCess);
+        if (selectedAdditionId) {
+          applyLabourCess = existing.rows[0].ApplyLabourCess === true;
+          labourCess =
+            existing.rows[0].LabourCess === null ||
+            existing.rows[0].LabourCess === undefined
+              ? ""
+              : String(existing.rows[0].LabourCess);
+        } else {
+          // Description + Percentage not matched/selected → clear labour cess in DB
+          applyLabourCess = false;
+          labourCess = "";
+          if (
+            existing.rows[0].ApplyLabourCess === true ||
+            existing.rows[0].LabourCess !== null
+          ) {
+            await pool.query(
+              `UPDATE "WorkStandardAddition"
+               SET "ApplyLabourCess" = false,
+                   "LabourCess" = NULL
+               WHERE "WorkStandardAdditionId" = $1`,
+              [existing.rows[0].WorkStandardAdditionId],
+            );
+          }
+        }
       }
 
       // Always show the region row: pre-filled if previously saved, otherwise blank
@@ -5795,11 +6065,13 @@ app.post("/api/work-standard-additions", async (req, res) => {
         row.ApplyForLead === "0"
           ? false
           : true;
+      const hasDescription = String(description).trim() !== "";
       const applyLabourCess =
-        row.ApplyLabourCess === true ||
-        row.ApplyLabourCess === "true" ||
-        row.ApplyLabourCess === 1 ||
-        row.ApplyLabourCess === "1";
+        hasDescription &&
+        (row.ApplyLabourCess === true ||
+          row.ApplyLabourCess === "true" ||
+          row.ApplyLabourCess === 1 ||
+          row.ApplyLabourCess === "1");
       let labourCess = null;
       if (applyLabourCess) {
         if (

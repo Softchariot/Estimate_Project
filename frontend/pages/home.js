@@ -683,9 +683,15 @@ export default function HomePage() {
 
   const [workForm, setWorkForm] = useState(initialWorkForm);
   const [worksList, setWorksList] = useState([]);
+  const [workMasterList, setWorkMasterList] = useState([]);
   const [loadingWorks, setLoadingWorks] = useState(false);
   const [savingWork, setSavingWork] = useState(false);
   const [editingWorkId, setEditingWorkId] = useState(null);
+  const [workMasterFilterOrgId, setWorkMasterFilterOrgId] = useState("");
+  const [workMasterFilterUserId, setWorkMasterFilterUserId] = useState("");
+  const [workMasterUsers, setWorkMasterUsers] = useState([]);
+  const [workMasterProjects, setWorkMasterProjects] = useState([]);
+  const [deletingWork, setDeletingWork] = useState(false);
 
   const initialSubWorkForm = {
     WorkId: "",
@@ -699,6 +705,12 @@ export default function HomePage() {
   const [loadingSubWorksMaster, setLoadingSubWorksMaster] = useState(false);
   const [savingSubWork, setSavingSubWork] = useState(false);
   const [editingSubWorkId, setEditingSubWorkId] = useState(null);
+  const [deletingSubWork, setDeletingSubWork] = useState(false);
+  const [subWorkMasterFilterOrgId, setSubWorkMasterFilterOrgId] = useState("");
+  const [subWorkMasterFilterUserId, setSubWorkMasterFilterUserId] =
+    useState("");
+  const [subWorkMasterUsers, setSubWorkMasterUsers] = useState([]);
+  const [subWorkMasterWorks, setSubWorkMasterWorks] = useState([]);
 
   const sortByDOrderAsc = (items) =>
     [...items].sort((a, b) => {
@@ -761,6 +773,7 @@ export default function HomePage() {
           userId: user.UserId,
           organizationId: user.OrganizationId || undefined,
           userCategory: user.UserCategoryName || "",
+          ownerOnly: true,
         },
       });
       if (res.status === 200) setWorksList(res.data.data || []);
@@ -770,6 +783,77 @@ export default function HomePage() {
       setMessage(`Work load failed: ${error.message}`);
     } finally {
       setLoadingWorks(false);
+    }
+  };
+
+  const loadWorkMasterList = async (
+    filterOrgId = workMasterFilterOrgId,
+    filterUserId = workMasterFilterUserId,
+  ) => {
+    const user =
+      currentUser || JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+    if (!user?.UserId) {
+      setWorkMasterList([]);
+      return;
+    }
+    const superAdmin = isSuperAdminUser(user);
+    if (superAdmin && (!filterOrgId || !filterUserId)) {
+      setWorkMasterList([]);
+      return;
+    }
+    setLoadingWorks(true);
+    try {
+      const params = {
+        userId: user.UserId,
+        organizationId: user.OrganizationId || undefined,
+        userCategory: user.UserCategoryName || "",
+      };
+      if (superAdmin) {
+        params.filterUserId = filterUserId;
+        params.includeDeleted = true;
+      }
+      const res = await axios.get(`${API_BASE}/api/load-works`, { params });
+      if (res.status === 200) setWorkMasterList(res.data.data || []);
+    } catch (error) {
+      console.error(error);
+      setWorkMasterList([]);
+      setMessage(`Work load failed: ${error.message}`);
+    } finally {
+      setLoadingWorks(false);
+    }
+  };
+
+  const loadWorkMasterUsers = async (organizationId) => {
+    if (!organizationId) {
+      setWorkMasterUsers([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId },
+      });
+      if (res.status === 200) {
+        setWorkMasterUsers(Array.isArray(res.data) ? res.data : []);
+      }
+    } catch (error) {
+      console.error(error);
+      setWorkMasterUsers([]);
+    }
+  };
+
+  const loadWorkMasterProjects = async (organizationId) => {
+    if (!organizationId) {
+      setWorkMasterProjects([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/load-projects`, {
+        params: { org_id: organizationId },
+      });
+      if (res.status === 200) setWorkMasterProjects(res.data.data || []);
+    } catch (error) {
+      console.error(error);
+      setWorkMasterProjects([]);
     }
   };
 
@@ -823,6 +907,67 @@ export default function HomePage() {
     setMessage("");
   };
 
+  const refreshWorkLists = async () => {
+    await loadWorksMaster();
+    await loadWorkMasterList();
+  };
+
+  const softDeleteWork = async () => {
+    if (!editingWorkId) return;
+    if (
+      !window.confirm(
+        "This Work along with its Sub Works will be Deleted, do you really want to delete.",
+      )
+    ) {
+      return;
+    }
+    setDeletingWork(true);
+    setMessage("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/master-works/${editingWorkId}/soft-delete`,
+        { method: "POST" },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to delete work.");
+      setMessage("Work and its sub-works marked for deletion.");
+      resetWorkEdit();
+      await refreshWorkLists();
+    } catch (error) {
+      setMessage(`Work delete failed: ${error.message}`);
+    } finally {
+      setDeletingWork(false);
+    }
+  };
+
+  const undeleteWork = async () => {
+    if (!editingWorkId) return;
+    if (
+      !window.confirm(
+        "Restore this Work and its Sub Works (UnDelete)?",
+      )
+    ) {
+      return;
+    }
+    setDeletingWork(true);
+    setMessage("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/master-works/${editingWorkId}/undelete`,
+        { method: "POST" },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to undelete work.");
+      setMessage("Work and its sub-works restored.");
+      setWorkForm((prev) => ({ ...prev, MarkForDeletion: false }));
+      await refreshWorkLists();
+    } catch (error) {
+      setMessage(`Work undelete failed: ${error.message}`);
+    } finally {
+      setDeletingWork(false);
+    }
+  };
+
   const onWorkSubmit = async (e) => {
     e.preventDefault();
     const user =
@@ -841,6 +986,14 @@ export default function HomePage() {
     }
 
     const isEdit = Boolean(editingWorkId);
+    const superAdmin = isSuperAdminUser(user);
+    if (superAdmin && !isEdit && !workMasterFilterUserId) {
+      setMessage(
+        "Work save failed: select Organization and User before creating a work.",
+      );
+      return;
+    }
+
     if (
       !window.confirm(
         `Please review the details.\nDo you want to ${isEdit ? "update this work" : "save this new work"}?`,
@@ -852,12 +1005,15 @@ export default function HomePage() {
 
     setSavingWork(true);
     setMessage("");
+    const ownerUserId =
+      superAdmin && workMasterFilterUserId
+        ? Number(workMasterFilterUserId)
+        : user.UserId;
     const payload = {
       workName: workForm.WorkName,
       projectId: workForm.ProjectId || null,
-      userId: user.UserId,
+      userId: ownerUserId,
       remarks: workForm.Remarks,
-      markForDeletion: workForm.MarkForDeletion,
       creationDate: workForm.CreationDate,
     };
 
@@ -884,7 +1040,7 @@ export default function HomePage() {
         ProjectId: selectedProjectId,
         CreationDate: todayLocalDate(),
       });
-      await loadWorksMaster();
+      await refreshWorkLists();
     } catch (error) {
       setMessage(`Work save failed: ${error.message}`);
     } finally {
@@ -1337,8 +1493,15 @@ export default function HomePage() {
     }
     setLoadingSubWorksMaster(true);
     try {
+      const user =
+        currentUser ||
+        JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+      const params = { workId };
+      if (isSuperAdminUser(user)) {
+        params.includeDeleted = true;
+      }
       const res = await axios.get(`${API_BASE}/api/load-sub-works`, {
-        params: { workId },
+        params,
       });
       if (res.status === 200) setSubWorksMasterList(res.data.data || []);
     } catch (error) {
@@ -1350,6 +1513,46 @@ export default function HomePage() {
     }
   };
 
+  const loadSubWorkMasterUsers = async (organizationId) => {
+    if (!organizationId) {
+      setSubWorkMasterUsers([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId },
+      });
+      if (res.status === 200) {
+        setSubWorkMasterUsers(Array.isArray(res.data) ? res.data : []);
+      }
+    } catch (error) {
+      console.error(error);
+      setSubWorkMasterUsers([]);
+    }
+  };
+
+  const loadSubWorkMasterWorks = async (filterUserId) => {
+    const user =
+      currentUser || JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+    if (!user?.UserId || !filterUserId) {
+      setSubWorkMasterWorks([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/load-works`, {
+        params: {
+          userId: user.UserId,
+          userCategory: user.UserCategoryName || "",
+          filterUserId,
+        },
+      });
+      if (res.status === 200) setSubWorkMasterWorks(res.data.data || []);
+    } catch (error) {
+      console.error(error);
+      setSubWorkMasterWorks([]);
+    }
+  };
+
   const resetSubWorkEdit = () => {
     setEditingSubWorkId(null);
     setSubWorkForm((prev) => ({
@@ -1358,21 +1561,81 @@ export default function HomePage() {
     }));
   };
 
+  const softDeleteSubWork = async () => {
+    if (!editingSubWorkId) return;
+    if (
+      !window.confirm(
+        "This Sub Works will be Deleted, do you really want to delete.",
+      )
+    ) {
+      return;
+    }
+    setDeletingSubWork(true);
+    setMessage("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/master-sub-works/${editingSubWorkId}/soft-delete`,
+        { method: "POST" },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to delete sub work.");
+      setMessage("Sub work marked for deletion.");
+      const selectedWorkId = subWorkForm.WorkId;
+      resetSubWorkEdit();
+      setSubWorkForm((prev) => ({ ...prev, WorkId: selectedWorkId }));
+      await loadSubWorksMaster(selectedWorkId);
+    } catch (error) {
+      setMessage(`Sub work delete failed: ${error.message}`);
+    } finally {
+      setDeletingSubWork(false);
+    }
+  };
+
+  const undeleteSubWork = async () => {
+    if (!editingSubWorkId) return;
+    if (!window.confirm("Restore this Sub Work (UnDelete)?")) {
+      return;
+    }
+    setDeletingSubWork(true);
+    setMessage("");
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/master-sub-works/${editingSubWorkId}/undelete`,
+        { method: "POST" },
+      );
+      const data = await res.json();
+      if (!res.ok)
+        throw new Error(data.message || "Failed to undelete sub work.");
+      setMessage("Sub work restored.");
+      setSubWorkForm((prev) => ({ ...prev, MarkForDeletion: false }));
+      await loadSubWorksMaster(subWorkForm.WorkId);
+    } catch (error) {
+      setMessage(`Sub work undelete failed: ${error.message}`);
+    } finally {
+      setDeletingSubWork(false);
+    }
+  };
+
   const persistSubWorkOrder = async (orderedList) => {
     const workId = subWorkForm.WorkId;
     if (!workId || !orderedList.length) return;
+    // Only reorder active (non-deleted) rows
+    const activeList = orderedList.filter((row) => !row.MarkForDeletion);
+    if (!activeList.length) return;
     setReorderingSubWorks(true);
     try {
       await axios.put(`${API_BASE}/api/master-sub-works/reorder`, {
         workId,
-        orderedIds: orderedList.map((row) => row.SubWorkId),
+        orderedIds: activeList.map((row) => row.SubWorkId),
       });
-      setSubWorksMasterList(
-        orderedList.map((row, idx) => ({
+      setSubWorksMasterList((prev) => {
+        const deleted = prev.filter((row) => row.MarkForDeletion);
+        const resequenced = activeList.map((row, idx) => ({
           ...row,
           Sequence: idx + 1,
-        })),
-      );
+        }));
+        return [...resequenced, ...deleted];
+      });
       // Keep Estimation Sub Work dropdown in sync when same work is selected
       if (Number(selectedProjectId) === Number(workId)) {
         loadSubWorks(workId);
@@ -1393,18 +1656,20 @@ export default function HomePage() {
       return;
     }
     setSubWorksMasterList((prev) => {
-      const fromIdx = prev.findIndex(
+      const active = prev.filter((r) => !r.MarkForDeletion);
+      const deleted = prev.filter((r) => r.MarkForDeletion);
+      const fromIdx = active.findIndex(
         (r) => Number(r.SubWorkId) === Number(fromSubWorkId),
       );
-      const toIdx = prev.findIndex(
+      const toIdx = active.findIndex(
         (r) => Number(r.SubWorkId) === Number(toSubWorkId),
       );
       if (fromIdx < 0 || toIdx < 0) return prev;
-      const next = [...prev];
+      const next = [...active];
       const [moved] = next.splice(fromIdx, 1);
       next.splice(toIdx, 0, moved);
-      queueMicrotask(() => persistSubWorkOrder(next));
-      return next;
+      queueMicrotask(() => persistSubWorkOrder([...next, ...deleted]));
+      return [...next, ...deleted];
     });
   };
 
@@ -1466,7 +1731,6 @@ export default function HomePage() {
       workId: subWorkForm.WorkId,
       subWorkName: subWorkForm.SubWorkName,
       sequence: subWorkForm.Sequence,
-      markForDeletion: subWorkForm.MarkForDeletion,
     };
 
     try {
@@ -2541,18 +2805,23 @@ export default function HomePage() {
       setEstimateWorkName(data.work?.WorkName || "");
       setEstimateRegions(
         Array.isArray(data.regions)
-          ? data.regions.map((r) => ({
-              ...r,
-              selectedAdditionId: r.selectedAdditionId
-                ? String(r.selectedAdditionId)
-                : "",
-              ApplyForLead: r.ApplyForLead !== false,
-              ApplyLabourCess: r.ApplyLabourCess === true,
-              LabourCess:
-                r.LabourCess === null || r.LabourCess === undefined
-                  ? ""
-                  : String(r.LabourCess),
-            }))
+          ? data.regions.map((r) => {
+              const hasAddition = Boolean(r.selectedAdditionId);
+              return {
+                ...r,
+                selectedAdditionId: hasAddition
+                  ? String(r.selectedAdditionId)
+                  : "",
+                ApplyForLead: r.ApplyForLead !== false,
+                ApplyLabourCess: hasAddition && r.ApplyLabourCess === true,
+                LabourCess:
+                  hasAddition &&
+                  r.LabourCess !== null &&
+                  r.LabourCess !== undefined
+                    ? String(r.LabourCess)
+                    : "",
+              };
+            })
           : [],
       );
       setEstimateLeadGroups(
@@ -2565,8 +2834,9 @@ export default function HomePage() {
                 Remarks: row.Remarks || "",
                 LeadDistanceKm:
                   row.LeadDistanceKm === null ||
-                  row.LeadDistanceKm === undefined
-                    ? ""
+                  row.LeadDistanceKm === undefined ||
+                  row.LeadDistanceKm === ""
+                    ? "0"
                     : String(row.LeadDistanceKm),
                 Lead:
                   row.Lead === null || row.Lead === undefined ? null : row.Lead,
@@ -2596,11 +2866,17 @@ export default function HomePage() {
 
   const onEstimateAdditionChange = (regionId, additionId) => {
     setEstimateRegions((prev) =>
-      prev.map((r) =>
-        Number(r.SSRRegionId) === Number(regionId)
-          ? { ...r, selectedAdditionId: additionId }
-          : r,
-      ),
+      prev.map((r) => {
+        if (Number(r.SSRRegionId) !== Number(regionId)) return r;
+        const hasAddition = Boolean(additionId);
+        return {
+          ...r,
+          selectedAdditionId: additionId,
+          // Labour Cess only applies when Description + Percentage is selected
+          ApplyLabourCess: hasAddition ? r.ApplyLabourCess === true : false,
+          LabourCess: hasAddition ? r.LabourCess || "" : "",
+        };
+      }),
     );
   };
 
@@ -2616,15 +2892,17 @@ export default function HomePage() {
 
   const onEstimateApplyLabourCessChange = (regionId, applyLabourCess) => {
     setEstimateRegions((prev) =>
-      prev.map((r) =>
-        Number(r.SSRRegionId) === Number(regionId)
-          ? {
-              ...r,
-              ApplyLabourCess: applyLabourCess,
-              LabourCess: applyLabourCess ? r.LabourCess || "" : "",
-            }
-          : r,
-      ),
+      prev.map((r) => {
+        if (Number(r.SSRRegionId) !== Number(regionId)) return r;
+        if (!r.selectedAdditionId) {
+          return { ...r, ApplyLabourCess: false, LabourCess: "" };
+        }
+        return {
+          ...r,
+          ApplyLabourCess: applyLabourCess,
+          LabourCess: applyLabourCess ? r.LabourCess || "" : "",
+        };
+      }),
     );
   };
 
@@ -3033,6 +3311,10 @@ export default function HomePage() {
         loadProjectFormOrgUsers(user.OrganizationId);
       }
       loadWorksMaster();
+      if (!isSuperAdminUser(user)) {
+        // Non-SuperAdmin Work Master list matches general works (non-deleted).
+        loadWorkMasterList("", "");
+      }
       if (canAccessItemMaster(user)) {
         const allowed = getItemMasterAllowedRegionId(user);
         setItemMasterForm({
@@ -7189,10 +7471,7 @@ export default function HomePage() {
                               <div
                                 style={{
                                   display: "grid",
-                                  gridTemplateColumns:
-                                    region.ApplyLabourCess === true
-                                      ? "1fr 1fr 1fr"
-                                      : "1fr 1fr",
+                                  gridTemplateColumns: "1fr 1fr 1fr",
                                   gap: 14,
                                   alignItems: "end",
                                 }}
@@ -7259,6 +7538,9 @@ export default function HomePage() {
                                       alignItems: "center",
                                       gap: 16,
                                       minHeight: 42,
+                                      opacity: region.selectedAdditionId
+                                        ? 1
+                                        : 0.55,
                                     }}
                                   >
                                     <label
@@ -7267,7 +7549,9 @@ export default function HomePage() {
                                         alignItems: "center",
                                         gap: 6,
                                         fontWeight: 500,
-                                        cursor: "pointer",
+                                        cursor: region.selectedAdditionId
+                                          ? "pointer"
+                                          : "not-allowed",
                                       }}
                                     >
                                       <input
@@ -7276,6 +7560,7 @@ export default function HomePage() {
                                         checked={
                                           region.ApplyLabourCess === true
                                         }
+                                        disabled={!region.selectedAdditionId}
                                         onChange={() =>
                                           onEstimateApplyLabourCessChange(
                                             region.SSRRegionId,
@@ -7291,7 +7576,9 @@ export default function HomePage() {
                                         alignItems: "center",
                                         gap: 6,
                                         fontWeight: 500,
-                                        cursor: "pointer",
+                                        cursor: region.selectedAdditionId
+                                          ? "pointer"
+                                          : "not-allowed",
                                       }}
                                     >
                                       <input
@@ -7300,6 +7587,7 @@ export default function HomePage() {
                                         checked={
                                           region.ApplyLabourCess !== true
                                         }
+                                        disabled={!region.selectedAdditionId}
                                         onChange={() =>
                                           onEstimateApplyLabourCessChange(
                                             region.SSRRegionId,
@@ -7311,45 +7599,68 @@ export default function HomePage() {
                                     </label>
                                   </div>
                                 </Field>
-                                {region.ApplyLabourCess === true && (
-                                  <Field label="Labour Cess">
-                                    <div
+                                <Field label="Labour Cess">
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 8,
+                                      opacity:
+                                        region.selectedAdditionId &&
+                                        region.ApplyLabourCess === true
+                                          ? 1
+                                          : 0.55,
+                                    }}
+                                  >
+                                    <input
+                                      type="number"
+                                      step="any"
+                                      min="0"
+                                      value={
+                                        region.selectedAdditionId &&
+                                        region.ApplyLabourCess === true
+                                          ? region.LabourCess ?? ""
+                                          : ""
+                                      }
+                                      onChange={(e) =>
+                                        onEstimateLabourCessChange(
+                                          region.SSRRegionId,
+                                          e.target.value,
+                                        )
+                                      }
+                                      placeholder="e.g. 1.5"
+                                      required={
+                                        Boolean(region.selectedAdditionId) &&
+                                        region.ApplyLabourCess === true
+                                      }
+                                      disabled={
+                                        !region.selectedAdditionId ||
+                                        region.ApplyLabourCess !== true
+                                      }
                                       style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 8,
+                                        ...inputStyle,
+                                        flex: 1,
+                                        ...(!region.selectedAdditionId ||
+                                        region.ApplyLabourCess !== true
+                                          ? {
+                                              background: "#EEF1F4",
+                                              color: theme.colors.inkSoft,
+                                              cursor: "not-allowed",
+                                            }
+                                          : null),
+                                      }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontWeight: 700,
+                                        color: theme.colors.inkSoft,
+                                        minWidth: 18,
                                       }}
                                     >
-                                      <input
-                                        type="number"
-                                        step="any"
-                                        min="0"
-                                        value={region.LabourCess ?? ""}
-                                        onChange={(e) =>
-                                          onEstimateLabourCessChange(
-                                            region.SSRRegionId,
-                                            e.target.value,
-                                          )
-                                        }
-                                        placeholder="e.g. 1.5"
-                                        required
-                                        style={{
-                                          ...inputStyle,
-                                          flex: 1,
-                                        }}
-                                      />
-                                      <span
-                                        style={{
-                                          fontWeight: 700,
-                                          color: theme.colors.inkSoft,
-                                          minWidth: 18,
-                                        }}
-                                      >
-                                        %
-                                      </span>
-                                    </div>
-                                  </Field>
-                                )}
+                                      %
+                                    </span>
+                                  </div>
+                                </Field>
                               </div>
                             </div>
                           ))}
@@ -7455,7 +7766,12 @@ export default function HomePage() {
                                       <input
                                         type="number"
                                         step="any"
-                                        value={row.LeadDistanceKm || ""}
+                                        value={
+                                          row.LeadDistanceKm === null ||
+                                          row.LeadDistanceKm === undefined
+                                            ? "0"
+                                            : row.LeadDistanceKm
+                                        }
                                         onChange={(e) =>
                                           onEstimateLeadFieldChange(
                                             group.SSRRegionId,
@@ -7468,12 +7784,14 @@ export default function HomePage() {
                                           recalculateLeadForRow(
                                             group.SSRRegionId,
                                             row.MaterialId,
-                                            e.target.value,
+                                            e.target.value === ""
+                                              ? "0"
+                                              : e.target.value,
                                           )
                                         }
                                         required
                                         style={{ ...inputStyle, width: "100%" }}
-                                        placeholder="Required"
+                                        placeholder="0"
                                       />
                                     </td>
                                     <td>
@@ -8373,48 +8691,121 @@ export default function HomePage() {
               }
               subtitle={
                 isSuperAdmin
-                  ? "All works across organizations, ordered by Organization and Project Code."
+                  ? "Select Organization and User to view or maintain that user’s works. Soft-deleted works remain visible here so you can UnDelete them."
                   : isOrgAdmin
                     ? "Works for your organization, ordered by Project Code."
-                    : "Works created by you, ordered by Project Code. Project Code is optional."
+                    : "Works created by you, ordered by Project Code. Project is optional."
               }
             >
-              <FormShell onSubmit={onWorkSubmit}>
+              {isSuperAdmin && (
                 <div
                   style={{
                     display: "grid",
                     gridTemplateColumns: "1fr 1fr",
                     gap: 14,
+                    marginBottom: 16,
                   }}
                 >
-                  <Field label="Project Code">
+                  <Field label="Organization" required>
                     <select
-                      name="ProjectId"
-                      value={workForm.ProjectId}
-                      onChange={onWorkChange}
-                      style={inputStyle}
+                      value={workMasterFilterOrgId}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        setWorkMasterFilterOrgId(value);
+                        setWorkMasterFilterUserId("");
+                        setWorkMasterUsers([]);
+                        setWorkMasterList([]);
+                        resetWorkEdit();
+                        await loadWorkMasterUsers(value);
+                        await loadWorkMasterProjects(value);
+                      }}
+                      style={{ ...inputStyle, width: "100%" }}
                     >
-                      <option value="">No Project</option>
-                      {projects.map((project) => (
+                      <option value="">Select Organization</option>
+                      {organizations.map((org) => (
                         <option
-                          key={project.ProjectId}
-                          value={project.ProjectId}
+                          key={org.OrganizationId}
+                          value={org.OrganizationId}
                         >
-                          {project.ProjectCode
-                            ? `${project.ProjectCode} — ${project.ProjectName}`
-                            : project.ProjectName}
+                          {org.OrgName || org.OrgCode || org.OrganizationId}
                         </option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="Work Name" required>
-                    <input
+                  <Field label="User" required>
+                    <select
+                      value={workMasterFilterUserId}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        setWorkMasterFilterUserId(value);
+                        resetWorkEdit();
+                        await loadWorkMasterList(
+                          workMasterFilterOrgId,
+                          value,
+                        );
+                      }}
+                      disabled={!workMasterFilterOrgId}
+                      style={{ ...inputStyle, width: "100%" }}
+                    >
+                      <option value="">
+                        {workMasterFilterOrgId
+                          ? "Select User"
+                          : "Select Organization first"}
+                      </option>
+                      {workMasterUsers.map((u) => (
+                        <option key={u.UserId} value={u.UserId}>
+                          {u.UserName || u.UserLoginName || u.UserId}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+              )}
+
+              <FormShell onSubmit={onWorkSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 3fr",
+                    gap: 14,
+                  }}
+                >
+                  <Field label="Select Project" span>
+                    <select
+                      name="ProjectId"
+                      value={workForm.ProjectId}
+                      onChange={onWorkChange}
+                      style={{ ...inputStyle, width: "100%" }}
+                    >
+                      <option value="">No Project</option>
+                      {(isSuperAdmin ? workMasterProjects : projects).map(
+                        (project) => (
+                          <option
+                            key={project.ProjectId}
+                            value={project.ProjectId}
+                          >
+                            {project.ProjectCode
+                              ? `${project.ProjectCode} — ${project.ProjectName}`
+                              : project.ProjectName}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </Field>
+                  <Field label="Work Name" required span>
+                    <textarea
                       name="WorkName"
-                      type="text"
                       value={workForm.WorkName}
                       onChange={onWorkChange}
                       required
-                      style={inputStyle}
+                      rows={3}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 72,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
                     />
                   </Field>
                   <Field label="Created Date" required>
@@ -8424,40 +8815,29 @@ export default function HomePage() {
                       value={workForm.CreationDate || ""}
                       onChange={onWorkChange}
                       required
-                      style={inputStyle}
+                      style={{ ...inputStyle, width: "100%" }}
                     />
                   </Field>
-                  <Field label="Remarks" span>
+                  <Field label="Remarks">
                     <input
                       name="Remarks"
                       value={workForm.Remarks}
                       onChange={onWorkChange}
-                      style={inputStyle}
+                      style={{ ...inputStyle, width: "100%" }}
                     />
-                  </Field>
-                  <Field label="Mark for deletion">
-                    <label
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        fontWeight: 500,
-                        minHeight: 42,
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        name="MarkForDeletion"
-                        checked={workForm.MarkForDeletion}
-                        onChange={onWorkChange}
-                      />
-                      Yes
-                    </label>
                   </Field>
                 </div>
 
                 <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-                  <PrimaryButton disabled={savingWork}>
+                  <PrimaryButton
+                    disabled={
+                      savingWork ||
+                      deletingWork ||
+                      (isSuperAdmin &&
+                        !editingWorkId &&
+                        !workMasterFilterUserId)
+                    }
+                  >
                     {savingWork
                       ? "Saving…"
                       : editingWorkId
@@ -8465,10 +8845,39 @@ export default function HomePage() {
                         : "Save work"}
                   </PrimaryButton>
                   {editingWorkId && (
-                    <SecondaryButton onClick={resetWorkEdit}>
+                    <SecondaryButton
+                      onClick={resetWorkEdit}
+                      disabled={savingWork || deletingWork}
+                    >
                       Cancel edit
                     </SecondaryButton>
                   )}
+                  {editingWorkId && !workForm.MarkForDeletion && (
+                    <SecondaryButton
+                      onClick={softDeleteWork}
+                      disabled={savingWork || deletingWork}
+                      style={{
+                        borderColor: theme.colors.red,
+                        color: theme.colors.red,
+                      }}
+                    >
+                      {deletingWork ? "Deleting…" : "Delete"}
+                    </SecondaryButton>
+                  )}
+                  {editingWorkId &&
+                    workForm.MarkForDeletion &&
+                    isSuperAdmin && (
+                      <SecondaryButton
+                        onClick={undeleteWork}
+                        disabled={savingWork || deletingWork}
+                        style={{
+                          borderColor: theme.colors.green,
+                          color: theme.colors.green,
+                        }}
+                      >
+                        {deletingWork ? "Restoring…" : "UnDelete"}
+                      </SecondaryButton>
+                    )}
                 </div>
               </FormShell>
 
@@ -8487,9 +8896,9 @@ export default function HomePage() {
                       <th>Project Code</th>
                       <th>Work Name</th>
                       <th>Created Date</th>
-                      {!isSuperAdmin && !isOrgAdmin ? null : <th>User</th>}
+                      {(isSuperAdmin || isOrgAdmin) && <th>User</th>}
                       <th>Remarks</th>
-                      <th>Deleted</th>
+                      {isSuperAdmin && <th>Deleted</th>}
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -8497,13 +8906,19 @@ export default function HomePage() {
                     {loadingWorks ? (
                       <EmptyRow
                         colSpan={
-                          isSuperAdmin || isOrgAdmin ? 9 : 7
+                          isSuperAdmin ? 9 : isOrgAdmin ? 8 : 6
                         }
                       >
                         Loading…
                       </EmptyRow>
-                    ) : worksList.length ? (
-                      worksList.map((work) => (
+                    ) : isSuperAdmin &&
+                      (!workMasterFilterOrgId ||
+                        !workMasterFilterUserId) ? (
+                      <EmptyRow colSpan={9}>
+                        Select Organization and User above to view works.
+                      </EmptyRow>
+                    ) : workMasterList.length ? (
+                      workMasterList.map((work) => (
                         <tr key={work.MasterWorkId}>
                           <td
                             style={{
@@ -8534,13 +8949,17 @@ export default function HomePage() {
                             <td>{work.UserName || work.UserId || "—"}</td>
                           )}
                           <td>{work.Remarks || "—"}</td>
-                          <td>
-                            <Badge
-                              tone={work.MarkForDeletion ? "red" : "green"}
-                            >
-                              {work.MarkForDeletion ? "Yes" : "No"}
-                            </Badge>
-                          </td>
+                          {isSuperAdmin && (
+                            <td>
+                              <Badge
+                                tone={
+                                  work.MarkForDeletion ? "red" : "green"
+                                }
+                              >
+                                {work.MarkForDeletion ? "Yes" : "No"}
+                              </Badge>
+                            </td>
+                          )}
                           <td>
                             <SecondaryButton
                               onClick={() => startWorkEdit(work)}
@@ -8552,7 +8971,9 @@ export default function HomePage() {
                       ))
                     ) : (
                       <EmptyRow
-                        colSpan={isSuperAdmin || isOrgAdmin ? 9 : 7}
+                        colSpan={
+                          isSuperAdmin ? 9 : isOrgAdmin ? 8 : 6
+                        }
                       >
                         No works found — add one above.
                       </EmptyRow>
@@ -8572,13 +8993,82 @@ export default function HomePage() {
                   ? `Edit sub work #${editingSubWorkId}`
                   : "Sub Work Master"
               }
-              subtitle="Select a work, then create and maintain its sub-works."
+              subtitle={
+                isSuperAdmin
+                  ? "Select Organization and User, then a Work, to maintain that user’s sub-works. Soft-deleted sub-works remain visible so you can UnDelete them."
+                  : "Select a work, then create and maintain its sub-works."
+              }
             >
-              <FormShell onSubmit={onSubWorkSubmit}>
+              {isSuperAdmin && (
                 <div
                   style={{
                     display: "grid",
                     gridTemplateColumns: "1fr 1fr",
+                    gap: 14,
+                    marginBottom: 16,
+                  }}
+                >
+                  <Field label="Organization" required>
+                    <select
+                      value={subWorkMasterFilterOrgId}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        setSubWorkMasterFilterOrgId(value);
+                        setSubWorkMasterFilterUserId("");
+                        setSubWorkMasterUsers([]);
+                        setSubWorkMasterWorks([]);
+                        setSubWorksMasterList([]);
+                        setSubWorkForm(initialSubWorkForm);
+                        setEditingSubWorkId(null);
+                        await loadSubWorkMasterUsers(value);
+                      }}
+                      style={{ ...inputStyle, width: "100%" }}
+                    >
+                      <option value="">Select Organization</option>
+                      {organizations.map((org) => (
+                        <option
+                          key={org.OrganizationId}
+                          value={org.OrganizationId}
+                        >
+                          {org.OrgName || org.OrgCode || org.OrganizationId}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="User" required>
+                    <select
+                      value={subWorkMasterFilterUserId}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        setSubWorkMasterFilterUserId(value);
+                        setSubWorksMasterList([]);
+                        setSubWorkForm(initialSubWorkForm);
+                        setEditingSubWorkId(null);
+                        await loadSubWorkMasterWorks(value);
+                      }}
+                      disabled={!subWorkMasterFilterOrgId}
+                      style={{ ...inputStyle, width: "100%" }}
+                    >
+                      <option value="">
+                        {subWorkMasterFilterOrgId
+                          ? "Select User"
+                          : "Select Organization first"}
+                      </option>
+                      {subWorkMasterUsers.map((u) => (
+                        <option key={u.UserId} value={u.UserId}>
+                          {u.UserName || u.UserLoginName || u.UserId}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+              )}
+
+              <FormShell onSubmit={onSubWorkSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr",
                     gap: 14,
                   }}
                 >
@@ -8588,31 +9078,51 @@ export default function HomePage() {
                       value={subWorkForm.WorkId}
                       onChange={onSubWorkChange}
                       required
-                      style={inputStyle}
+                      disabled={
+                        isSuperAdmin &&
+                        (!subWorkMasterFilterOrgId ||
+                          !subWorkMasterFilterUserId)
+                      }
+                      style={{ ...inputStyle, width: "100%" }}
                     >
-                      <option value="">Select Work</option>
-                      {worksList.map((work) => (
-                        <option
-                          key={work.MasterWorkId}
-                          value={work.MasterWorkId}
-                        >
-                          {work.WorkName}
-                          {work.ProjectCode ? ` (${work.ProjectCode})` : ""}
-                        </option>
-                      ))}
+                      <option value="">
+                        {isSuperAdmin && !subWorkMasterFilterUserId
+                          ? "Select Organization and User first"
+                          : "Select Work"}
+                      </option>
+                      {(isSuperAdmin ? subWorkMasterWorks : worksList).map(
+                        (work) => (
+                          <option
+                            key={work.MasterWorkId}
+                            value={work.MasterWorkId}
+                          >
+                            {work.WorkName}
+                            {work.ProjectCode
+                              ? ` (${work.ProjectCode})`
+                              : ""}
+                          </option>
+                        ),
+                      )}
                     </select>
                   </Field>
 
                   <Field label="Sub Work Name" required>
-                    <input
+                    <textarea
                       name="SubWorkName"
-                      type="text"
                       value={subWorkForm.SubWorkName}
                       onChange={onSubWorkChange}
                       required
-                      style={inputStyle}
+                      rows={2}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 56,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
                     />
                   </Field>
+
                   <Field label="Sequence">
                     <input
                       name="Sequence"
@@ -8622,33 +9132,20 @@ export default function HomePage() {
                       value={subWorkForm.Sequence}
                       onChange={onSubWorkChange}
                       placeholder="Optional — auto by entry order"
-                      style={inputStyle}
+                      style={{ ...inputStyle, width: "100%" }}
                       title="Leave blank to assign next Sequence for this Work"
                     />
-                  </Field>
-                  <Field label="Mark for deletion">
-                    <label
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        fontWeight: 500,
-                        minHeight: 42,
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        name="MarkForDeletion"
-                        checked={subWorkForm.MarkForDeletion}
-                        onChange={onSubWorkChange}
-                      />
-                      Yes
-                    </label>
                   </Field>
                 </div>
 
                 <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-                  <PrimaryButton disabled={savingSubWork}>
+                  <PrimaryButton
+                    disabled={
+                      savingSubWork ||
+                      deletingSubWork ||
+                      (isSuperAdmin && !subWorkMasterFilterUserId)
+                    }
+                  >
                     {savingSubWork
                       ? "Saving…"
                       : editingSubWorkId
@@ -8656,44 +9153,44 @@ export default function HomePage() {
                         : "Save sub work"}
                   </PrimaryButton>
                   {editingSubWorkId && (
-                    <SecondaryButton onClick={resetSubWorkEdit}>
+                    <SecondaryButton
+                      onClick={resetSubWorkEdit}
+                      disabled={savingSubWork || deletingSubWork}
+                    >
                       Cancel edit
                     </SecondaryButton>
                   )}
+                  {editingSubWorkId && !subWorkForm.MarkForDeletion && (
+                    <SecondaryButton
+                      onClick={softDeleteSubWork}
+                      disabled={savingSubWork || deletingSubWork}
+                      style={{
+                        borderColor: theme.colors.red,
+                        color: theme.colors.red,
+                      }}
+                    >
+                      {deletingSubWork ? "Deleting…" : "Delete"}
+                    </SecondaryButton>
+                  )}
+                  {editingSubWorkId &&
+                    subWorkForm.MarkForDeletion &&
+                    isSuperAdmin && (
+                      <SecondaryButton
+                        onClick={undeleteSubWork}
+                        disabled={savingSubWork || deletingSubWork}
+                        style={{
+                          borderColor: theme.colors.green,
+                          color: theme.colors.green,
+                        }}
+                      >
+                        {deletingSubWork ? "Restoring…" : "UnDelete"}
+                      </SecondaryButton>
+                    )}
                 </div>
               </FormShell>
 
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "minmax(240px, 360px) 1fr",
-                  gap: 14,
-                  alignItems: "end",
-                  marginBottom: 14,
-                }}
-              >
-                <Field label="Select Work">
-                  <select
-                    name="WorkId"
-                    value={subWorkForm.WorkId}
-                    onChange={onSubWorkChange}
-                    style={inputStyle}
-                  >
-                    <option value="">Select Work</option>
-                    {worksList.map((work) => (
-                      <option
-                        key={`list-${work.MasterWorkId}`}
-                        value={work.MasterWorkId}
-                      >
-                        {work.WorkName}
-                        {work.ProjectCode ? ` (${work.ProjectCode})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </div>
-
-              {subWorkForm.WorkId && subWorksMasterList.length > 0 && (
+              {subWorkForm.WorkId &&
+                subWorksMasterList.some((s) => !s.MarkForDeletion) && (
                 <div
                   style={{
                     fontSize: 12.5,
@@ -8721,108 +9218,137 @@ export default function HomePage() {
                       <th>ID</th>
                       <th>Work</th>
                       <th>Sub Work Name</th>
-                      <th>Deleted</th>
+                      {isSuperAdmin && <th>Deleted</th>}
                       <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {!subWorkForm.WorkId ? (
-                      <EmptyRow colSpan={7}>
+                    {isSuperAdmin &&
+                    (!subWorkMasterFilterOrgId ||
+                      !subWorkMasterFilterUserId) ? (
+                      <EmptyRow colSpan={isSuperAdmin ? 7 : 6}>
+                        Select Organization and User above to manage
+                        sub-works.
+                      </EmptyRow>
+                    ) : !subWorkForm.WorkId ? (
+                      <EmptyRow colSpan={isSuperAdmin ? 7 : 6}>
                         Select a work above to list sub-works.
                       </EmptyRow>
                     ) : loadingSubWorksMaster ? (
-                      <EmptyRow colSpan={7}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={isSuperAdmin ? 7 : 6}>
+                        Loading…
+                      </EmptyRow>
                     ) : subWorksMasterList.length ? (
-                      subWorksMasterList.map((subWork) => (
-                        <tr
-                          key={subWork.SubWorkId}
-                          onDragOver={(e) => {
-                            if (!subWorkListDragId) return;
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = "move";
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            const fromId =
-                              e.dataTransfer.getData("text/plain") ||
-                              subWorkListDragId;
-                            moveSubWorkItem(fromId, subWork.SubWorkId);
-                            setSubWorkListDragId(null);
-                          }}
-                          style={
-                            Number(subWorkListDragId) ===
-                            Number(subWork.SubWorkId)
-                              ? { opacity: 0.55 }
-                              : undefined
-                          }
-                        >
-                          <td
-                            style={{
-                              fontFamily: theme.font.mono,
-                              fontWeight: 700,
-                              color: theme.colors.accent,
-                              textAlign: "center",
+                      subWorksMasterList.map((subWork) => {
+                        const isDeleted = Boolean(subWork.MarkForDeletion);
+                        return (
+                          <tr
+                            key={subWork.SubWorkId}
+                            onDragOver={(e) => {
+                              if (!subWorkListDragId || isDeleted) return;
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
                             }}
+                            onDrop={(e) => {
+                              if (isDeleted) return;
+                              e.preventDefault();
+                              const fromId =
+                                e.dataTransfer.getData("text/plain") ||
+                                subWorkListDragId;
+                              moveSubWorkItem(fromId, subWork.SubWorkId);
+                              setSubWorkListDragId(null);
+                            }}
+                            style={
+                              Number(subWorkListDragId) ===
+                              Number(subWork.SubWorkId)
+                                ? { opacity: 0.55 }
+                                : isDeleted
+                                  ? { opacity: 0.7 }
+                                  : undefined
+                            }
                           >
-                            {subWork.Sequence ?? ""}
-                          </td>
-                          <td
-                            draggable={!reorderingSubWorks}
-                            onDragStart={(e) => {
-                              setSubWorkListDragId(subWork.SubWorkId);
-                              e.dataTransfer.effectAllowed = "move";
-                              e.dataTransfer.setData(
-                                "text/plain",
-                                String(subWork.SubWorkId),
-                              );
-                            }}
-                            onDragEnd={() => setSubWorkListDragId(null)}
-                            title="Drag to reorder"
-                            style={{
-                              cursor: reorderingSubWorks ? "default" : "grab",
-                              color: theme.colors.inkSoft,
-                              textAlign: "center",
-                              userSelect: "none",
-                            }}
-                          >
-                            ⠿
-                          </td>
-                          <td
-                            style={{
-                              fontFamily: theme.font.mono,
-                              color: theme.colors.inkSoft,
-                            }}
-                          >
-                            {subWork.SubWorkId}
-                          </td>
-                          <td>
-                            {subWork.WorkName ||
-                              worksList.find(
-                                (w) =>
-                                  Number(w.MasterWorkId) ===
-                                  Number(subWork.WorkId),
-                              )?.WorkName ||
-                              "—"}
-                          </td>
-                          <td>{subWork.SubWorkName}</td>
-                          <td>
-                            <Badge
-                              tone={subWork.MarkForDeletion ? "red" : "green"}
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                fontWeight: 700,
+                                color: theme.colors.accent,
+                                textAlign: "center",
+                              }}
                             >
-                              {subWork.MarkForDeletion ? "Yes" : "No"}
-                            </Badge>
-                          </td>
-                          <td>
-                            <SecondaryButton
-                              onClick={() => startSubWorkEdit(subWork)}
+                              {isDeleted ? "—" : subWork.Sequence ?? ""}
+                            </td>
+                            <td
+                              draggable={!reorderingSubWorks && !isDeleted}
+                              onDragStart={(e) => {
+                                if (isDeleted) {
+                                  e.preventDefault();
+                                  return;
+                                }
+                                setSubWorkListDragId(subWork.SubWorkId);
+                                e.dataTransfer.effectAllowed = "move";
+                                e.dataTransfer.setData(
+                                  "text/plain",
+                                  String(subWork.SubWorkId),
+                                );
+                              }}
+                              onDragEnd={() => setSubWorkListDragId(null)}
+                              title={
+                                isDeleted
+                                  ? "Deleted — cannot reorder"
+                                  : "Drag to reorder"
+                              }
+                              style={{
+                                cursor:
+                                  reorderingSubWorks || isDeleted
+                                    ? "default"
+                                    : "grab",
+                                color: theme.colors.inkSoft,
+                                textAlign: "center",
+                                userSelect: "none",
+                              }}
                             >
-                              Edit
-                            </SecondaryButton>
-                          </td>
-                        </tr>
-                      ))
+                              {isDeleted ? "" : "⠿"}
+                            </td>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                color: theme.colors.inkSoft,
+                              }}
+                            >
+                              {subWork.SubWorkId}
+                            </td>
+                            <td>
+                              {subWork.WorkName ||
+                                (isSuperAdmin
+                                  ? subWorkMasterWorks
+                                  : worksList
+                                ).find(
+                                  (w) =>
+                                    Number(w.MasterWorkId) ===
+                                    Number(subWork.WorkId),
+                                )?.WorkName ||
+                                "—"}
+                            </td>
+                            <td>{subWork.SubWorkName}</td>
+                            {isSuperAdmin && (
+                              <td>
+                                <Badge tone={isDeleted ? "red" : "green"}>
+                                  {isDeleted ? "Yes" : "No"}
+                                </Badge>
+                              </td>
+                            )}
+                            <td>
+                              <SecondaryButton
+                                onClick={() => startSubWorkEdit(subWork)}
+                              >
+                                Edit
+                              </SecondaryButton>
+                            </td>
+                          </tr>
+                        );
+                      })
                     ) : (
-                      <EmptyRow colSpan={7}>
+                      <EmptyRow colSpan={isSuperAdmin ? 7 : 6}>
                         No sub works found for this work — add one above.
                       </EmptyRow>
                     )}
