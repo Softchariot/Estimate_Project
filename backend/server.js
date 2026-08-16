@@ -4114,7 +4114,8 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
     }
 
     const additionsResult = await pool.query(
-      `SELECT "SSRRegionId", "Description", "Percentage", "ApplyForLead"
+      `SELECT "SSRRegionId", "Description", "Percentage", "ApplyForLead",
+              "ApplyLabourCess", "LabourCess"
        FROM "WorkStandardAddition"
        WHERE "MasterWorkId" = $1`,
       [workId],
@@ -4126,6 +4127,11 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
           Description: row.Description || "",
           Percentage: Number(row.Percentage) || 0,
           ApplyForLead: row.ApplyForLead !== false,
+          ApplyLabourCess: row.ApplyLabourCess === true,
+          LabourCess:
+            row.LabourCess === null || row.LabourCess === undefined
+              ? 0
+              : Number(row.LabourCess) || 0,
         },
       ]),
     );
@@ -4304,14 +4310,25 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
       let additionLabel = "";
       if (addition && Number(addition.Percentage)) {
         const percentage = Number(addition.Percentage) || 0;
+        const applyLabourCess = addition.ApplyLabourCess === true;
+        const labourCess = Number(addition.LabourCess) || 0;
+        // When Apply Labour Cess = Yes, % is on (Basic - Basic*LabourCess%)
+        const percentBase = applyLabourCess
+          ? basicRate - basicRate * (labourCess / 100)
+          : basicRate;
+
         if (addition.ApplyForLead) {
-          // % on Basic + Lead Amount
-          additionAmount = subTotal * (percentage / 100);
+          // % on (percent base + Lead Amount)
+          const includingBase = percentBase + sumAmount;
+          additionAmount = includingBase * (percentage / 100);
           additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}% Including Lead Charges`;
         } else {
-          // Present logic: % on Basic Rate only
-          additionAmount = basicRate * (percentage / 100);
+          // % on percent base only (Excluding Lead Charges)
+          additionAmount = percentBase * (percentage / 100);
           additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}% Excluding Lead Charges`;
+        }
+        if (applyLabourCess) {
+          additionLabel += ` And Including Applying Labour Cess at ${money2(labourCess)}%`;
         }
       }
 
@@ -6153,7 +6170,8 @@ app.post("/api/populate-work-materials", async (req, res) => {
     }
 
     const additionsResult = await client.query(
-      `SELECT "WorkStandardAdditionId", "SSRRegionId", "Percentage", "ApplyForLead"
+      `SELECT "WorkStandardAdditionId", "SSRRegionId", "Percentage",
+              "ApplyForLead", "ApplyLabourCess", "LabourCess"
        FROM "WorkStandardAddition"
        WHERE "MasterWorkId" = $1`,
       [resolvedWorkId],
@@ -6165,6 +6183,11 @@ app.post("/api/populate-work-materials", async (req, res) => {
           WorkStandardAdditionId: Number(row.WorkStandardAdditionId),
           Percentage: Number(row.Percentage) || 0,
           ApplyForLead: row.ApplyForLead !== false,
+          ApplyLabourCess: row.ApplyLabourCess === true,
+          LabourCess:
+            row.LabourCess === null || row.LabourCess === undefined
+              ? 0
+              : Number(row.LabourCess) || 0,
         },
       ]),
     );
@@ -6220,14 +6243,18 @@ app.post("/api/populate-work-materials", async (req, res) => {
       const itemId = Number(abstract.ItemId);
       const regionId = Number(abstract.RegionId);
       const completedRate = Number(abstract.CompletedRate) || 0;
-      // Optional: if no WorkStandardAddition for this region, use 0% / no lead add-on
+      // Optional: if no WorkStandardAddition for this region, use 0% / no lead / no labour cess
       const addition = additionByRegion.get(regionId) || {
         Percentage: 0,
         ApplyForLead: false,
+        ApplyLabourCess: false,
+        LabourCess: 0,
       };
 
       const percentage = Number(addition.Percentage) || 0;
       const applyForLead = addition.ApplyForLead === true;
+      const applyLabourCess = addition.ApplyLabourCess === true;
+      const labourCess = Number(addition.LabourCess) || 0;
 
       const components = await client.query(
         `SELECT mc."MaterialId",
@@ -6247,13 +6274,21 @@ app.post("/api/populate-work-materials", async (req, res) => {
 
       if (!components.rows.length) {
         isRA = false;
-        if (applyForLead) {
+
+        if (!applyLabourCess) {
+          // ── ApplyLabourCess = NO, no material components ──
+          // FinalRate = CompletedRate + (CompletedRate * Percentage / 100)
           finalRate =
             completedRate + completedRate * (percentage / 100);
           rateString = `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`;
         } else {
-          finalRate = completedRate;
-          rateString = `Final Rate = (${formatNum(completedRate)})`;
+          // ── ApplyLabourCess = YES, no material components ──
+          // FinalRate = CompletedRate
+          //   + (CompletedRate - CompletedRate*(LabourCess/100)) * (Percentage/100)
+          const rateAfterCess =
+            completedRate - completedRate * (labourCess / 100);
+          finalRate = completedRate + rateAfterCess * (percentage / 100);
+          rateString = `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`;
         }
       } else {
         isRA = true;
@@ -6305,12 +6340,41 @@ app.post("/api/populate-work-materials", async (req, res) => {
           materialsInserted += 1;
         }
 
-        if (applyForLead) {
-          finalRate =
-            completedRate +
-            (sumAmount + sumAmount * (percentage / 100));
+        if (!applyLabourCess) {
+          // ── ApplyLabourCess = NO (match Rate Analysis Report) ──
+          // SubTotal = CompletedRate + sumAmount
+          if (applyForLead) {
+            // Including Lead Charges: % on SubTotal
+            // FinalRate = (CompletedRate + sumAmount) * (1 + Percentage/100)
+            finalRate =
+              (completedRate + sumAmount) * (1 + percentage / 100);
+          } else {
+            // Excluding Lead Charges: % on Basic Rate only
+            // FinalRate = CompletedRate + sumAmount + CompletedRate*(Percentage/100)
+            finalRate =
+              completedRate +
+              sumAmount +
+              completedRate * (percentage / 100);
+          }
         } else {
-          finalRate = completedRate + sumAmount;
+          // ── ApplyLabourCess = YES (match Rate Analysis Report) ──
+          // percentBase = CompletedRate - CompletedRate*(LabourCess/100)
+          // SubTotal = CompletedRate + sumAmount (unchanged)
+          const rateAfterCess =
+            completedRate - completedRate * (labourCess / 100);
+          if (applyForLead) {
+            // Including: % on (rateAfterCess + sumAmount)
+            finalRate =
+              completedRate +
+              sumAmount +
+              (rateAfterCess + sumAmount) * (percentage / 100);
+          } else {
+            // Excluding: % on rateAfterCess only
+            finalRate =
+              completedRate +
+              sumAmount +
+              rateAfterCess * (percentage / 100);
+          }
         }
       }
 
