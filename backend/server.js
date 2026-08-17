@@ -3797,11 +3797,15 @@ app.get("/api/generate-report", async (req, res) => {
           i."RegionId",
           i."CategoryId",
           u."UnitShortName",
+          r."SSRRegionShortName",
+          y."Year" AS "SSRYear",
           COALESCE(SUM(wm."Quantity"), 0) AS "Quantity"
         FROM "WorkAbstract" wa
         INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
         INNER JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
         LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+        LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+        LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
         LEFT JOIN "WorkMeasurement" wm ON wm."WorkAbstractId" = wa."WorkAbstractId"
         WHERE wa."WorkId" = $1
         ${subWorkFilter}
@@ -3809,7 +3813,7 @@ app.get("/api/generate-report", async (req, res) => {
           sw."SubWorkId", sw."SubWorkName",
           wa."WorkAbstractId", wa."Sequence", wa."FinalRate", wa."RateString", wa."IsRA",
           i."ItemId", i."ItemNumber", i."ItemDescription", i."RegionId", i."CategoryId",
-          u."UnitShortName"
+          u."UnitShortName", r."SSRRegionShortName", y."Year"
         ORDER BY
           COALESCE(sw."Sequence", 999999) ASC,
           sw."SubWorkName" ASC,
@@ -3862,6 +3866,16 @@ app.get("/api/generate-report", async (req, res) => {
       return parentByKey.get(ancestorNumber) || "";
     };
 
+    const formatSsrItemNo = (itemNumber, regionShortName, year) => {
+      const number = String(itemNumber || "").trim();
+      const shortName = String(regionShortName || "").trim();
+      const yearText = String(year || "").trim();
+      const yearPart = yearText ? `(${yearText})` : "";
+      // 3 lines: SSRRegionShortName, Year, ItemNumber
+      const lines = [shortName, yearPart, number].filter(Boolean);
+      return lines.join("\n");
+    };
+
     // ── Group rows by sub work; inject parent heading rows before leaves ──
     const subWorkGroups = [];
     const groupIndexBySubWorkId = new Map();
@@ -3875,6 +3889,8 @@ app.get("/api/generate-report", async (req, res) => {
         });
       }
       const group = subWorkGroups[groupIndexBySubWorkId.get(row.SubWorkId)];
+      const regionShortName = row.SSRRegionShortName || "";
+      const ssrYear = row.SSRYear || "";
 
       for (const ancestor of ancestorItemNumbers(row.ItemNumber)) {
         if (group.printedParents.has(ancestor)) continue;
@@ -3884,6 +3900,7 @@ app.get("/api/generate-report", async (req, res) => {
         group.items.push({
           isParentHeading: true,
           ItemNumber: ancestor,
+          DisplayItemNo: formatSsrItemNo(ancestor, regionShortName, ssrYear),
           ItemDescription: parentDesc,
         });
       }
@@ -3891,6 +3908,11 @@ app.get("/api/generate-report", async (req, res) => {
       group.items.push({
         isParentHeading: false,
         ItemNumber: row.ItemNumber,
+        DisplayItemNo: formatSsrItemNo(
+          row.ItemNumber,
+          regionShortName,
+          ssrYear,
+        ),
         ItemDescription: row.ItemDescription,
         UnitShortName: row.UnitShortName,
         FinalRate: Number(row.FinalRate || 0),
@@ -3921,10 +3943,22 @@ app.get("/api/generate-report", async (req, res) => {
     // Amount / totals: round to whole Rupees, Indian grouping with ₹
     const rupees = (n) => formatInrAmount(n, { roundToRupee: true });
 
-    // Item No | Description | Quantity | Rate/Unit | Amount
-    const colX = { itemNo: 40, desc: 105, qty: 340, rate: 410, amount: 490 };
-    const itemNoWidth = colX.desc - colX.itemNo - 6;
+    // Item No | SSR Item No | Description | Quantity | Rate/Unit | Amount
+    // Description +10% again; Qty/Rate/Amount shifted right to keep Rate width.
+    // Item No → SSR Item No gap minimized (serial ~24pt; header wraps).
+    // Description pulled left to close unused space after SSR Item No.
+    const colX = {
+      serial: 40,
+      ssrItemNo: 68,
+      desc: 128,
+      qty: 378,
+      rate: 448,
+      amount: 502,
+    };
+    const serialWidth = colX.ssrItemNo - colX.serial - 4;
+    const ssrItemNoWidth = colX.desc - colX.ssrItemNo - 6;
     const descWidth = colX.qty - colX.desc - 10;
+    const rateWidth = colX.amount - colX.rate - 6;
     const amountWidth = 555 - colX.amount;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
 
@@ -3933,7 +3967,7 @@ app.get("/api/generate-report", async (req, res) => {
       doc.text("Abstract", 0, 40, { align: "center" });
       doc.moveDown(1.5);
       doc.font("Helvetica-Bold").fontSize(10);
-      doc.text(`Name of Work :   ${projectName}`, colX.itemNo, doc.y);
+      doc.text(`Name of Work :   ${projectName}`, colX.serial, doc.y);
       doc.moveDown(0.5);
     };
 
@@ -3941,14 +3975,18 @@ app.get("/api/generate-report", async (req, res) => {
       doc.font("Helvetica-Bold").fontSize(10);
       doc.text(
         `${groupIdx + 1}. NAME OF SUB WORK -- ${subWorkName}`,
-        colX.itemNo,
+        colX.serial,
         doc.y,
       );
       doc.moveDown(0.5);
       doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
       doc.moveDown(0.3);
       const tableTop = doc.y;
-      doc.text("Item No", colX.itemNo, tableTop);
+      doc.font("Helvetica-Bold").fontSize(9);
+      doc.text("Item No", colX.serial, tableTop, { width: serialWidth });
+      doc.text("SSR Item No", colX.ssrItemNo, tableTop, {
+        width: ssrItemNoWidth,
+      });
       doc.text("Description", colX.desc, tableTop);
       doc.text("Quantity", colX.qty, tableTop);
       doc.text("Rate/Unit", colX.rate, tableTop);
@@ -3956,7 +3994,12 @@ app.get("/api/generate-report", async (req, res) => {
         width: amountWidth,
         align: "right",
       });
-      doc.moveDown(0.5);
+      const headerBottom = Math.max(
+        tableTop + 12,
+        doc.heightOfString("SSR Item No", { width: ssrItemNoWidth }) + tableTop,
+      );
+      doc.y = headerBottom;
+      doc.moveDown(0.35);
       doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
       doc.moveDown(0.5);
     };
@@ -3967,15 +4010,21 @@ app.get("/api/generate-report", async (req, res) => {
       drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
 
       let subWorkTotal = 0;
+      let serialNo = 0;
 
       group.items.forEach((item) => {
         const isParent = Boolean(item.isParentHeading);
         const quantity = isParent ? 0 : Number(item.Quantity || 0);
         const rate = isParent ? 0 : Number(item.FinalRate || 0);
         const amount = Math.round(quantity * rate);
-        if (!isParent) subWorkTotal += amount;
+        if (!isParent) {
+          subWorkTotal += amount;
+          serialNo += 1;
+        }
 
-        const itemNoText = item.ItemNumber || "";
+        const serialText = isParent ? "" : String(serialNo);
+        const ssrItemNoText =
+          item.DisplayItemNo || item.ItemNumber || "";
         const rateString = String(item.RateString || "").trim();
         const baseDesc = String(item.ItemDescription || "").trim();
         const descText = isParent
@@ -3983,14 +4032,14 @@ app.get("/api/generate-report", async (req, res) => {
           : [baseDesc, rateString].filter(Boolean).join("\n");
 
         doc.font(isParent ? "Helvetica-Bold" : "Helvetica").fontSize(9);
-        const itemNoHeight = doc.heightOfString(itemNoText, {
-          width: itemNoWidth,
+        const ssrItemNoHeight = doc.heightOfString(ssrItemNoText, {
+          width: ssrItemNoWidth,
         });
         const descHeight = doc.heightOfString(descText, {
           width: descWidth,
           align: "justify",
         });
-        const rowHeight = Math.max(itemNoHeight, descHeight) + 6;
+        const rowHeight = Math.max(ssrItemNoHeight, descHeight) + 6;
 
         if (doc.y + rowHeight > pageBottom - 40) {
           doc.addPage();
@@ -4001,7 +4050,12 @@ app.get("/api/generate-report", async (req, res) => {
         const rowTop = doc.y;
 
         doc.font(isParent ? "Helvetica-Bold" : "Helvetica").fontSize(9);
-        doc.text(itemNoText, colX.itemNo, rowTop, { width: itemNoWidth });
+        if (serialText) {
+          doc.text(serialText, colX.serial, rowTop, { width: serialWidth });
+        }
+        doc.text(ssrItemNoText, colX.ssrItemNo, rowTop, {
+          width: ssrItemNoWidth,
+        });
         doc.text(descText, colX.desc, rowTop, {
           width: descWidth,
           align: "justify",
@@ -4014,7 +4068,7 @@ app.get("/api/generate-report", async (req, res) => {
             `${money(rate)}/${item.UnitShortName || ""}`,
             colX.rate,
             rowTop,
-            { width: 75 },
+            { width: rateWidth },
           );
           doc.font(rupeeFonts.regular).fontSize(9);
           doc.text(rupees(amount), colX.amount, rowTop, {
@@ -4052,7 +4106,7 @@ app.get("/api/generate-report", async (req, res) => {
         drawHeader();
       }
       doc.font("Helvetica-Oblique").fontSize(9);
-      doc.text(words, colX.itemNo, doc.y, { width: 515 });
+      doc.text(words, colX.serial, doc.y, { width: 515 });
     });
 
     doc.end();
@@ -4222,8 +4276,9 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
          LEFT JOIN "MasterUnit" u ON u."UnitId" = wm."UnitId"
          WHERE wm."WorkId" = $1
            AND wm."ItemId" = $2
+           AND wm."SubWorkId" IS NOT DISTINCT FROM $3
          ORDER BY COALESCE(wm."Sequence", 999999) ASC, wm."WorkMaterialId" ASC`,
-        [workId, itemId],
+        [workId, itemId, abstract.SubWorkId ?? null],
       );
 
       ensureSpace(120);
@@ -6241,6 +6296,7 @@ app.post("/api/populate-work-materials", async (req, res) => {
 
     for (const abstract of abstracts.rows) {
       const itemId = Number(abstract.ItemId);
+      const subWorkId = Number(abstract.SubWorkId) || null;
       const regionId = Number(abstract.RegionId);
       const completedRate = Number(abstract.CompletedRate) || 0;
       // Optional: if no WorkStandardAddition for this region, use 0% / no lead / no labour cess
@@ -6275,20 +6331,42 @@ app.post("/api/populate-work-materials", async (req, res) => {
       if (!components.rows.length) {
         isRA = false;
 
-        if (!applyLabourCess) {
-          // ── ApplyLabourCess = NO, no material components ──
-          // FinalRate = CompletedRate + (CompletedRate * Percentage / 100)
-          finalRate =
-            completedRate + completedRate * (percentage / 100);
-          rateString = `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`;
+        // No material components — region-specific FinalRate
+        if (regionId === 1) {
+          // Percentage / LabourCess as percent points → divide by 100
+          if (!applyLabourCess) {
+            // Labour Cess No:
+            // FinalRate = CompletedRate + CompletedRate × (Percentage/100)
+            finalRate =
+              completedRate + completedRate * (percentage / 100);
+            rateString = `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`;
+          } else {
+            // Labour Cess Yes:
+            // FinalRate = CompletedRate
+            //   + (CompletedRate − CompletedRate×(LabourCess/100)) × (Percentage/100)
+            const rateAfterCess =
+              completedRate - completedRate * (labourCess / 100);
+            finalRate = completedRate + rateAfterCess * (percentage / 100);
+            rateString = `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`;
+          }
+        } else if (regionId === 2) {
+          // Do NOT divide Percentage / LabourCess by 100 (use values as stored)
+          if (!applyLabourCess) {
+            // Labour Cess No:
+            // FinalRate = CompletedRate × Percentage
+            finalRate = completedRate * percentage;
+            rateString = `Final Rate = (${formatNum(completedRate)} * ${formatNum(percentage)})`;
+          } else {
+            // Labour Cess Yes:
+            // FinalRate = (CompletedRate − CompletedRate×(LabourCess/100)) × Percentage
+            finalRate =
+              (completedRate - completedRate * (labourCess / 100)) *
+              percentage;
+            rateString = `Final Rate = ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)})`;
+          }
         } else {
-          // ── ApplyLabourCess = YES, no material components ──
-          // FinalRate = CompletedRate
-          //   + (CompletedRate - CompletedRate*(LabourCess/100)) * (Percentage/100)
-          const rateAfterCess =
-            completedRate - completedRate * (labourCess / 100);
-          finalRate = completedRate + rateAfterCess * (percentage / 100);
-          rateString = `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`;
+          finalRate = completedRate;
+          rateString = `Final Rate = (${formatNum(completedRate)})`;
         }
       } else {
         isRA = true;
@@ -6321,11 +6399,12 @@ app.post("/api/populate-work-materials", async (req, res) => {
 
           await client.query(
             `INSERT INTO "WorkMaterial"
-             ("WorkId", "ItemId", "Sequence", "MaterialId",
+             ("WorkId", "SubWorkId", "ItemId", "Sequence", "MaterialId",
               "Component", "UnitId", "LeadDistanceKm", "Lead", "Amount", "Remarks")
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [
               resolvedWorkId,
+              subWorkId,
               itemId,
               materialSequence,
               materialId,
