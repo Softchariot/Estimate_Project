@@ -1,15 +1,127 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
-/** Evaluate a math string like "3.5+2.1*1.8" safely. */
+/** Strip leading Excel "=" and trim. Empty → "". */
+function normalizeFormulaText(value) {
+  let s = String(value ?? "").trim();
+  if (!s) return "";
+  if (s.startsWith("=")) s = s.slice(1).trim();
+  return s;
+}
+
+function findClosingParen(s, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < s.length; i += 1) {
+    if (s[i] === "(") depth += 1;
+    else if (s[i] === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function findTopLevelComma(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] === "(") depth += 1;
+    else if (s[i] === ")") depth -= 1;
+    else if (s[i] === "," && depth === 0) return i;
+  }
+  return -1;
+}
+
+function evalArithmeticOnly(expr) {
+  const s = String(expr ?? "").trim();
+  if (!s) return { val: null, err: true };
+  if (!/^[0-9+\-*/.() \t]+$/.test(s)) return { val: null, err: true };
+  try {
+    // eslint-disable-next-line no-new-func
+    const v = Function('"use strict"; return (' + s + ")")();
+    if (!isFinite(v) || isNaN(v)) return { val: null, err: true };
+    return { val: Number(v), err: false };
+  } catch {
+    return { val: null, err: true };
+  }
+}
+
+const EXCEL_FN_NAMES = ["ROUND", "ABS", "INT", "FLOOR", "CEILING"];
+
+/** Expand Excel ROUND/ABS/INT/FLOOR/CEILING to numeric literals (innermost first). */
+function expandExcelFunctions(input) {
+  let s = String(input ?? "");
+  for (let guard = 0; guard < 40; guard += 1) {
+    const upper = s.toUpperCase();
+    let replaced = false;
+    for (const name of EXCEL_FN_NAMES) {
+      const token = `${name}(`;
+      let searchFrom = 0;
+      while (searchFrom < upper.length) {
+        const idx = upper.indexOf(token, searchFrom);
+        if (idx < 0) break;
+        const openIdx = idx + name.length;
+        if (s[openIdx] !== "(") {
+          searchFrom = idx + 1;
+          continue;
+        }
+        const closeIdx = findClosingParen(s, openIdx);
+        if (closeIdx < 0) return null;
+        const inside = s.slice(openIdx + 1, closeIdx);
+        const insideUpper = inside.toUpperCase();
+        if (EXCEL_FN_NAMES.some((n) => insideUpper.includes(`${n}(`))) {
+          searchFrom = idx + 1;
+          continue;
+        }
+        let value;
+        if (name === "ROUND") {
+          const comma = findTopLevelComma(inside);
+          const arg = comma < 0 ? inside : inside.slice(0, comma);
+          const digitsRaw = comma < 0 ? "0" : inside.slice(comma + 1).trim();
+          const digits = parseInt(digitsRaw, 10);
+          if (!Number.isFinite(digits)) return null;
+          const inner = expandExcelFunctions(arg);
+          if (inner == null) return null;
+          const ar = evalArithmeticOnly(inner);
+          if (ar.err) return null;
+          const factor = 10 ** digits;
+          value = Math.round(ar.val * factor) / factor;
+        } else {
+          const inner = expandExcelFunctions(inside);
+          if (inner == null) return null;
+          const ar = evalArithmeticOnly(inner);
+          if (ar.err) return null;
+          if (name === "ABS") value = Math.abs(ar.val);
+          else if (name === "INT") value = Math.trunc(ar.val);
+          else if (name === "FLOOR") value = Math.floor(ar.val);
+          else if (name === "CEILING") value = Math.ceil(ar.val);
+          else return null;
+        }
+        s = `${s.slice(0, idx)}(${value})${s.slice(closeIdx + 1)}`;
+        replaced = true;
+        break;
+      }
+      if (replaced) break;
+    }
+    if (!replaced) break;
+  }
+  return s;
+}
+
+/**
+ * Evaluate Excel-style arithmetic, including ROUND/ABS/INT/FLOOR/CEILING.
+ * Cell references (A1, K48) are rejected.
+ */
 function calcExpr(expr) {
   try {
-    const clean = String(expr).replace(/[^0-9+\-*/.() ]/g, "");
-    if (!clean.trim()) return { val: null, err: false };
-    // eslint-disable-next-line no-new-func
-    const v = Function('"use strict"; return (' + clean + ")")();
-    if (!isFinite(v) || isNaN(v)) return { val: null, err: true };
-    return { val: parseFloat(v.toFixed(4)), err: false };
+    let s = normalizeFormulaText(expr);
+    if (!s.trim()) return { val: null, err: false };
+    s = expandExcelFunctions(s);
+    if (s == null) return { val: null, err: true };
+    // After expanding known fns, no letters should remain (blocks A1, SUM, etc.)
+    if (/[a-zA-Z_]/.test(s)) return { val: null, err: true };
+    const r = evalArithmeticOnly(s);
+    if (r.err) return r;
+    return { val: parseFloat(r.val.toFixed(4)), err: false };
   } catch {
     return { val: null, err: true };
   }
@@ -19,26 +131,33 @@ function uid() {
   return "r" + Math.random().toString(36).slice(2, 9);
 }
 
-function parseMultiplier(v) {
-  if (v === undefined || v === null || String(v).trim() === "") return 1;
-  const n = parseFloat(v);
-  if (isNaN(n)) return NaN;
-  return n === 0 ? 1 : n;
+/**
+ * Factor for Quantity product.
+ * Empty → 1; plain number or math expression (without leading =) is evaluated.
+ */
+function parseDimFactor(value) {
+  const s = normalizeFormulaText(value);
+  if (!s) return { val: 1, err: false };
+  const plain = s.replace(/,/g, "");
+  if (/^-?\d+(\.\d+)?$/.test(plain)) {
+    const n = parseFloat(plain);
+    if (isNaN(n)) return { val: null, err: true };
+    return { val: n, err: false };
+  }
+  return calcExpr(s);
 }
 
 function computeQty(row) {
-  const exprResult = calcExpr(row.meas);
-  if (row.meas.trim() && exprResult.err) return { val: null, err: true };
-  const meVal = row.meas.trim() ? exprResult.val : 1;
-
-  const n = parseMultiplier(row.num);
-  const l = parseMultiplier(row.len);
-  const b = parseMultiplier(row.brd);
-  const h = parseMultiplier(row.hgt);
-
-  if ([n, l, b, h].some((x) => isNaN(x))) return { val: null, err: true };
-
-  const total = meVal * n * l * b * h;
+  const factors = [
+    parseDimFactor(row.num),
+    parseDimFactor(row.len),
+    parseDimFactor(row.brd),
+    parseDimFactor(row.hgt),
+  ];
+  if (factors.some((f) => f.err || f.val === null)) {
+    return { val: null, err: true };
+  }
+  const total = factors.reduce((acc, f) => acc * f.val, 1);
   if (!isFinite(total)) return { val: null, err: true };
   return { val: parseFloat(total.toFixed(4)), err: false };
 }
@@ -48,7 +167,6 @@ const measurementRowBase = {
   localId: "",
   sequence: null,
   desc: "",
-  meas: "",
   num: "",
   len: "",
   brd: "",
@@ -58,7 +176,257 @@ const measurementRowBase = {
   dirty: false,
 };
 
-const QTY_FIELDS = ["meas", "num", "len", "brd", "hgt"];
+const QTY_FIELDS = ["num", "len", "brd", "hgt"];
+
+function isNumericCell(value) {
+  const t = normalizeFormulaText(value).replace(/,/g, "");
+  if (!t) return false;
+  return /^-?\d+(\.\d+)?$/.test(t);
+}
+
+function isExprCell(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return false;
+  const t = normalizeFormulaText(raw);
+  if (!t) return false;
+  if (isNumericCell(t)) return false;
+  if (/^(ROUND|ABS|INT|FLOOR|CEILING)\s*\(/i.test(t)) return true;
+  return /[+\-*/()]/.test(t) || raw.startsWith("=");
+}
+
+function parseNumericCell(value) {
+  return parseFloat(normalizeFormulaText(value).replace(/,/g, ""));
+}
+
+function approxEqual(a, b) {
+  if (!isFinite(a) || !isFinite(b)) return false;
+  const diff = Math.abs(a - b);
+  if (diff < 0.015) return true;
+  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
+  return diff / scale < 0.012;
+}
+
+function looksLikeHeaderRow(cells) {
+  const first = String(cells[0] || "")
+    .trim()
+    .toLowerCase();
+  const joined = cells.join(" ").toLowerCase();
+  if (!first) return false;
+  if (
+    /^(seq|sequence|sr\.?|description|desc|item)$/i.test(first) &&
+    /(meas|quantity|qty|no\.?|length|\b[lbh]\b)/i.test(joined)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Prefer Excel formula attribute when present (x:fmla / formula), else cell text.
+ * Leading "=" is stripped so "=2*(2+4)" → "2*(2+4)".
+ */
+function getExcelHtmlCellValue(td, isDescription) {
+  if (!td) return "";
+  for (const attr of Array.from(td.attributes || [])) {
+    if (/fmla|formula/i.test(attr.name) && attr.value) {
+      return isDescription
+        ? String(attr.value).trim()
+        : normalizeFormulaText(attr.value);
+    }
+  }
+  const text = String(td.innerText || td.textContent || "").trim();
+  return isDescription ? text : normalizeFormulaText(text);
+}
+
+/** Parse Excel HTML clipboard into arrays of cell strings (formulas preferred). */
+function extractExcelHtmlTableRows(html) {
+  if (!html || typeof DOMParser === "undefined") return [];
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const trs = Array.from(doc.querySelectorAll("tr"));
+    const rows = [];
+    for (const tr of trs) {
+      const tds = Array.from(tr.querySelectorAll("td, th"));
+      if (!tds.length) continue;
+      const cells = tds.map((td, idx) => getExcelHtmlCellValue(td, idx === 0));
+      if (cells.some((c) => String(c).trim())) rows.push(cells);
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+/** Rejoin ROUND(x,2) etc. split across cells by Excel/CSV commas. */
+function rejoinSplitExcelFunctions(cells) {
+  const out = [];
+  for (let i = 0; i < cells.length; i += 1) {
+    let c = String(cells[i] ?? "");
+    while (i + 1 < cells.length) {
+      const normalized = normalizeFormulaText(c);
+      const openIdx = normalized.indexOf("(");
+      const looksLikeFn = /^(ROUND|ABS|INT|FLOOR|CEILING)\s*\(/i.test(
+        normalized,
+      );
+      if (!looksLikeFn || openIdx < 0) break;
+      // Map openIdx from normalized back — use c for paren matching
+      const openInC = c.indexOf("(");
+      if (openInC >= 0 && findClosingParen(c, openInC) >= 0) break;
+      i += 1;
+      c = `${c},${cells[i]}`;
+    }
+    out.push(c);
+  }
+  return out;
+}
+
+/** Convert one row of cells → measurement row (or null). */
+function cellsToMeasurementRow(rawCells) {
+  let cells = rejoinSplitExcelFunctions(
+    (rawCells || []).map((c) => String(c ?? "").trim()),
+  );
+  if (!cells.length || cells.every((c) => !c)) return null;
+  if (looksLikeHeaderRow(cells)) return null;
+
+  // Drop leading Sequence column when present
+  if (
+    cells.length >= 3 &&
+    isNumericCell(cells[0]) &&
+    !isNumericCell(cells[1]) &&
+    !isExprCell(cells[1])
+  ) {
+    cells = cells.slice(1);
+  }
+
+  // Normalize dim cells (strip =); keep description as-is
+  cells = cells.map((c, idx) =>
+    idx === 0 ? c : normalizeFormulaText(c),
+  );
+
+  // Drop trailing Quantity column (value or Excel formula with cell refs)
+  if (cells.length >= 3) {
+    const last = cells[cells.length - 1];
+    const lastIsQtyFormula =
+      isExprCell(last) && /[a-zA-Z_]/.test(normalizeFormulaText(last));
+    if (lastIsQtyFormula) {
+      cells = cells.slice(0, -1);
+    } else if (isNumericCell(last) || isExprCell(last)) {
+      const lastVal = isNumericCell(last)
+        ? parseNumericCell(last)
+        : calcExpr(normalizeFormulaText(last)).val;
+      const dimNums = cells
+        .slice(1, -1)
+        .map((c) => {
+          if (isNumericCell(c)) return parseNumericCell(c);
+          if (isExprCell(c) || normalizeFormulaText(c)) {
+            const r = calcExpr(normalizeFormulaText(c));
+            return r.err ? null : r.val;
+          }
+          return null;
+        })
+        .filter((n) => n !== null && isFinite(n));
+      if (
+        lastVal !== null &&
+        isFinite(lastVal) &&
+        dimNums.length >= 1
+      ) {
+        const prod = dimNums.reduce((a, b) => a * b, 1);
+        if (approxEqual(prod, lastVal)) {
+          cells = cells.slice(0, -1);
+        }
+      }
+    }
+  }
+
+  const desc = cells[0] || "";
+  const rest = cells.slice(1);
+  let num = "";
+  let len = "";
+  let brd = "";
+  let hgt = "";
+  // Excel paste: Description | No | L | B | H [| Qty]
+  if (rest.length >= 4) {
+    [num, len, brd, hgt] = rest;
+  } else if (rest.length === 3) {
+    [num, len, brd] = rest;
+  } else if (rest.length === 2) {
+    [num, len] = rest;
+  } else if (rest.length === 1) {
+    num = rest[0];
+  }
+
+  if (![desc, num, len, brd, hgt].some((v) => String(v).trim())) {
+    return null;
+  }
+
+  const base = {
+    ...measurementRowBase,
+    localId: uid(),
+    desc,
+    num: String(num ?? ""),
+    len: String(len ?? ""),
+    brd: String(brd ?? ""),
+    hgt: String(hgt ?? ""),
+    dirty: true,
+  };
+  const result = computeQty(base);
+  return {
+    ...base,
+    qty: result.val,
+    measErr: result.err,
+  };
+}
+
+/**
+ * Parse Excel paste. Prefers HTML clipboard (keeps formulas like =2*(2+4)),
+ * falls back to plain TSV values.
+ */
+function parseExcelPaste(text, html) {
+  const htmlRows = extractExcelHtmlTableRows(html);
+  const hasHtmlFormula = Boolean(
+    html &&
+      (/fmla|formula/i.test(html) || htmlRows.some((r) => r.some(isExprCell))),
+  );
+
+  let tableRows = [];
+  if (htmlRows.length && (hasHtmlFormula || !String(text || "").trim())) {
+    tableRows = htmlRows;
+  } else if (String(text || "").trim()) {
+    const raw = String(text)
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n");
+    const lines = raw.split("\n").filter((line) => String(line).trim() !== "");
+    tableRows = lines.map((line) => {
+      let cells = line.split("\t").map((c) => String(c).trim());
+      if (cells.length === 1 && line.includes(",") && !line.includes("\t")) {
+        cells = line.split(",").map((c) => String(c).trim());
+      }
+      return cells;
+    });
+    // If HTML has more formula detail for same shape, merge formula cells over values
+    if (htmlRows.length === tableRows.length) {
+      tableRows = tableRows.map((plainCells, rIdx) => {
+        const htmlCells = htmlRows[rIdx] || [];
+        return plainCells.map((plain, cIdx) => {
+          const htmlVal = htmlCells[cIdx];
+          if (htmlVal && isExprCell(htmlVal)) return normalizeFormulaText(htmlVal);
+          // Description: prefer plain/html text
+          if (cIdx === 0) return plain || htmlVal || "";
+          return normalizeFormulaText(plain || htmlVal || "");
+        });
+      });
+    }
+  } else if (htmlRows.length) {
+    tableRows = htmlRows;
+  }
+
+  const parsed = [];
+  for (const cells of tableRows) {
+    const row = cellsToMeasurementRow(cells);
+    if (row) parsed.push(row);
+  }
+  return parsed;
+}
 
 function mapDbRows(dbRows) {
   const ordered = [...dbRows].sort((a, b) => {
@@ -74,7 +442,6 @@ function mapDbRows(dbRows) {
       localId: uid(),
       sequence: r.Sequence != null ? Number(r.Sequence) : idx + 1,
       desc: r.Description ?? "",
-      meas: r.Expression ?? "",
       num: r.Number != null ? String(r.Number) : "",
       len: r.Length != null ? String(r.Length) : "",
       brd: r.Breadth != null ? String(r.Breadth) : "",
@@ -143,7 +510,14 @@ function MeasurementPanel({
     setRows((prev) => {
       const updated = prev.map((r) => {
         if (r.localId !== localId) return r;
-        const next = { ...r, [field]: value, dirty: true };
+        let nextValue = value;
+        // Strip Excel "=" from No / L / B / H as user types or pastes
+        if (QTY_FIELDS.includes(field) && typeof nextValue === "string") {
+          if (nextValue.trim().startsWith("=")) {
+            nextValue = normalizeFormulaText(nextValue);
+          }
+        }
+        const next = { ...r, [field]: nextValue, dirty: true };
         if (QTY_FIELDS.includes(field)) {
           const result = computeQty(next);
           next.qty = result.val;
@@ -155,7 +529,6 @@ function MeasurementPanel({
       const lastRow = updated[updated.length - 1];
       const lastRowHasContent =
         lastRow.desc.trim() ||
-        lastRow.meas.trim() ||
         lastRow.num.trim() ||
         lastRow.len.trim() ||
         lastRow.brd.trim() ||
@@ -252,10 +625,41 @@ function MeasurementPanel({
     }
   };
 
+  const applyExcelPaste = (text, html) => {
+    const pasted = parseExcelPaste(text, html);
+    if (!pasted.length) {
+      setError(
+        "No measurement rows found in paste. Select Excel columns: Description, No, L, B, H (Quantity optional / ignored).",
+      );
+      return false;
+    }
+    setError("");
+    setRows((prev) => {
+      const existing = (prev || []).filter(rowHasContent);
+      const blank = { ...measurementRowBase, localId: uid() };
+      return [...existing, ...pasted, blank];
+    });
+    return true;
+  };
+
+  const onPanelPaste = (e) => {
+    const text = e.clipboardData?.getData("text/plain") || "";
+    const html = e.clipboardData?.getData("text/html") || "";
+    if (!text && !html) return;
+    // Multi-cell Excel paste uses tabs and/or multiple lines / HTML table
+    const isMulti =
+      text.includes("\t") ||
+      text.includes("\n") ||
+      text.includes("\r") ||
+      /<table[\s>]/i.test(html);
+    if (!isMulti) return;
+    e.preventDefault();
+    applyExcelPaste(text, html);
+  };
+
   // Any typed content (used for auto-adding the next blank row)
   const rowHasContent = (r) =>
     r.desc.trim() ||
-    r.meas.trim() ||
     r.num.trim() ||
     r.len.trim() ||
     r.brd.trim() ||
@@ -264,11 +668,7 @@ function MeasurementPanel({
   // Must have measurement fields — description-only rows are not saved
   const rowHasMeasurementData = (r) =>
     Boolean(
-      r.meas.trim() ||
-        r.num.trim() ||
-        r.len.trim() ||
-        r.brd.trim() ||
-        r.hgt.trim(),
+      r.num.trim() || r.len.trim() || r.brd.trim() || r.hgt.trim(),
     );
 
   const openCommentModal = () => {
@@ -329,11 +729,10 @@ function MeasurementPanel({
       const payload = {
         workAbstractId: item.WorkAbstractId,
         description: row.desc || "",
-        expression: row.meas,
-        number: row.num.trim() === "" ? null : parseFloat(row.num),
-        length: row.len.trim() === "" ? null : parseFloat(row.len),
-        breadth: row.brd.trim() === "" ? null : parseFloat(row.brd),
-        height: row.hgt.trim() === "" ? null : parseFloat(row.hgt),
+        number: normalizeFormulaText(row.num) || null,
+        length: normalizeFormulaText(row.len) || null,
+        breadth: normalizeFormulaText(row.brd) || null,
+        height: normalizeFormulaText(row.hgt) || null,
         quantity: row.qty,
       };
       try {
@@ -403,7 +802,7 @@ function MeasurementPanel({
       boxSizing: "border-box",
     },
     smallInput: {
-      fontSize: 13,
+      fontSize: 12,
       padding: "5px 6px",
       height: 32,
       borderRadius: 6,
@@ -411,12 +810,15 @@ function MeasurementPanel({
       background: "#fff",
       color: "#24323f",
       width: "100%",
+      minWidth: 110,
       boxSizing: "border-box",
       textAlign: "right",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
     },
-    // Seq | drag | Description | Measurements | No | L | B | H | = | Qty | delete
+    // Seq | drag | Description | No | L | B | H | = | Qty | delete
     rowGrid:
-      "36px 28px minmax(0,1.2fr) minmax(0,1.3fr) 52px 52px 52px 52px 22px 90px 30px",
+      "36px 28px minmax(180px,1.6fr) minmax(120px,1fr) minmax(120px,1fr) minmax(120px,1fr) minmax(120px,1fr) 22px 90px 30px",
     row: {
       display: "grid",
       gap: 6,
@@ -548,9 +950,10 @@ function MeasurementPanel({
             marginBottom: 10,
           }}
         >
-          Drag ⠿ to change sequence. Sequence starts at 1 for this item.
-          Empty No./L/B/H are treated as 1 when calculating quantity.
-          Rows with only Description are not saved.
+          Paste from Excel: Description | No | L | B | H. Supports{" "}
+          <code>2*(2+4)</code>, <code>ROUND(…,2)</code>, ABS, INT. Hover a
+          cell to see the full formula if it looks cut off. Quantity = No × L ×
+          B × H.
           {reordering ? " Updating sequence…" : ""}
         </div>
 
@@ -570,20 +973,23 @@ function MeasurementPanel({
           </div>
         )}
 
-        <div style={{ overflowX: "auto", minWidth: 0 }}>
+        <div
+          style={{ overflowX: "auto", minWidth: 0 }}
+          onPasteCapture={onPanelPaste}
+          title="Click here and paste Excel rows (Ctrl+V)"
+        >
         <div
           style={{
             display: "grid",
             gridTemplateColumns: s.rowGrid,
             gap: 6,
             padding: "0 10px 4px",
-            minWidth: 820,
+            minWidth: 780,
           }}
         >
           <span style={{ ...s.colHdr, textAlign: "center" }}>Seq</span>
           <span />
           <span style={s.colHdr}>Description</span>
-          <span style={s.colHdr}>Measurements</span>
           <span style={{ ...s.colHdr, textAlign: "right" }}>No.</span>
           <span style={{ ...s.colHdr, textAlign: "right" }}>L</span>
           <span style={{ ...s.colHdr, textAlign: "right" }}>B</span>
@@ -593,9 +999,12 @@ function MeasurementPanel({
           <span />
         </div>
 
-        {rows.map((r) => {
+        {rows.map((r, idx) => {
           const isSaved = r.id !== null;
-          const displaySeq = isSaved ? r.sequence ?? "" : "";
+          const contentIndex = rows
+            .slice(0, idx + 1)
+            .filter(rowHasContent).length;
+          const displaySeq = rowHasContent(r) ? contentIndex : "";
           return (
             <div
               key={r.localId}
@@ -614,7 +1023,7 @@ function MeasurementPanel({
               style={{
                 ...s.row,
                 gridTemplateColumns: s.rowGrid,
-                minWidth: 820,
+                minWidth: 780,
                 ...(dragLocalId === r.localId ? s.rowDragging : null),
               }}
             >
@@ -650,22 +1059,10 @@ function MeasurementPanel({
               />
               <input
                 type="text"
-                placeholder="Can Enter Expression Here"
-                value={r.meas}
-                title="Measurements expression — multiplied with No./L/B/H"
-                style={{
-                  ...s.inputBase,
-                  fontFamily: "monospace",
-                  borderColor: r.measErr ? "#cc2222" : "#c5d5ee",
-                }}
-                onChange={(e) => updateField(r.localId, "meas", e.target.value)}
-              />
-              <input
-                type="text"
                 inputMode="decimal"
                 placeholder=""
                 value={r.num}
-                title="Number (empty = 1)"
+                title={r.num || "Number — figure or formula e.g. ROUND(12.5,2)"}
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "num", e.target.value)}
               />
@@ -674,7 +1071,7 @@ function MeasurementPanel({
                 inputMode="decimal"
                 placeholder=""
                 value={r.len}
-                title="Length (empty = 1)"
+                title={r.len || "Length — figure or formula"}
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "len", e.target.value)}
               />
@@ -683,7 +1080,7 @@ function MeasurementPanel({
                 inputMode="decimal"
                 placeholder=""
                 value={r.brd}
-                title="Breadth (empty = 1)"
+                title={r.brd || "Breadth — figure or formula"}
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "brd", e.target.value)}
               />
@@ -692,7 +1089,7 @@ function MeasurementPanel({
                 inputMode="decimal"
                 placeholder=""
                 value={r.hgt}
-                title="Height (empty = 1)"
+                title={r.hgt || "Height — figure or formula"}
                 style={s.smallInput}
                 onChange={(e) => updateField(r.localId, "hgt", e.target.value)}
               />

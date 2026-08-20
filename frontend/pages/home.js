@@ -20,7 +20,7 @@ import UserProfileModal from "../components/UserProfileModal";
 const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
-//const API_BASE = "http://localhost:4000";
+// const API_BASE = "http://localhost:4000";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — drafting-paper / blueprint palette, tuned to an
@@ -8193,11 +8193,8 @@ export default function HomePage() {
                           <span>📐</span>
                           <span>
                             Check a row to open its measurement panel. Enter
-                            expressions like{" "}
-                            <code style={{ fontFamily: theme.font.mono }}>
-                              3.5+2.1+1.8
-                            </code>{" "}
-                            — quantity is computed automatically.
+                            values or paste from Excel (Description | No | L |
+                            B | H). Quantity is the product of No × L × B × H.
                           </span>
                         </div>
                         <div

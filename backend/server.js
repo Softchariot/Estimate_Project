@@ -2696,6 +2696,14 @@ app.post("/api/insert-work-measurements", async (req, res) => {
     height,
   } = req.body;
 
+  const normalizeDimText = (value) => {
+    if (value === null || value === undefined) return null;
+    let s = String(value).trim();
+    if (!s) return null;
+    if (s.startsWith("=")) s = s.slice(1).trim();
+    return s || null;
+  };
+
   console.log("Work Abstract Id: ", workAbstractId);
   console.log("Description: ", description);
   console.log("Expression: ", expression);
@@ -2724,18 +2732,17 @@ app.post("/api/insert-work-measurements", async (req, res) => {
 
       const result = await client.query(
         `INSERT INTO "WorkMeasurement"
-          ("WorkAbstractId", "Description", "Expression", "Quantity", "Number", "Length", "Breadth", "Height", "Sequence") 
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) 
+          ("WorkAbstractId", "Description", "Quantity", "Number", "Length", "Breadth", "Height", "Sequence") 
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) 
          RETURNING "MeasurementId", "Sequence";`,
         [
           workAbstractId,
           description ?? "",
-          expression,
           quantity,
-          number,
-          length,
-          breadth,
-          height,
+          normalizeDimText(number),
+          normalizeDimText(length),
+          normalizeDimText(breadth),
+          normalizeDimText(height),
           sequence,
         ],
       );
@@ -2781,7 +2788,7 @@ app.get("/api/measurements", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT "MeasurementId", "Description", "Expression", "Number", "Length", "Breadth", "Height", "Quantity", "Sequence"
+      `SELECT "MeasurementId", "Description", "Number", "Length", "Breadth", "Height", "Quantity", "Sequence"
        FROM "WorkMeasurement"
        WHERE "WorkAbstractId" = $1
        ORDER BY "Sequence" ASC, "MeasurementId" ASC`,
@@ -2800,13 +2807,29 @@ app.put("/api/update-work-measurements/:id", async (req, res) => {
   const { description, expression, number, length, breadth, height, quantity } =
     req.body;
 
+  const normalizeDimText = (value) => {
+    if (value === null || value === undefined) return null;
+    let s = String(value).trim();
+    if (!s) return null;
+    if (s.startsWith("=")) s = s.slice(1).trim();
+    return s || null;
+  };
+
   try {
     const result = await pool.query(
       `UPDATE "WorkMeasurement" 
-       SET "Description"=$1, "Expression"=$2, "Number"=$3, "Length"=$4, "Breadth"=$5, "Height"=$6, "Quantity"=$7 
-       WHERE "MeasurementId"=$8
+       SET "Description"=$1, "Number"=$2, "Length"=$3, "Breadth"=$4, "Height"=$5, "Quantity"=$6 
+       WHERE "MeasurementId"=$7
        RETURNING "MeasurementId";`,
-      [description, expression, number, length, breadth, height, quantity, id],
+      [
+        description,
+        normalizeDimText(number),
+        normalizeDimText(length),
+        normalizeDimText(breadth),
+        normalizeDimText(height),
+        quantity,
+        id,
+      ],
     );
     if (!result.rows[0]) {
       return res.status(404).send({ message: "Measurement not found." });
@@ -5173,7 +5196,6 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           wm."MeasurementId",
           wm."Sequence",
           wm."Description"    AS "MeasurementDescription",
-          wm."Expression",
           wm."Number",
           wm."Length",
           wm."Breadth",
@@ -5201,24 +5223,16 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         .json({ message: "No items found for this selection." });
     }
 
-    // ── Format a single measurement line's "expression" ──
-    // Prefer the stored Expression text verbatim (it's typically hand-entered,
-    // e.g. "1*69*3.00*0.30"). Fall back to composing one from the numeric
-    // columns only if Expression itself is missing.
+    // Join Number/Length/Breadth/Height text for the measurement line
     const formatExpression = (row) => {
-      if (row.Expression && row.Expression.trim() !== "") {
-        return row.Expression.trim();
-      }
-      const parts = [row.Number, row.Length, row.Breadth, row.Height].filter(
-        (v) => v !== null && v !== undefined && Number(v) !== 0,
-      );
-      if (parts.length === 0) return "";
-      return parts
+      const parts = [row.Number, row.Length, row.Breadth, row.Height]
         .map((v) => {
-          const n = Number(v);
-          return Number.isInteger(n) ? String(n) : n.toFixed(2);
+          if (v === null || v === undefined) return "";
+          return String(v).trim().replace(/^=/, "");
         })
-        .join("*");
+        .filter((v) => v !== "" && v !== "0");
+      if (parts.length === 0) return "";
+      return parts.join("*");
     };
 
     // ── Group rows into SubWork -> Item -> Measurement[] ──
