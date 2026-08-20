@@ -405,6 +405,124 @@ app.get("/api/ssr-regions", async (_req, res) => {
   }
 });
 
+/**
+ * Estimation "Select Region" list:
+ * - Normal regions: all except SSRRegionId 3 and 4
+ * - Region 3: only if MasterItem has RegionId=3 created by a user in session OrganizationId
+ * - Region 4: only if MasterItem has RegionId=4 created by session UserId
+ */
+app.get("/api/estimation-regions", async (req, res) => {
+  const userId = Number(req.query.userId);
+  if (!userId) {
+    return res.status(400).json({ message: "userId is required." });
+  }
+
+  const REGION_ORG_NON_SSR = 3;
+  const REGION_USER_NON_SSR = 4;
+
+  try {
+    await ensureMasterItemUserId();
+
+    const userResult = await pool.query(
+      `SELECT u."UserId", u."OrganizationId"
+       FROM "MasterUser" u
+       WHERE u."UserId" = $1
+         AND COALESCE(u."MarkForDeletion", false) = false`,
+      [userId],
+    );
+    const actor = userResult.rows[0];
+    if (!actor) {
+      return res.status(403).json({ message: "User not found or inactive." });
+    }
+
+    const orgId = Number(actor.OrganizationId) || null;
+    const includeRegionIds = [];
+
+    // Always list normal regions (everything except 3 and 4)
+    const normal = await pool.query(
+      `SELECT "SSRRegionId", "SSRRegionName", "SSRRegionShortName", "DOrder", "DOrder1", "Remarks"
+       FROM "MasterSSRRegion"
+       WHERE "SSRRegionId" NOT IN ($1, $2)
+       ORDER BY "DOrder" ASC NULLS LAST, "SSRRegionName" ASC`,
+      [REGION_ORG_NON_SSR, REGION_USER_NON_SSR],
+    );
+
+    // Conditional Region 3 — org-scoped NON SSR items
+    if (orgId) {
+      const region3 = await pool.query(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM "MasterItem" i
+           INNER JOIN "MasterUser" creator ON creator."UserId" = i."UserId"
+           WHERE i."RegionId" = $1
+             AND creator."OrganizationId" = $2
+         ) AS "HasItems"`,
+        [REGION_ORG_NON_SSR, orgId],
+      );
+      if (region3.rows[0]?.HasItems === true) {
+        includeRegionIds.push(REGION_ORG_NON_SSR);
+      }
+    }
+
+    // Conditional Region 4 — user-scoped NON SSR items
+    const region4 = await pool.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM "MasterItem" i
+         WHERE i."RegionId" = $1
+           AND i."UserId" = $2
+       ) AS "HasItems"`,
+      [REGION_USER_NON_SSR, userId],
+    );
+    if (region4.rows[0]?.HasItems === true) {
+      includeRegionIds.push(REGION_USER_NON_SSR);
+    }
+
+    let conditional = [];
+    if (includeRegionIds.length) {
+      const condResult = await pool.query(
+        `SELECT "SSRRegionId", "SSRRegionName", "SSRRegionShortName", "DOrder", "DOrder1", "Remarks"
+         FROM "MasterSSRRegion"
+         WHERE "SSRRegionId" = ANY($1::int[])
+         ORDER BY "DOrder" ASC NULLS LAST, "SSRRegionName" ASC`,
+        [includeRegionIds],
+      );
+      conditional = condResult.rows;
+    }
+
+    const byId = new Map();
+    for (const row of [...normal.rows, ...conditional]) {
+      byId.set(Number(row.SSRRegionId), row);
+    }
+    const merged = Array.from(byId.values()).sort((a, b) => {
+      const ao =
+        a.DOrder === null || a.DOrder === undefined
+          ? Number.POSITIVE_INFINITY
+          : Number(a.DOrder);
+      const bo =
+        b.DOrder === null || b.DOrder === undefined
+          ? Number.POSITIVE_INFINITY
+          : Number(b.DOrder);
+      if (ao !== bo) return ao - bo;
+      return String(a.SSRRegionName || "").localeCompare(
+        String(b.SSRRegionName || ""),
+      );
+    });
+
+    return res.json({
+      data: merged,
+      meta: {
+        userId,
+        organizationId: orgId,
+        includedConditionalRegionIds: includeRegionIds,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.post("/api/ssr-regions", async (req, res) => {
   const { SSRRegionName, SSRRegionShortName, DOrder, DOrder1, Remarks } =
     req.body;
@@ -3307,6 +3425,40 @@ async function requireItemMasterAccess(userId) {
   };
 }
 
+/** OrgAdmin may only access NON SSR items created by users in their organization. */
+async function assertOrgAdminItemOwnership(auth, itemUserId) {
+  if (!auth.isOrgAdmin) return null;
+  const orgId = Number(auth.actor.OrganizationId);
+  if (!orgId) {
+    return {
+      status: 403,
+      message: "Organization is required for Organization Admin Item Master access.",
+    };
+  }
+  if (itemUserId === null || itemUserId === undefined || itemUserId === "") {
+    return {
+      status: 403,
+      message:
+        "You can only view or edit NON SSR items entered by your organization.",
+    };
+  }
+  const owner = await pool.query(
+    `SELECT "OrganizationId" FROM "MasterUser" WHERE "UserId" = $1`,
+    [Number(itemUserId)],
+  );
+  if (
+    !owner.rows[0] ||
+    Number(owner.rows[0].OrganizationId) !== orgId
+  ) {
+    return {
+      status: 403,
+      message:
+        "You can only view or edit NON SSR items entered by your organization.",
+    };
+  }
+  return null;
+}
+
 const MASTER_ITEM_SELECT = `
   SELECT i."ItemId", i."UserId", i."RegionId", i."CategoryId", i."SubCategoryId",
          i."SSRYearId", i."UnitId", i."ItemNumber", i."ItemDescription",
@@ -3319,7 +3471,8 @@ const MASTER_ITEM_SELECT = `
          sc."SSRSubCategoryShortName", sc."SSRSubCategoryName",
          y."Year" AS "SSRYear",
          u."UnitShortName", u."UnitName",
-         mu."UserName", mu."UserLoginName"
+         mu."UserName", mu."UserLoginName",
+         mu."OrganizationId" AS "CreatorOrganizationId"
   FROM "MasterItem" i
   LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
   LEFT JOIN "MasterSSRCategory" c ON c."SSRCategoryId" = i."CategoryId"
@@ -3361,15 +3514,9 @@ app.get("/api/master-items", async (req, res) => {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
 
-  if (
-    !regionIdFilter ||
-    !ssrYearIdFilter ||
-    !categoryIdFilter ||
-    !subCategoryIdFilter
-  ) {
+  if (!regionIdFilter || !ssrYearIdFilter) {
     return res.status(400).json({
-      message:
-        "SSR Region, SSR Year, SSR Category and SSR Sub Category are all required to list items.",
+      message: "SSR Region and SSR Year are required to list items.",
     });
   }
   if (
@@ -3383,18 +3530,38 @@ app.get("/api/master-items", async (req, res) => {
 
   try {
     await ensureMasterItemUserId();
-    const params = [
-      regionIdFilter,
-      ssrYearIdFilter,
-      categoryIdFilter,
-      subCategoryIdFilter,
-    ];
+    const params = [regionIdFilter, ssrYearIdFilter];
+    let filterSql = ` WHERE i."RegionId" = $1
+          AND i."SSRYearId" = $2`;
+    if (categoryIdFilter) {
+      params.push(categoryIdFilter);
+      filterSql += ` AND i."CategoryId" = $${params.length}`;
+    }
+    if (subCategoryIdFilter) {
+      params.push(subCategoryIdFilter);
+      filterSql += ` AND i."SubCategoryId" = $${params.length}`;
+    }
+    if (auth.isOrgAdmin) {
+      const orgId = Number(auth.actor.OrganizationId);
+      if (!orgId) {
+        return res.status(403).json({
+          message:
+            "Organization is required for Organization Admin Item Master access.",
+        });
+      }
+      params.push(orgId);
+      filterSql += `
+          AND EXISTS (
+            SELECT 1
+            FROM "MasterUser" creator
+            WHERE creator."UserId" = i."UserId"
+              AND creator."OrganizationId" = $${params.length}
+          )`;
+    }
     const sql =
       MASTER_ITEM_SELECT +
-      ` WHERE i."RegionId" = $1
-          AND i."SSRYearId" = $2
-          AND i."CategoryId" = $3
-          AND i."SubCategoryId" = $4
+      filterSql +
+      `
         ORDER BY i."ItemNumber" ASC NULLS LAST, i."ItemId" ASC
         LIMIT 500`;
     const result = await pool.query(sql, params);
@@ -3405,6 +3572,7 @@ app.get("/api/master-items", async (req, res) => {
         isOrgAdmin: auth.isOrgAdmin,
         isIndvUser: auth.isIndvUser,
         allowedRegionId: auth.allowedRegionId,
+        organizationId: auth.actor.OrganizationId || null,
       },
     });
   } catch (error) {
@@ -3431,11 +3599,20 @@ app.get("/api/master-items/:id", async (req, res) => {
     let sql = `${MASTER_ITEM_SELECT} WHERE i."ItemId" = $1`;
     if (auth.allowedRegionId) {
       params.push(auth.allowedRegionId);
-      sql += ` AND i."RegionId" = $2`;
+      sql += ` AND i."RegionId" = $${params.length}`;
     }
     const result = await pool.query(sql, params);
     if (!result.rows[0]) {
       return res.status(404).json({ message: "Item not found." });
+    }
+    const ownershipError = await assertOrgAdminItemOwnership(
+      auth,
+      result.rows[0].UserId,
+    );
+    if (ownershipError) {
+      return res
+        .status(ownershipError.status)
+        .json({ message: ownershipError.message });
     }
     return res.json(result.rows[0]);
   } catch (error) {
@@ -3559,6 +3736,15 @@ app.put("/api/master-items/:id", async (req, res) => {
       return res.status(403).json({
         message: "You can only update NON SSR items for your allowed region.",
       });
+    }
+    const ownershipError = await assertOrgAdminItemOwnership(
+      auth,
+      existing.rows[0].UserId,
+    );
+    if (ownershipError) {
+      return res
+        .status(ownershipError.status)
+        .json({ message: ownershipError.message });
     }
 
     const regionId = Number(body.RegionId || body.regionId);

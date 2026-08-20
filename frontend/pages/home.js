@@ -528,6 +528,7 @@ export default function HomePage() {
   const [regionForm, setRegionForm] = useState(initialRegionForm);
   const [categoryForm, setCategoryForm] = useState(initialCategoryForm);
   const [regions, setRegions] = useState([]);
+  const [estimationRegions, setEstimationRegions] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loadingRegions, setLoadingRegions] = useState(false);
   const [loadingCategories, setLoadingCategories] = useState(false);
@@ -738,6 +739,50 @@ export default function HomePage() {
       setMessage(`Region load failed: ${error.message}`);
     } finally {
       setLoadingRegions(false);
+    }
+  };
+
+  /** Estimation Select Region — normal regions + conditional 3/4 by session org/user. */
+  const loadEstimationRegions = async (user = currentUser) => {
+    const sessionUser =
+      user ||
+      (() => {
+        try {
+          return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+        } catch (_) {
+          return null;
+        }
+      })();
+    if (!sessionUser?.UserId) {
+      setEstimationRegions([]);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/estimation-regions?userId=${encodeURIComponent(sessionUser.UserId)}`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to load estimation regions.");
+      }
+      const list = Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data)
+          ? data
+          : [];
+      setEstimationRegions(sortByDOrderAsc(list));
+      // Clear selection if current region is no longer available
+      setItemRegion((prev) => {
+        if (!prev) return prev;
+        const stillThere = list.some(
+          (r) => Number(r.SSRRegionId) === Number(prev),
+        );
+        return stillThere ? prev : "";
+      });
+    } catch (error) {
+      console.error(error);
+      setEstimationRegions([]);
+      setMessage(`Estimation region load failed: ${error.message}`);
     }
   };
 
@@ -3311,6 +3356,7 @@ export default function HomePage() {
         loadProjectFormOrgUsers(user.OrganizationId);
       }
       loadWorksMaster();
+      loadEstimationRegions(user);
       if (!isSuperAdminUser(user)) {
         // Non-SuperAdmin Work Master list matches general works (non-deleted).
         loadWorkMasterList("", "");
@@ -3336,6 +3382,12 @@ export default function HomePage() {
       router.replace("/");
     }
   }, [router]);
+
+  useEffect(() => {
+    if (activeMaster === "items" && currentUser?.UserId) {
+      loadEstimationRegions(currentUser);
+    }
+  }, [activeMaster, currentUser?.UserId]);
 
   const onLogout = () => {
     sessionStorage.removeItem(SESSION_KEY);
@@ -3616,20 +3668,21 @@ export default function HomePage() {
     const ssrYearId = filters.ssrYearId;
     const categoryId = filters.categoryId;
     const subCategoryId = filters.subCategoryId;
-    if (!regionId || !ssrYearId || !categoryId || !subCategoryId) {
+    if (!regionId || !ssrYearId) {
       setItemMasterList([]);
       return;
     }
     setLoadingItemMaster(true);
     try {
+      const params = {
+        userId: user.UserId,
+        regionId,
+        ssrYearId,
+      };
+      if (categoryId) params.categoryId = categoryId;
+      if (subCategoryId) params.subCategoryId = subCategoryId;
       const res = await axios.get(`${API_BASE}/api/master-items`, {
-        params: {
-          userId: user.UserId,
-          regionId,
-          ssrYearId,
-          categoryId,
-          subCategoryId,
-        },
+        params,
       });
       setItemMasterList(Array.isArray(res.data?.data) ? res.data.data : []);
     } catch (err) {
@@ -3735,6 +3788,15 @@ export default function HomePage() {
         return;
       }
     }
+    if (
+      isOrgAdminUser(currentUser) &&
+      Number(row.CreatorOrganizationId) !== Number(currentUser.OrganizationId)
+    ) {
+      alert(
+        "You can only edit NON SSR items entered by your organization.",
+      );
+      return;
+    }
     setEditingItemMasterId(row.ItemId);
     setItemMasterForm({
       ItemId: String(row.ItemId),
@@ -3801,12 +3863,7 @@ export default function HomePage() {
         isEdit ? "Item updated successfully." : "Item saved successfully.",
       );
       resetItemMasterEdit();
-      if (
-        itemMasterFilterRegionId &&
-        itemMasterFilterYearId &&
-        itemMasterFilterCategoryId &&
-        itemMasterFilterSubCategoryId
-      ) {
+      if (itemMasterFilterRegionId && itemMasterFilterYearId) {
         await loadItemMasterList(currentUser, {
           regionId: itemMasterFilterRegionId,
           ssrYearId: itemMasterFilterYearId,
@@ -4000,7 +4057,7 @@ export default function HomePage() {
         (r) => Number(r.SSRRegionId) === Number(itemMasterAllowedRegionId),
       );
   const itemMasterRoleBanner = isOrgAdmin
-    ? "Organization Admins can only add data for NON SSR items"
+    ? "Organization Admins can only add, list, and edit NON SSR items entered by their organization"
     : isIndvUser
       ? "Individual Users can only add data for NON SSR items"
       : "";
@@ -5906,7 +5963,7 @@ export default function HomePage() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
                     gap: 14,
                   }}
                 >
@@ -5958,9 +6015,6 @@ export default function HomePage() {
                       {itemMasterRegionOptions.map((r) => (
                         <option key={r.SSRRegionId} value={r.SSRRegionId}>
                           {r.SSRRegionShortName || r.SSRRegionName}
-                          {r.SSRRegionShortName && r.SSRRegionName
-                            ? ` — ${r.SSRRegionName}`
-                            : ""}
                         </option>
                       ))}
                     </select>
@@ -5980,6 +6034,33 @@ export default function HomePage() {
                       ))}
                     </select>
                   </Field>
+                  <Field label="Item Number" required>
+                    <input
+                      name="ItemNumber"
+                      value={itemMasterForm.ItemNumber}
+                      onChange={onItemMasterChange}
+                      required
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Page Number">
+                    <input
+                      name="PageNumber"
+                      value={itemMasterForm.PageNumber}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "2fr 3fr",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
                   <Field label="Category">
                     <select
                       name="CategoryId"
@@ -6026,39 +6107,16 @@ export default function HomePage() {
                       ))}
                     </select>
                   </Field>
-                  <Field label="Unit">
-                    <select
-                      name="UnitId"
-                      value={itemMasterForm.UnitId}
-                      onChange={onItemMasterChange}
-                      style={inputStyle}
-                    >
-                      <option value="">Select Unit</option>
-                      {[...unitList]
-                        .sort((a, b) =>
-                          String(a.UnitShortName || a.UnitName || "").localeCompare(
-                            String(b.UnitShortName || b.UnitName || ""),
-                          ),
-                        )
-                        .map((u) => (
-                          <option key={u.UnitId} value={u.UnitId}>
-                            {u.UnitShortName || u.UnitName}
-                            {u.UnitShortName && u.UnitName
-                              ? ` — ${u.UnitName}`
-                              : ""}
-                          </option>
-                        ))}
-                    </select>
-                  </Field>
-                  <Field label="Item Number" required>
-                    <input
-                      name="ItemNumber"
-                      value={itemMasterForm.ItemNumber}
-                      onChange={onItemMasterChange}
-                      required
-                      style={inputStyle}
-                    />
-                  </Field>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
                   <Field label="Item Description" required span>
                     <textarea
                       name="ItemDescription"
@@ -6083,6 +6141,29 @@ export default function HomePage() {
                       style={inputStyle}
                     />
                   </Field>
+                  <Field label="Unit">
+                    <select
+                      name="UnitId"
+                      value={itemMasterForm.UnitId}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Unit</option>
+                      {[...unitList]
+                        .sort((a, b) =>
+                          String(
+                            a.UnitShortName || a.UnitName || "",
+                          ).localeCompare(
+                            String(b.UnitShortName || b.UnitName || ""),
+                          ),
+                        )
+                        .map((u) => (
+                          <option key={u.UnitId} value={u.UnitId}>
+                            {u.UnitShortName || u.UnitName}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
                   <Field label="Completed Rate">
                     <input
                       name="CompletedRate"
@@ -6099,14 +6180,6 @@ export default function HomePage() {
                       type="number"
                       step="any"
                       value={itemMasterForm.LabourRate}
-                      onChange={onItemMasterChange}
-                      style={inputStyle}
-                    />
-                  </Field>
-                  <Field label="Page Number">
-                    <input
-                      name="PageNumber"
-                      value={itemMasterForm.PageNumber}
                       onChange={onItemMasterChange}
                       style={inputStyle}
                     />
@@ -6182,12 +6255,7 @@ export default function HomePage() {
                     onChange={(e) => {
                       const value = e.target.value;
                       setItemMasterFilterYearId(value);
-                      if (
-                        itemMasterFilterRegionId &&
-                        value &&
-                        itemMasterFilterCategoryId &&
-                        itemMasterFilterSubCategoryId
-                      ) {
+                      if (itemMasterFilterRegionId && value) {
                         loadItemMasterList(currentUser, {
                           regionId: itemMasterFilterRegionId,
                           ssrYearId: value,
@@ -6220,13 +6288,13 @@ export default function HomePage() {
                       const value = e.target.value;
                       setItemMasterFilterCategoryId(value);
                       setItemMasterFilterSubCategoryId("");
-                      setItemMasterList([]);
+                      setItemMasterListSubCategories([]);
                       loadItemMasterListSubCategories(value);
                     }}
                     disabled={!itemMasterFilterRegionId}
                     style={inputStyle}
                   >
-                    <option value="">Select SSR Category</option>
+                    <option value="">All SSR Categories</option>
                     {itemMasterListCategories.map((c) => (
                       <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
                         {c.SSRCategoryShortName || c.SSRCategoryName}
@@ -6238,28 +6306,16 @@ export default function HomePage() {
                   <select
                     value={itemMasterFilterSubCategoryId}
                     onChange={(e) => {
-                      const value = e.target.value;
-                      setItemMasterFilterSubCategoryId(value);
-                      if (
-                        itemMasterFilterRegionId &&
-                        itemMasterFilterYearId &&
-                        itemMasterFilterCategoryId &&
-                        value
-                      ) {
-                        loadItemMasterList(currentUser, {
-                          regionId: itemMasterFilterRegionId,
-                          ssrYearId: itemMasterFilterYearId,
-                          categoryId: itemMasterFilterCategoryId,
-                          subCategoryId: value,
-                        });
-                      } else {
-                        setItemMasterList([]);
-                      }
+                      setItemMasterFilterSubCategoryId(e.target.value);
                     }}
                     disabled={!itemMasterFilterCategoryId}
                     style={inputStyle}
                   >
-                    <option value="">Select SSR Sub Category</option>
+                    <option value="">
+                      {itemMasterFilterCategoryId
+                        ? "All SSR Sub Categories"
+                        : "Select SSR Category first"}
+                    </option>
                     {itemMasterListSubCategories.map((sc) => (
                       <option
                         key={sc.SSRSubCategoryId}
@@ -6273,10 +6329,7 @@ export default function HomePage() {
                 <SecondaryButton
                   type="button"
                   disabled={
-                    !itemMasterFilterRegionId ||
-                    !itemMasterFilterYearId ||
-                    !itemMasterFilterCategoryId ||
-                    !itemMasterFilterSubCategoryId
+                    !itemMasterFilterRegionId || !itemMasterFilterYearId
                   }
                   onClick={() =>
                     loadItemMasterList(currentUser, {
@@ -6298,8 +6351,8 @@ export default function HomePage() {
                   marginBottom: 8,
                 }}
               >
-                Select SSR Region, SSR Year, SSR Category and SSR Sub Category
-                to load the item list.
+                Select SSR Region and SSR Year, then click Refresh list.
+                Category and Sub Category are optional filters.
               </div>
 
               <div
@@ -6330,12 +6383,10 @@ export default function HomePage() {
                     {loadingItemMaster ? (
                       <EmptyRow colSpan={10}>Loading…</EmptyRow>
                     ) : !itemMasterFilterRegionId ||
-                      !itemMasterFilterYearId ||
-                      !itemMasterFilterCategoryId ||
-                      !itemMasterFilterSubCategoryId ? (
+                      !itemMasterFilterYearId ? (
                       <EmptyRow colSpan={10}>
-                        Select SSR Region, SSR Year, SSR Category and SSR Sub
-                        Category above to view items.
+                        Select SSR Region and SSR Year above, then click Refresh
+                        list.
                       </EmptyRow>
                     ) : itemMasterList.length ? (
                       itemMasterList.map((row) => {
@@ -7199,7 +7250,7 @@ export default function HomePage() {
                             ? "Select SSR Region"
                             : "Please Select Work and Sub Work"}
                         </option>
-                        {regions.map((r) => (
+                        {estimationRegions.map((r) => (
                           <option key={r.SSRRegionId} value={r.SSRRegionId}>
                             {r.SSRRegionShortName || r.SSRRegionName}
                           </option>
