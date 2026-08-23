@@ -133,7 +133,7 @@ function uid() {
 
 /**
  * Factor for Quantity product.
- * Empty → 1; plain number or math expression (without leading =) is evaluated.
+ * Empty → 1 (when at least one dimension is present); plain number or math expression is evaluated.
  */
 function parseDimFactor(value) {
   const s = normalizeFormulaText(value);
@@ -147,7 +147,17 @@ function parseDimFactor(value) {
   return calcExpr(s);
 }
 
+function rowDimsAllEmpty(row) {
+  return !["num", "len", "brd", "hgt"].some((k) =>
+    Boolean(normalizeFormulaText(row[k])),
+  );
+}
+
 function computeQty(row) {
+  // Description-only (or blank dims): Quantity is null, not 1×1×1×1
+  if (rowDimsAllEmpty(row)) {
+    return { val: null, err: false };
+  }
   const factors = [
     parseDimFactor(row.num),
     parseDimFactor(row.len),
@@ -194,6 +204,11 @@ function isExprCell(value) {
   return /[+\-*/()]/.test(t) || raw.startsWith("=");
 }
 
+/** Excel A1-style cell reference (G4863, $A$1, …). */
+function looksLikeExcelCellRef(value) {
+  return /^\$?[A-Za-z]{1,3}\$?\d+$/.test(normalizeFormulaText(value));
+}
+
 function parseNumericCell(value) {
   return parseFloat(normalizeFormulaText(value).replace(/,/g, ""));
 }
@@ -221,40 +236,496 @@ function looksLikeHeaderRow(cells) {
   return false;
 }
 
-/**
- * Prefer Excel formula attribute when present (x:fmla / formula), else cell text.
- * Leading "=" is stripped so "=2*(2+4)" → "2*(2+4)".
- */
-function getExcelHtmlCellValue(td, isDescription) {
-  if (!td) return "";
-  for (const attr of Array.from(td.attributes || [])) {
-    if (/fmla|formula/i.test(attr.name) && attr.value) {
-      return isDescription
-        ? String(attr.value).trim()
-        : normalizeFormulaText(attr.value);
-    }
-  }
-  const text = String(td.innerText || td.textContent || "").trim();
-  return isDescription ? text : normalizeFormulaText(text);
+function decodeBasicHtmlEntities(s) {
+  return String(s ?? "")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#0*34;/g, '"')
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
 }
 
-/** Parse Excel HTML clipboard into arrays of cell strings (formulas preferred). */
-function extractExcelHtmlTableRows(html) {
-  if (!html || typeof DOMParser === "undefined") return [];
+/**
+ * Browsers often strip Excel's x:fmla / x:num from the DOM, but they remain in
+ * the raw clipboard HTML. Pull formula + cached numeric value per <td>/<th>.
+ */
+function extractTdMetaFromOpenTags(html) {
+  const metas = [];
+  const openTagRe = /<(td|th)\b([^>]*)>/gi;
+  let m;
+  while ((m = openTagRe.exec(html))) {
+    const attrs = m[2] || "";
+    let formula = "";
+    let cachedNum = "";
+    const formulaPatterns = [
+      /\b(?:[\w.-]+:)?fmla\s*=\s*"([^"]*)"/i,
+      /\b(?:[\w.-]+:)?fmla\s*=\s*'([^']*)'/i,
+      /\b(?:[\w.-]+:)?Formula\s*=\s*"([^"]*)"/i,
+      /\b(?:[\w.-]+:)?Formula\s*=\s*'([^']*)'/i,
+    ];
+    for (const re of formulaPatterns) {
+      const fm = attrs.match(re);
+      if (fm) {
+        formula = decodeBasicHtmlEntities(fm[1]).trim();
+        break;
+      }
+    }
+    const numMatch =
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*"([^"]*)"/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*'([^']*)'/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*([^>\s]+)/i) ||
+      attrs.match(/\bsdval\s*=\s*"([^"]*)"/i) ||
+      attrs.match(/\bsdval\s*=\s*'([^']*)'/i);
+    if (numMatch) {
+      cachedNum = decodeBasicHtmlEntities(numMatch[1]).trim();
+    }
+    metas.push({ formula, cachedNum });
+  }
+  return metas;
+}
+
+/** @deprecated use extractTdMetaFromOpenTags */
+function extractFormulaAttrsFromTdOpenTags(html) {
+  return extractTdMetaFromOpenTags(html).map((m) => m.formula);
+}
+
+/** Formulas from SpreadsheetML / Xml Spreadsheet clipboard (ss:Formula). */
+function extractFormulasFromSpreadsheetXml(xml) {
+  if (!xml) return [];
+  const formulas = [];
+  const re = /<Cell\b([^>]*)>/gi;
+  let m;
+  while ((m = re.exec(xml))) {
+    const attrs = m[1] || "";
+    const fm =
+      attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*"([^"]*)"/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*'([^']*)'/i);
+    formulas.push(fm ? decodeBasicHtmlEntities(fm[1]).trim() : "");
+  }
+  return formulas;
+}
+
+function readAttrByName(el, nameRe) {
+  if (!el) return "";
+  for (const attr of Array.from(el.attributes || [])) {
+    if (nameRe.test(attr.name) && attr.value) return String(attr.value).trim();
+  }
+  return "";
+}
+
+/** Read Excel HTML cell: formula, cached x:num, and visible text. */
+function getExcelHtmlCellPair(td) {
+  if (!td) return { formula: "", display: "", cachedNum: "" };
+  let formula = readAttrByName(td, /fmla|formula/i);
+  let cachedNum =
+    readAttrByName(td, /(?:^|:)num$/i) || readAttrByName(td, /sdval/i);
+
+  if (!formula) {
+    const nested = td.querySelector("[x\\:fmla], [ss\\:Formula], [formula]");
+    if (nested) formula = readAttrByName(nested, /fmla|formula/i);
+  }
+  if (!cachedNum) {
+    const nestedNum = td.querySelector("[x\\:num], [sdval]");
+    if (nestedNum) {
+      cachedNum =
+        readAttrByName(nestedNum, /(?:^|:)num$/i) ||
+        readAttrByName(nestedNum, /sdval/i);
+    }
+  }
+
+  if ((!formula || !cachedNum) && td.outerHTML) {
+    const fromOuter = extractTdMetaFromOpenTags(td.outerHTML)[0];
+    if (fromOuter) {
+      if (!formula && fromOuter.formula) formula = fromOuter.formula;
+      if (!cachedNum && fromOuter.cachedNum) cachedNum = fromOuter.cachedNum;
+    }
+  }
+
+  const text = String(td.innerText || td.textContent || "").trim();
+  // Prefer cached calculated value when Show Formulas is on (text is the formula)
+  const display = cachedNum || text;
+  return { formula, display, cachedNum, text };
+}
+
+/**
+ * Keep formula text only when our evaluator supports it (arithmetic + ROUND/ABS/…).
+ * Otherwise use Excel's cached/evaluated value (x:num) — needed for cell refs
+ * like G4863 when Show Formulas is on.
+ */
+function resolvePasteDimValue(formulaRaw, displayRaw, cachedNumRaw) {
+  const formula = normalizeFormulaText(formulaRaw);
+  const cachedNum = String(cachedNumRaw ?? "").trim();
+  const display = String(displayRaw ?? "").trim();
+  const displayNorm = normalizeFormulaText(display);
+  const cachedNorm = normalizeFormulaText(cachedNum);
+
+  const pickNumeric = (raw) => {
+    const n = normalizeFormulaText(raw);
+    if (!n) return null;
+    if (isNumericCell(n)) return n.replace(/,/g, "");
+    const dr = calcExpr(n);
+    if (!dr.err && dr.val !== null) return n;
+    return null;
+  };
+
+  if (!formula) {
+    return (
+      pickNumeric(cachedNum) ??
+      pickNumeric(display) ??
+      (displayNorm || display || cachedNorm || "")
+    );
+  }
+
+  if (isNumericCell(formula)) return formula.replace(/,/g, "");
+
+  const r = calcExpr(formula);
+  if (!r.err && r.val !== null) return formula;
+
+  // Cell ref / SUM / etc. → Excel cached value (x:num) or display number
+  return (
+    pickNumeric(cachedNum) ??
+    pickNumeric(display) ??
+    formula
+  );
+}
+
+function resolvePasteCell(pair, isDescription) {
+  if (isDescription) {
+    return (
+      String(pair?.text || pair?.display || "").trim() ||
+      normalizeFormulaText(pair?.formula) ||
+      ""
+    );
+  }
+  return resolvePasteDimValue(pair?.formula, pair?.display, pair?.cachedNum);
+}
+
+/**
+ * Parse Excel HTML clipboard into rows of { formula, display, cachedNum } pairs.
+ * Uses raw-string regex for x:fmla / x:num because DOMParser often drops them.
+ */
+function extractExcelHtmlTablePairs(html, spreadsheetXml) {
+  if ((!html && !spreadsheetXml) || typeof DOMParser === "undefined") return [];
   try {
-    const doc = new DOMParser().parseFromString(html, "text/html");
+    const rawMetas = extractTdMetaFromOpenTags(html || "");
+    const xmlFormulas = extractFormulasFromSpreadsheetXml(spreadsheetXml || "");
+    const doc = new DOMParser().parseFromString(
+      html || "<table></table>",
+      "text/html",
+    );
     const trs = Array.from(doc.querySelectorAll("tr"));
     const rows = [];
+    let cellOrdinal = 0;
+    let xmlOrdinal = 0;
     for (const tr of trs) {
       const tds = Array.from(tr.querySelectorAll("td, th"));
       if (!tds.length) continue;
-      const cells = tds.map((td, idx) => getExcelHtmlCellValue(td, idx === 0));
-      if (cells.some((c) => String(c).trim())) rows.push(cells);
+      const cells = tds.map((td) => {
+        const pair = getExcelHtmlCellPair(td);
+        const raw = rawMetas[cellOrdinal] || { formula: "", cachedNum: "" };
+        if (!pair.formula && raw.formula) pair.formula = raw.formula;
+        if (!pair.cachedNum && raw.cachedNum) {
+          pair.cachedNum = raw.cachedNum;
+          // Refresh display preference when Show Formulas shows the formula text
+          if (
+            pair.cachedNum &&
+            (!pair.display ||
+              isExprCell(pair.text || pair.display) ||
+              /^\$?[A-Za-z]{1,3}\$?\d+$/.test(
+                normalizeFormulaText(pair.text || pair.display),
+              ))
+          ) {
+            pair.display = pair.cachedNum;
+          }
+        }
+        if (!pair.formula && xmlFormulas[xmlOrdinal]) {
+          pair.formula = xmlFormulas[xmlOrdinal];
+        }
+        cellOrdinal += 1;
+        if (xmlFormulas.length) xmlOrdinal += 1;
+        return pair;
+      });
+      if (cells.some((c) => c.formula || c.display || c.cachedNum)) {
+        rows.push(cells);
+      }
+    }
+    // SpreadsheetML-only paste (no HTML table)
+    if (!rows.length && xmlFormulas.some(Boolean) && spreadsheetXml) {
+      const dataRe =
+        /<Cell\b([^>]*)>(?:\s*<Data\b[^>]*>([\s\S]*?)<\/Data>)?/gi;
+      const flat = [];
+      let cm;
+      while ((cm = dataRe.exec(spreadsheetXml))) {
+        const attrs = cm[1] || "";
+        const fm =
+          attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*"([^"]*)"/i) ||
+          attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*'([^']*)'/i);
+        const formula = fm ? decodeBasicHtmlEntities(fm[1]).trim() : "";
+        const display = decodeBasicHtmlEntities(
+          String(cm[2] ?? "").replace(/<[^>]+>/g, ""),
+        ).trim();
+        flat.push({ formula, display, cachedNum: display, text: display });
+      }
+      if (flat.length) rows.push(flat);
     }
     return rows;
   } catch {
     return [];
   }
+}
+
+function parsePlainPasteRows(text) {
+  if (!String(text || "").trim()) return [];
+  const raw = String(text)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  const lines = raw.split("\n").filter((line) => String(line).trim() !== "");
+  return lines.map((line) => {
+    let cells = line.split("\t").map((c) => String(c).trim());
+    if (cells.length === 1 && line.includes(",") && !line.includes("\t")) {
+      cells = line.split(",").map((c) => String(c).trim());
+    }
+    return cells;
+  });
+}
+
+/**
+ * All Excel formulas in clipboard HTML/XML (global scan).
+ * Browsers may drop x:fmla from the DOM but leave it in the raw string.
+ */
+function extractAllExcelFormulas(html, xml) {
+  const found = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const t = decodeBasicHtmlEntities(String(raw || "")).trim();
+    if (!t) return;
+    const key = t.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(t);
+  };
+  const re =
+    /(?:[\w.-]+:)?(?:fmla|Formula)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  for (const src of [html || "", xml || ""]) {
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(src))) add(m[1] || m[2] || "");
+  }
+  return found;
+}
+
+/**
+ * Prefer an evaluable formula whose result matches the pasted display value.
+ */
+function matchFormulaToValue(display, formulaPool, usedIndexes) {
+  if (!formulaPool?.length) return null;
+  const displayNorm = normalizeFormulaText(display);
+  if (!displayNorm) return null;
+  let target = null;
+  if (isNumericCell(displayNorm)) target = parseNumericCell(displayNorm);
+  else {
+    const dr = calcExpr(displayNorm);
+    if (!dr.err && dr.val != null) target = dr.val;
+  }
+  if (target == null || !isFinite(target)) return null;
+
+  for (let i = 0; i < formulaPool.length; i += 1) {
+    if (usedIndexes.has(i)) continue;
+    const formula = formulaPool[i];
+    const r = calcExpr(normalizeFormulaText(formula));
+    if (r.err || r.val == null) continue;
+    if (!approxEqual(r.val, target)) continue;
+    usedIndexes.add(i);
+    return normalizeFormulaText(formula);
+  }
+  return null;
+}
+
+/**
+ * Map cell refs / unevaluable formulas → Excel cached values (x:num / Data).
+ * Needed when Show Formulas is on (plain text is G4863, not 8.9).
+ */
+function buildCellRefValueMap(html, xml, pairRows) {
+  const map = new Map();
+  const add = (formulaRaw, numRaw) => {
+    const formula = normalizeFormulaText(formulaRaw);
+    const num = normalizeFormulaText(numRaw).replace(/,/g, "");
+    if (!formula || !num || !isNumericCell(num)) return;
+    map.set(formula.toUpperCase(), num);
+  };
+
+  for (const meta of extractTdMetaFromOpenTags(html || "")) {
+    add(meta.formula, meta.cachedNum);
+  }
+
+  // Same-tag fmla + num in either attribute order (raw scan)
+  const tagRe = /<(td|th)\b([^>]*)>/gi;
+  let tm;
+  while ((tm = tagRe.exec(html || ""))) {
+    const attrs = tm[2] || "";
+    const fm =
+      attrs.match(/\b(?:[\w.-]+:)?fmla\s*=\s*"([^"]*)"/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?fmla\s*=\s*'([^']*)'/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*"([^"]*)"/i);
+    const nm =
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*"([^"]*)"/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*'([^']*)'/i) ||
+      attrs.match(/\b(?:[\w.-]+:)?num\s*=\s*([^>\s]+)/i) ||
+      attrs.match(/\bsdval\s*=\s*"([^"]*)"/i);
+    if (fm && nm) add(fm[1], nm[1]);
+  }
+
+  for (const row of pairRows || []) {
+    for (const cell of row) {
+      add(cell.formula, cell.cachedNum);
+      if (looksLikeExcelCellRef(cell.text) && cell.cachedNum) {
+        add(cell.text, cell.cachedNum);
+      }
+      if (looksLikeExcelCellRef(cell.formula) && isNumericCell(cell.display)) {
+        add(cell.formula, cell.display);
+      }
+    }
+  }
+
+  if (xml) {
+    const dataRe =
+      /<Cell\b([^>]*)>(?:\s*<Data\b[^>]*>([\s\S]*?)<\/Data>)?/gi;
+    let cm;
+    while ((cm = dataRe.exec(xml))) {
+      const attrs = cm[1] || "";
+      const fm =
+        attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*"([^"]*)"/i) ||
+        attrs.match(/\b(?:[\w.-]+:)?Formula\s*=\s*'([^']*)'/i);
+      const dataVal = decodeBasicHtmlEntities(
+        String(cm[2] ?? "").replace(/<[^>]+>/g, ""),
+      ).trim();
+      if (fm) add(fm[1], dataVal);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * Merge plain TSV (values when Show Formulas is off) with HTML pairs / formula pool.
+ * Keeps evaluable formulas; cell refs use Excel x:num / cached value map.
+ */
+function mergePlainWithHtmlPairs(plainRows, pairRows, formulaPool, refValueMap) {
+  const pool = formulaPool || [];
+  const refMap = refValueMap || new Map();
+  const rowCount = Math.max(plainRows.length, pairRows.length);
+  const out = [];
+  const usedIndexes = new Set();
+
+  const cachedForRef = (refOrFormula, pair, htmlCells) => {
+    const key = normalizeFormulaText(refOrFormula).toUpperCase();
+    if (!key) return "";
+    if (pair?.cachedNum && isNumericCell(pair.cachedNum)) {
+      return normalizeFormulaText(pair.cachedNum).replace(/,/g, "");
+    }
+    if (refMap.has(key)) return refMap.get(key);
+    for (const hc of htmlCells || []) {
+      const fk = normalizeFormulaText(hc.formula).toUpperCase();
+      const tk = normalizeFormulaText(hc.text || "").toUpperCase();
+      if (
+        (fk === key || tk === key) &&
+        hc.cachedNum &&
+        isNumericCell(hc.cachedNum)
+      ) {
+        return normalizeFormulaText(hc.cachedNum).replace(/,/g, "");
+      }
+    }
+    return "";
+  };
+
+  for (let r = 0; r < rowCount; r += 1) {
+    const plainCells = plainRows[r] || [];
+    const htmlCells = pairRows[r] || [];
+    const colCount = Math.max(plainCells.length, htmlCells.length);
+    if (!colCount) continue;
+    const row = [];
+    for (let c = 0; c < colCount; c += 1) {
+      const plain = String(plainCells[c] ?? "").trim();
+      const pair = htmlCells[c] || {
+        formula: "",
+        display: "",
+        cachedNum: "",
+        text: "",
+      };
+      if (c === 0) {
+        row.push(
+          plain ||
+            pair.text ||
+            pair.display ||
+            normalizeFormulaText(pair.formula) ||
+            "",
+        );
+        continue;
+      }
+
+      const plainIsRef = looksLikeExcelCellRef(plain);
+      const plainIsFormula = isExprCell(plain) || plainIsRef;
+
+      // 1) HTML formula for this column
+      if (pair.formula) {
+        const cached = cachedForRef(pair.formula, pair, htmlCells);
+        const resolved = resolvePasteDimValue(
+          pair.formula,
+          cached || (isNumericCell(pair.display) ? pair.display : ""),
+          cached,
+        );
+        if (looksLikeExcelCellRef(resolved) && cached) {
+          row.push(cached);
+        } else {
+          row.push(resolved);
+        }
+        continue;
+      }
+
+      // 2) Show Formulas on: plain is formula or cell ref
+      if (plainIsFormula) {
+        const cached = cachedForRef(plain, pair, htmlCells);
+        if (plainIsRef && cached) {
+          row.push(cached);
+          continue;
+        }
+        const resolved = resolvePasteDimValue(
+          plain,
+          cached || (isNumericCell(pair.display) ? pair.display : ""),
+          cached,
+        );
+        if (looksLikeExcelCellRef(resolved) && cached) {
+          row.push(cached);
+        } else if (looksLikeExcelCellRef(resolved)) {
+          // Unresolved ref — don't store G4863 (causes Invalid); leave blank
+          row.push("");
+        } else {
+          row.push(resolved);
+        }
+        continue;
+      }
+
+      // 3) Match evaluable clipboard formula to this numeric value
+      const display = plain || pair.display || "";
+      const matched = matchFormulaToValue(display, pool, usedIndexes);
+      if (matched) {
+        row.push(matched);
+        continue;
+      }
+
+      // 4) Cached number
+      if (pair.cachedNum && isNumericCell(pair.cachedNum)) {
+        row.push(normalizeFormulaText(pair.cachedNum).replace(/,/g, ""));
+        continue;
+      }
+
+      row.push(normalizeFormulaText(display) || display);
+    }
+    if (row.some((v) => String(v).trim())) out.push(row);
+  }
+  return out;
 }
 
 /** Rejoin ROUND(x,2) etc. split across cells by Excel/CSV commas. */
@@ -378,54 +849,106 @@ function cellsToMeasurementRow(rawCells) {
 }
 
 /**
- * Parse Excel paste. Prefers HTML clipboard (keeps formulas like =2*(2+4)),
- * falls back to plain TSV values.
+ * Parse Excel paste.
+ * Keep supported formulas from HTML x:fmla / Formula even when Show Formulas is off.
+ * Unsupported formulas (cell refs, SUM, …) use the calculated value.
+ * Returns { rows, formulasInClipboard }.
  */
-function parseExcelPaste(text, html) {
-  const htmlRows = extractExcelHtmlTableRows(html);
-  const hasHtmlFormula = Boolean(
-    html &&
-      (/fmla|formula/i.test(html) || htmlRows.some((r) => r.some(isExprCell))),
-  );
+function parseExcelPaste(text, html, spreadsheetXml) {
+  const htmlPairRows = extractExcelHtmlTablePairs(html, spreadsheetXml);
+  const plainRows = parsePlainPasteRows(text);
+  const formulaPool = extractAllExcelFormulas(html, spreadsheetXml);
+  // Also add formulas already attached to HTML cells
+  for (const row of htmlPairRows) {
+    for (const cell of row) {
+      if (cell.formula) {
+        const t = String(cell.formula).trim();
+        if (t && !formulaPool.some((f) => f.toLowerCase() === t.toLowerCase())) {
+          formulaPool.push(t);
+        }
+      }
+    }
+  }
+  const refValueMap = buildCellRefValueMap(html, spreadsheetXml, htmlPairRows);
+  const hasHtmlFormula = formulaPool.length > 0;
 
   let tableRows = [];
-  if (htmlRows.length && (hasHtmlFormula || !String(text || "").trim())) {
-    tableRows = htmlRows;
-  } else if (String(text || "").trim()) {
-    const raw = String(text)
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n");
-    const lines = raw.split("\n").filter((line) => String(line).trim() !== "");
-    tableRows = lines.map((line) => {
-      let cells = line.split("\t").map((c) => String(c).trim());
-      if (cells.length === 1 && line.includes(",") && !line.includes("\t")) {
-        cells = line.split(",").map((c) => String(c).trim());
-      }
-      return cells;
-    });
-    // If HTML has more formula detail for same shape, merge formula cells over values
-    if (htmlRows.length === tableRows.length) {
-      tableRows = tableRows.map((plainCells, rIdx) => {
-        const htmlCells = htmlRows[rIdx] || [];
-        return plainCells.map((plain, cIdx) => {
-          const htmlVal = htmlCells[cIdx];
-          if (htmlVal && isExprCell(htmlVal)) return normalizeFormulaText(htmlVal);
-          // Description: prefer plain/html text
-          if (cIdx === 0) return plain || htmlVal || "";
-          return normalizeFormulaText(plain || htmlVal || "");
-        });
-      });
-    }
-  } else if (htmlRows.length) {
-    tableRows = htmlRows;
+  if (htmlPairRows.length && plainRows.length) {
+    tableRows = mergePlainWithHtmlPairs(
+      plainRows,
+      htmlPairRows,
+      formulaPool,
+      refValueMap,
+    );
+  } else if (htmlPairRows.length && hasHtmlFormula) {
+    tableRows = mergePlainWithHtmlPairs(
+      htmlPairRows.map((r) =>
+        r.map((p) =>
+          isNumericCell(p.cachedNum || p.display)
+            ? p.cachedNum || p.display
+            : p.display || "",
+        ),
+      ),
+      htmlPairRows,
+      formulaPool,
+      refValueMap,
+    );
+  } else if (plainRows.length) {
+    tableRows = plainRows.map((cells) =>
+      cells.map((c, idx) => {
+        if (idx === 0) return c;
+        const formula = normalizeFormulaText(c);
+        if (!formula) return "";
+        if (isNumericCell(formula)) return formula.replace(/,/g, "");
+        // Cell ref with no HTML x:num — cannot resolve
+        if (looksLikeExcelCellRef(formula)) return "";
+        const r = calcExpr(formula);
+        if (!r.err && r.val !== null) return formula;
+        return formula;
+      }),
+    );
+  } else if (htmlPairRows.length) {
+    tableRows = mergePlainWithHtmlPairs(
+      htmlPairRows.map((r) =>
+        r.map((p) =>
+          isNumericCell(p.cachedNum || p.display)
+            ? p.cachedNum || p.display
+            : p.display || "",
+        ),
+      ),
+      htmlPairRows,
+      formulaPool,
+      refValueMap,
+    );
   }
 
   const parsed = [];
+  let unresolvedCellRefs = 0;
   for (const cells of tableRows) {
+    // Count blanks that came from cell refs in plain source
     const row = cellsToMeasurementRow(cells);
     if (row) parsed.push(row);
   }
-  return parsed;
+  for (const prow of plainRows) {
+    for (let i = 1; i < prow.length; i += 1) {
+      if (looksLikeExcelCellRef(prow[i])) unresolvedCellRefs += 1;
+    }
+  }
+  // If we resolved them via map, dims won't contain the ref text
+  const stillHasRefs = parsed.some((r) =>
+    ["num", "len", "brd", "hgt"].some((k) => looksLikeExcelCellRef(r[k])),
+  );
+  const droppedRefs =
+    unresolvedCellRefs > 0 &&
+    !stillHasRefs &&
+    refValueMap.size === 0;
+
+  return {
+    rows: parsed,
+    formulasInClipboard: hasHtmlFormula,
+    cellRefValuesFound: refValueMap.size > 0,
+    droppedUnresolvedCellRefs: droppedRefs || stillHasRefs,
+  };
 }
 
 function mapDbRows(dbRows) {
@@ -449,10 +972,15 @@ function mapDbRows(dbRows) {
       dirty: false,
     };
     const result = computeQty(base);
+    const dimsEmpty = rowDimsAllEmpty(base);
     return {
       ...base,
-      qty: r.Quantity != null ? Number(r.Quantity) : result.val,
-      measErr: result.err,
+      qty: dimsEmpty
+        ? null
+        : r.Quantity != null
+          ? Number(r.Quantity)
+          : result.val,
+      measErr: dimsEmpty ? false : result.err,
     };
   });
 }
@@ -625,15 +1153,50 @@ function MeasurementPanel({
     }
   };
 
-  const applyExcelPaste = (text, html) => {
-    const pasted = parseExcelPaste(text, html);
+  const applyExcelPaste = (text, html, spreadsheetXml) => {
+    const {
+      rows: pasted,
+      formulasInClipboard,
+      cellRefValuesFound,
+      droppedUnresolvedCellRefs,
+    } = parseExcelPaste(text, html, spreadsheetXml);
     if (!pasted.length) {
       setError(
         "No measurement rows found in paste. Select Excel columns: Description, No, L, B, H (Quantity optional / ignored).",
       );
       return false;
     }
-    setError("");
+    const keptFormulas = pasted.some((r) =>
+      ["num", "len", "brd", "hgt"].some((k) => {
+        const v = r[k];
+        return Boolean(
+          v && !isNumericCell(v) && (isExprCell(v) || /[+\-*/()]/.test(v)),
+        );
+      }),
+    );
+    if (droppedUnresolvedCellRefs && !cellRefValuesFound) {
+      setError(
+        "Some cells are Excel references (e.g. G4863). With Show Formulas on, the browser often does not send their values. Fix: in Excel replace those refs with values (Paste Special → Values), or copy those cells with Show Formulas off. Arithmetic formulas like (10.4+8.2)/2 still paste correctly with Show Formulas on.",
+      );
+    } else if (!keptFormulas && pasted.some((r) => rowHasMeasurementData(r))) {
+      setError(
+        "Paste OK as values, but Excel did not include formulas in the clipboard. To keep formulas like =(10.4+8.2)/2: in Excel press Ctrl+` (Show Formulas), copy, paste here, then Ctrl+` again to turn it off.",
+      );
+    } else {
+      setError("");
+    }
+    if (typeof console !== "undefined" && console.debug) {
+      console.debug("[measurements paste]", {
+        formulasInClipboard,
+        cellRefValuesFound,
+        droppedUnresolvedCellRefs,
+        htmlHasFmla: /fmla|Formula/i.test(html || ""),
+        htmlHasNum: /(?:^|[^\w])num\s*=/i.test(html || ""),
+        htmlLen: (html || "").length,
+        plainLen: (text || "").length,
+        sample: String(html || "").slice(0, 600),
+      });
+    }
     setRows((prev) => {
       const existing = (prev || []).filter(rowHasContent);
       const blank = { ...measurementRowBase, localId: uid() };
@@ -645,16 +1208,40 @@ function MeasurementPanel({
   const onPanelPaste = (e) => {
     const text = e.clipboardData?.getData("text/plain") || "";
     const html = e.clipboardData?.getData("text/html") || "";
-    if (!text && !html) return;
+    // Excel often exposes formulas here when HTML x:fmla is stripped by the browser
+    let spreadsheetXml = "";
+    try {
+      const types = Array.from(e.clipboardData?.types || []);
+      for (const type of types) {
+        if (/xml|spreadsheet/i.test(type)) {
+          const data = e.clipboardData.getData(type);
+          if (data && /Formula|ss:Cell|<Cell/i.test(data)) {
+            spreadsheetXml = data;
+            break;
+          }
+        }
+      }
+      if (!spreadsheetXml) {
+        spreadsheetXml =
+          e.clipboardData.getData("Xml Spreadsheet") ||
+          e.clipboardData.getData("application/xml") ||
+          e.clipboardData.getData("text/xml") ||
+          "";
+      }
+    } catch {
+      spreadsheetXml = "";
+    }
+    if (!text && !html && !spreadsheetXml) return;
     // Multi-cell Excel paste uses tabs and/or multiple lines / HTML table
     const isMulti =
       text.includes("\t") ||
       text.includes("\n") ||
       text.includes("\r") ||
-      /<table[\s>]/i.test(html);
+      /<table[\s>]/i.test(html) ||
+      /<Cell\b/i.test(spreadsheetXml);
     if (!isMulti) return;
     e.preventDefault();
-    applyExcelPaste(text, html);
+    applyExcelPaste(text, html, spreadsheetXml);
   };
 
   // Any typed content (used for auto-adding the next blank row)
@@ -665,7 +1252,7 @@ function MeasurementPanel({
     r.brd.trim() ||
     r.hgt.trim();
 
-  // Must have measurement fields — description-only rows are not saved
+  // Any No / L / B / H value present (empty dims → Quantity null)
   const rowHasMeasurementData = (r) =>
     Boolean(
       r.num.trim() || r.len.trim() || r.brd.trim() || r.hgt.trim(),
@@ -705,16 +1292,10 @@ function MeasurementPanel({
   };
 
   const saveAll = async () => {
-    const toSave = rows.filter((r) => r.dirty && rowHasMeasurementData(r));
-    const descOnlySkipped = rows.filter(
-      (r) => r.dirty && r.desc.trim() && !rowHasMeasurementData(r),
-    );
+    // Description-only rows are saved with NULL No/L/B/H/Quantity
+    const toSave = rows.filter((r) => r.dirty && rowHasContent(r));
     if (!toSave.length) {
-      setError(
-        descOnlySkipped.length
-          ? "Nothing to save. Rows with only Description are not saved."
-          : "Nothing new to save.",
-      );
+      setError("Nothing new to save.");
       return;
     }
     setError("");
@@ -726,14 +1307,15 @@ function MeasurementPanel({
 
     // Save sequentially so Sequence becomes 1, 2, 3… (not all 1)
     for (const row of toSave) {
+      const dimsEmpty = rowDimsAllEmpty(row);
       const payload = {
         workAbstractId: item.WorkAbstractId,
         description: row.desc || "",
-        number: normalizeFormulaText(row.num) || null,
-        length: normalizeFormulaText(row.len) || null,
-        breadth: normalizeFormulaText(row.brd) || null,
-        height: normalizeFormulaText(row.hgt) || null,
-        quantity: row.qty,
+        number: dimsEmpty ? null : normalizeFormulaText(row.num) || null,
+        length: dimsEmpty ? null : normalizeFormulaText(row.len) || null,
+        breadth: dimsEmpty ? null : normalizeFormulaText(row.brd) || null,
+        height: dimsEmpty ? null : normalizeFormulaText(row.hgt) || null,
+        quantity: dimsEmpty ? null : row.qty,
       };
       try {
         if (row.id === null) {
@@ -899,7 +1481,7 @@ function MeasurementPanel({
   }
 
   const dirtyCount = rows.filter(
-    (r) => r.dirty && rowHasMeasurementData(r),
+    (r) => r.dirty && rowHasContent(r),
   ).length;
 
   return (
@@ -950,10 +1532,11 @@ function MeasurementPanel({
             marginBottom: 10,
           }}
         >
-          Paste from Excel: Description | No | L | B | H. Supports{" "}
-          <code>2*(2+4)</code>, <code>ROUND(…,2)</code>, ABS, INT. Hover a
-          cell to see the full formula if it looks cut off. Quantity = No × L ×
-          B × H.
+          Paste from Excel: Description | No | L | B | H. Use{" "}
+          <code>Ctrl+`</code> (Show Formulas) so arithmetic / ROUND formulas
+          paste as text. Cell references (e.g. G4863) paste as their calculated
+          value when Excel includes it. Hover a cell for full text. Quantity =
+          No × L × B × H.
           {reordering ? " Updating sequence…" : ""}
         </div>
 
@@ -1155,7 +1738,7 @@ function MeasurementPanel({
             >
               <span style={{ color: "#185FA5" }}>Σ Total quantity</span>
               <span style={{ fontWeight: 700, fontSize: 15, color: "#185FA5" }}>
-                {total > 0 ? total.toFixed(3) : "—"}
+                {total.toFixed(3)}
               </span>
             </div>
           )}

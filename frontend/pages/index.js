@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
-// const API_BASE = "http://localhost:4000";
+//const API_BASE = "http://localhost:4000";
 const SESSION_KEY = "werms_user";
 
 const cardStyle = {
@@ -165,7 +165,7 @@ export default function LoginPage() {
               fontWeight: 500,
             }}
           >
-            Version 1.08A Release 20 Aug 26
+            Version 1.09 Release 23 Aug 26
           </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization
@@ -353,6 +353,22 @@ export default function LoginPage() {
               </button>
             </form>
           )}
+        </div>
+
+        <div style={{ marginTop: 18, textAlign: "center" }}>
+          <button
+            type="button"
+            onClick={() => router.push("/signup")}
+            style={{
+              ...secondaryButtonStyle,
+              width: "100%",
+              background: "#f3f8fd",
+              borderColor: "#b8d0f0",
+              color: "#185FA5",
+            }}
+          >
+            New User Sign Up Here
+          </button>
         </div>
       </div>
     </main>

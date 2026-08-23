@@ -338,6 +338,22 @@ async function ensureWorkMeasurementSequence() {
   console.log("WorkMeasurement Sequence ensured.");
 }
 
+/**
+ * Description-only rows store NULL for No/L/B/H and Quantity.
+ * Drop NOT NULL on those columns if present.
+ */
+async function ensureWorkMeasurementNullableQuantity() {
+  const columns = ["Quantity", "Number", "Length", "Breadth", "Height"];
+  for (const col of columns) {
+    await pool.query(
+      `ALTER TABLE "WorkMeasurement" ALTER COLUMN "${col}" DROP NOT NULL`,
+    ).catch(() => {
+      // Column already nullable or missing — ignore
+    });
+  }
+  console.log("WorkMeasurement nullable Quantity/dims ensured.");
+}
+
 async function renumberWorkMeasurementSequences(workAbstractId, client = pool) {
   await client.query(
     `
@@ -2665,7 +2681,8 @@ app.post("/api/auth/validate-organization", async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT "OrganizationId", "OrgCode", "OrgName"
+      `SELECT "OrganizationId", "OrgCode", "OrgName",
+              COALESCE("IsActive", true) AS "IsActive"
        FROM "MasterOrganization"
        WHERE UPPER("OrgCode") = UPPER($1)
          AND COALESCE("MarkForDeletion", false) = false`,
@@ -2678,8 +2695,40 @@ app.post("/api/auth/validate-organization", async (req, res) => {
       });
     }
 
-    return res.json(result.rows[0]);
+    if (result.rows[0].IsActive === false) {
+      return res.status(403).json({
+        message:
+          "This organization is pending SuperAdmin approval and cannot be used for login yet.",
+      });
+    }
+
+    return res.json({
+      OrganizationId: result.rows[0].OrganizationId,
+      OrgCode: result.rows[0].OrgCode,
+      OrgName: result.rows[0].OrgName,
+    });
   } catch (error) {
+    // Fallback if IsActive column missing
+    if (error.message && /IsActive/i.test(error.message)) {
+      try {
+        const result = await pool.query(
+          `SELECT "OrganizationId", "OrgCode", "OrgName"
+           FROM "MasterOrganization"
+           WHERE UPPER("OrgCode") = UPPER($1)
+             AND COALESCE("MarkForDeletion", false) = false`,
+          [String(orgCode).trim()],
+        );
+        if (!result.rows[0]) {
+          return res.status(404).json({
+            message:
+              "Organization not found. Please check the organization code.",
+          });
+        }
+        return res.json(result.rows[0]);
+      } catch (err2) {
+        return res.status(500).json({ message: err2.message });
+      }
+    }
     return res.status(500).json({ message: error.message });
   }
 });
@@ -2730,6 +2779,17 @@ app.post("/api/insert-work-measurements", async (req, res) => {
       );
       const sequence = Number(nextSeq.rows[0]?.NextSequence || 1);
 
+      const numT = normalizeDimText(number);
+      const lenT = normalizeDimText(length);
+      const brdT = normalizeDimText(breadth);
+      const hgtT = normalizeDimText(height);
+      const dimsEmpty = !numT && !lenT && !brdT && !hgtT;
+      const qtyVal = dimsEmpty
+        ? null
+        : quantity === null || quantity === undefined || quantity === ""
+          ? null
+          : Number(quantity);
+
       const result = await client.query(
         `INSERT INTO "WorkMeasurement"
           ("WorkAbstractId", "Description", "Quantity", "Number", "Length", "Breadth", "Height", "Sequence") 
@@ -2738,11 +2798,11 @@ app.post("/api/insert-work-measurements", async (req, res) => {
         [
           workAbstractId,
           description ?? "",
-          quantity,
-          normalizeDimText(number),
-          normalizeDimText(length),
-          normalizeDimText(breadth),
-          normalizeDimText(height),
+          qtyVal,
+          numT,
+          lenT,
+          brdT,
+          hgtT,
           sequence,
         ],
       );
@@ -2816,6 +2876,17 @@ app.put("/api/update-work-measurements/:id", async (req, res) => {
   };
 
   try {
+    const numT = normalizeDimText(number);
+    const lenT = normalizeDimText(length);
+    const brdT = normalizeDimText(breadth);
+    const hgtT = normalizeDimText(height);
+    const dimsEmpty = !numT && !lenT && !brdT && !hgtT;
+    const qtyVal = dimsEmpty
+      ? null
+      : quantity === null || quantity === undefined || quantity === ""
+        ? null
+        : Number(quantity);
+
     const result = await pool.query(
       `UPDATE "WorkMeasurement" 
        SET "Description"=$1, "Number"=$2, "Length"=$3, "Breadth"=$4, "Height"=$5, "Quantity"=$6 
@@ -2823,11 +2894,11 @@ app.put("/api/update-work-measurements/:id", async (req, res) => {
        RETURNING "MeasurementId";`,
       [
         description,
-        normalizeDimText(number),
-        normalizeDimText(length),
-        normalizeDimText(breadth),
-        normalizeDimText(height),
-        quantity,
+        numT,
+        lenT,
+        brdT,
+        hgtT,
+        qtyVal,
         id,
       ],
     );
@@ -2956,6 +3027,28 @@ app.post("/api/auth/login", async (req, res) => {
       return res
         .status(401)
         .json({ message: "Invalid user name or password." });
+    }
+
+    if (result.rows[0].IsActive === false) {
+      return res.status(403).json({
+        message:
+          "Your account is pending SuperAdmin approval. You will be notified when it is activated.",
+      });
+    }
+
+    try {
+      const orgActiveCheck = await pool.query(
+        `SELECT "IsActive" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
+        [result.rows[0].OrganizationId],
+      );
+      if (orgActiveCheck.rows[0] && orgActiveCheck.rows[0].IsActive === false) {
+        return res.status(403).json({
+          message:
+            "Your organization is pending SuperAdmin approval. You will be notified when it is activated.",
+        });
+      }
+    } catch {
+      // IsActive column may not exist yet on older DBs — ignore
     }
 
     return res.json(result.rows[0]);
@@ -5266,7 +5359,11 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         sequence: Number(row.Sequence || 0),
         description: row.MeasurementDescription || "",
         expressionText: formatExpression(row),
-        quantity: Number(row.MeasurementQuantity || 0),
+        quantity:
+          row.MeasurementQuantity === null ||
+          row.MeasurementQuantity === undefined
+            ? null
+            : Number(row.MeasurementQuantity),
       });
     }
 
@@ -5401,7 +5498,9 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         // ── Per row: Description (left) | Measurements (center) | Quantity (right) ──
         let totalQuantity = 0;
         item.measurements.forEach((m) => {
-          totalQuantity += m.quantity;
+          if (m.quantity != null && isFinite(m.quantity)) {
+            totalQuantity += m.quantity;
+          }
           const descText = (m.description || "").trim();
           const rowTop = doc.y;
 
@@ -5420,10 +5519,17 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           doc.text(m.expressionText || "", colX.measurement, rowTop, {
             width: measurementColWidth,
           });
-          doc.text(m.quantity.toFixed(3), colX.qty, rowTop, {
-            width: measurementQtyWidth,
-            align: "right",
-          });
+          doc.text(
+            m.quantity != null && isFinite(m.quantity)
+              ? m.quantity.toFixed(3)
+              : "",
+            colX.qty,
+            rowTop,
+            {
+              width: measurementQtyWidth,
+              align: "right",
+            },
+          );
 
           doc.y = Math.max(doc.y, rowTop + rowH);
           doc.moveDown(0.45);
@@ -7043,6 +7149,615 @@ app.put("/api/material-components/:id", async (req, res) => {
   }
 });
 
+/** Keep MasterUser.UserId serial in sync (avoids MasterUser_pkey duplicates). */
+async function ensureMasterUserIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"MasterUser"', 'UserId') AS seq
+  `);
+  let seq = seqRes.rows[0]?.seq;
+  if (!seq) {
+    // Some DBs use a custom sequence name
+    const alt = await pool.query(`
+      SELECT c.relname AS seq
+      FROM pg_class c
+      JOIN pg_depend d ON d.objid = c.oid
+      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+      JOIN pg_class t ON t.oid = d.refobjid
+      WHERE c.relkind = 'S'
+        AND t.relname = 'MasterUser'
+        AND a.attname = 'UserId'
+      LIMIT 1
+    `);
+    seq = alt.rows[0]?.seq ? `public."${alt.rows[0].seq}"` : null;
+  }
+  if (!seq) {
+    console.warn("MasterUser UserId sequence not found — skip sync.");
+    return;
+  }
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("UserId"), 0)::bigint AS max FROM "MasterUser"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+  console.log("MasterUser Id sequence ensured.");
+}
+
+/** Keep MasterOrganization.OrganizationId serial in sync. */
+async function ensureMasterOrganizationIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"MasterOrganization"', 'OrganizationId') AS seq
+  `);
+  const seq = seqRes.rows[0]?.seq;
+  if (!seq) return;
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("OrganizationId"), 0)::bigint AS max
+     FROM "MasterOrganization"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+  console.log("MasterOrganization Id sequence ensured.");
+}
+
+/** Ensure signup-related columns and Individual Users holding org. */
+async function ensureSignupSchema() {
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      ADD COLUMN IF NOT EXISTS "Remarks" text
+  `);
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      ADD COLUMN IF NOT EXISTS "IsActive" boolean DEFAULT true
+  `);
+  await pool.query(`
+    UPDATE "MasterOrganization"
+    SET "IsActive" = true
+    WHERE "IsActive" IS NULL
+  `);
+
+  await ensureMasterUserIdSequence();
+  await ensureMasterOrganizationIdSequence();
+
+  const orgCode = String(
+    process.env.SIGNUP_INDIVIDUAL_ORG_CODE || "INDIV",
+  ).trim();
+  const existing = await pool.query(
+    `SELECT "OrganizationId" FROM "MasterOrganization"
+     WHERE UPPER("OrgCode") = UPPER($1)`,
+    [orgCode],
+  );
+  if (!existing.rows[0]) {
+    await pool.query(
+      `INSERT INTO "MasterOrganization"
+        ("OrgCode", "OrgName", "OrgAddress", "MarkForDeletion", "IsActive", "Remarks")
+       VALUES ($1, $2, $3, false, true, $4)`,
+      [
+        orgCode,
+        "Individual Users",
+        "Self-signup holding organization",
+        "Auto-created for individual user signups",
+      ],
+    );
+    console.log(`Signup holding org created: ${orgCode}`);
+    await ensureMasterOrganizationIdSequence();
+  }
+  console.log("Signup schema ensured.");
+}
+
+function getSuperAdminNotifyEmail() {
+  return (
+    process.env.SUPERADMIN_NOTIFY_EMAIL ||
+    process.env.SIGNUP_NOTIFY_EMAIL ||
+    "signup@softchariot.com"
+  );
+}
+
+function getEmailFromAddress() {
+  return process.env.EMAIL_FROM || "noreply@softchariot.com";
+}
+
+/**
+ * Send transactional email. Uses Resend if RESEND_API_KEY is set;
+ * otherwise logs (signup still succeeds).
+ */
+async function sendAppEmail({ to, subject, text, html }) {
+  const recipients = Array.isArray(to) ? to : [to];
+  const filtered = recipients.map((t) => String(t || "").trim()).filter(Boolean);
+  if (!filtered.length) {
+    return { sent: false, reason: "no_recipient" };
+  }
+
+  const resendKey = process.env.RESEND_API_KEY;
+  if (resendKey) {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${resendKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: getEmailFromAddress(),
+        to: filtered,
+        subject,
+        text,
+        html: html || undefined,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      console.error("Resend email failed:", response.status, body);
+      return { sent: false, reason: "provider_error", detail: body };
+    }
+    return { sent: true, provider: "resend" };
+  }
+
+  console.log("[email not configured — logged only]", {
+    to: filtered,
+    subject,
+    text,
+  });
+  return { sent: false, reason: "not_configured" };
+}
+
+async function resolveIndividualSignupDefaults() {
+  const orgCode = String(
+    process.env.SIGNUP_INDIVIDUAL_ORG_CODE || "INDIV",
+  ).trim();
+  const org = await pool.query(
+    `SELECT "OrganizationId", "OrgCode", "OrgName"
+     FROM "MasterOrganization"
+     WHERE UPPER("OrgCode") = UPPER($1)
+       AND COALESCE("MarkForDeletion", false) = false`,
+    [orgCode],
+  );
+  if (!org.rows[0]) {
+    throw new Error(
+      `Individual signup org "${orgCode}" not found. Restart server to auto-create it.`,
+    );
+  }
+
+  const category = await pool.query(
+    `SELECT "UserCategoryId", "UserCategoryName"
+     FROM "MasterUserCategory"
+     WHERE LOWER(REPLACE("UserCategoryName", ' ', '')) IN ('indvuser', 'individualuser', 'individual')
+     ORDER BY "UserCategoryId"
+     LIMIT 1`,
+  );
+  if (!category.rows[0]) {
+    throw new Error(
+      'User category "IndvUser" not found. Create it in User Category Master first.',
+    );
+  }
+
+  const designation = await pool.query(
+    `SELECT "DesignationId", "DesignationName"
+     FROM "MasterDesignation"
+     WHERE COALESCE("MarkForDeletion", false) = false
+     ORDER BY
+       CASE
+         WHEN LOWER("DesignationName") LIKE '%individual%' THEN 0
+         WHEN LOWER("DesignationName") LIKE '%user%' THEN 1
+         ELSE 2
+       END,
+       "DesignationId"
+     LIMIT 1`,
+  );
+  if (!designation.rows[0]) {
+    throw new Error(
+      "No designation found. Create at least one designation in Designation Master.",
+    );
+  }
+
+  return {
+    organizationId: Number(org.rows[0].OrganizationId),
+    orgCode: org.rows[0].OrgCode,
+    userCategoryId: Number(category.rows[0].UserCategoryId),
+    designationId: Number(designation.rows[0].DesignationId),
+  };
+}
+
+app.get("/api/signup/check-login-name", async (req, res) => {
+  const name = String(req.query.name || "").trim();
+  if (!name) {
+    return res.status(400).json({ message: "User name is required.", available: false });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT 1 FROM "MasterUser"
+       WHERE UPPER("UserLoginName") = UPPER($1)
+       LIMIT 1`,
+      [name],
+    );
+    return res.json({
+      available: result.rows.length === 0,
+      message:
+        result.rows.length === 0
+          ? "User name is available."
+          : "User name is already taken.",
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message, available: false });
+  }
+});
+
+app.get("/api/signup/check-org-code", async (req, res) => {
+  const code = String(req.query.code || "").trim();
+  if (!code) {
+    return res.status(400).json({ message: "Organization code is required.", available: false });
+  }
+  if (!/^[A-Za-z0-9]{4,10}$/.test(code)) {
+    return res.status(400).json({
+      available: false,
+      message: "Code must be 4–10 characters with no spaces (letters/numbers only).",
+    });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT 1 FROM "MasterOrganization"
+       WHERE UPPER("OrgCode") = UPPER($1)
+       LIMIT 1`,
+      [code],
+    );
+    return res.json({
+      available: result.rows.length === 0,
+      message:
+        result.rows.length === 0
+          ? "Organization code is available."
+          : "Organization code is already taken.",
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message, available: false });
+  }
+});
+
+app.post("/api/signup/individual", async (req, res) => {
+  const {
+    userLoginName,
+    userPWD,
+    userName,
+    userAddress,
+    userContact,
+    userEmail,
+    remarks,
+  } = req.body || {};
+
+  if (!userLoginName || !String(userLoginName).trim()) {
+    return res.status(400).json({ message: "User Name is required." });
+  }
+  if (!userPWD || !String(userPWD).trim()) {
+    return res.status(400).json({ message: "Password is required." });
+  }
+  if (!userName || !String(userName).trim()) {
+    return res.status(400).json({ message: "Full Name is required." });
+  }
+  if (!userAddress || !String(userAddress).trim()) {
+    return res.status(400).json({ message: "Residential Address is required." });
+  }
+  if (!userContact || !String(userContact).trim()) {
+    return res.status(400).json({ message: "Mobile Contact is required." });
+  }
+  if (!userEmail || !String(userEmail).trim()) {
+    return res.status(400).json({ message: "Email is required." });
+  }
+  const remarksText = remarks ? String(remarks).trim() : "";
+  if (remarksText.length > 200) {
+    return res
+      .status(400)
+      .json({ message: "Remarks must be at most 200 characters." });
+  }
+
+  try {
+    const taken = await pool.query(
+      `SELECT 1 FROM "MasterUser"
+       WHERE UPPER("UserLoginName") = UPPER($1)
+       LIMIT 1`,
+      [String(userLoginName).trim()],
+    );
+    if (taken.rows[0]) {
+      return res.status(409).json({ message: "User Name is already taken." });
+    }
+
+    const defaults = await resolveIndividualSignupDefaults();
+    await ensureMasterUserIdSequence();
+
+    const result = await pool.query(
+      `INSERT INTO "MasterUser"
+        ("UserCategoryId", "OrganizationId", "DesignationId", "UserLoginName",
+         "UserName", "UserAddress", "UserContact", "UserEmail",
+         "MarkForDeletion", "UserPWD", "IsActive", "Remarks")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,$9,false,$10)
+       RETURNING "UserId", "UserLoginName", "UserName", "UserEmail", "IsActive",
+                 "OrganizationId", "Remarks"`,
+      [
+        defaults.userCategoryId,
+        defaults.organizationId,
+        defaults.designationId,
+        String(userLoginName).trim(),
+        String(userName).trim(),
+        String(userAddress).trim(),
+        String(userContact).trim(),
+        String(userEmail).trim(),
+        String(userPWD),
+        remarksText || null,
+      ],
+    );
+
+    const row = result.rows[0];
+    const notifyTo = getSuperAdminNotifyEmail();
+    const mail = await sendAppEmail({
+      to: notifyTo,
+      subject: `New individual signup: ${row.UserLoginName}`,
+      text: [
+        "A new individual user has signed up and awaits approval.",
+        "",
+        `User Name (login): ${row.UserLoginName}`,
+        `Full Name: ${row.UserName}`,
+        `Email: ${row.UserEmail}`,
+        `Mobile: ${String(userContact).trim()}`,
+        `Address: ${String(userAddress).trim()}`,
+        `Remarks: ${remarksText || "(none)"}`,
+        `Org for login: ${defaults.orgCode}`,
+        `UserId: ${row.UserId}`,
+        "",
+        "Set IsActive = TRUE in User Master to approve.",
+      ].join("\n"),
+    });
+
+    return res.status(201).json({
+      message:
+        "Signup submitted. SuperAdmin will review your request. You cannot log in until approved.",
+      data: {
+        UserId: row.UserId,
+        UserLoginName: row.UserLoginName,
+        OrgCode: defaults.orgCode,
+        IsActive: false,
+      },
+      notify: mail,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/signup/organization", async (req, res) => {
+  const { orgName, orgAddress, orgCode, orgContact, orgEmail, remarks } =
+    req.body || {};
+
+  if (!orgName || !String(orgName).trim()) {
+    return res.status(400).json({ message: "Organization Name is required." });
+  }
+  if (!orgAddress || !String(orgAddress).trim()) {
+    return res.status(400).json({ message: "Address is required." });
+  }
+  const code = String(orgCode || "").trim();
+  if (!/^[A-Za-z0-9]{4,10}$/.test(code)) {
+    return res.status(400).json({
+      message:
+        "Code must be 4–10 characters with no spaces (letters and numbers only).",
+    });
+  }
+  if (!orgContact || !String(orgContact).trim()) {
+    return res.status(400).json({ message: "Mobile Contact is required." });
+  }
+  if (!orgEmail || !String(orgEmail).trim()) {
+    return res.status(400).json({ message: "Email is required." });
+  }
+  const remarksText = remarks ? String(remarks).trim() : "";
+  if (remarksText.length > 200) {
+    return res
+      .status(400)
+      .json({ message: "Brief information must be at most 200 characters." });
+  }
+
+  try {
+    const taken = await pool.query(
+      `SELECT 1 FROM "MasterOrganization"
+       WHERE UPPER("OrgCode") = UPPER($1)
+       LIMIT 1`,
+      [code],
+    );
+    if (taken.rows[0]) {
+      return res
+        .status(409)
+        .json({ message: "Organization code is already taken." });
+    }
+
+    await ensureMasterOrganizationIdSequence();
+
+    const result = await pool.query(
+      `INSERT INTO "MasterOrganization"
+        ("OrgCode", "OrgName", "OrgAddress", "OrgEmail", "OrgContact",
+         "MarkForDeletion", "IsActive", "Remarks")
+       VALUES ($1,$2,$3,$4,$5,false,false,$6)
+       RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgEmail",
+                 "OrgContact", "IsActive", "Remarks"`,
+      [
+        code,
+        String(orgName).trim(),
+        String(orgAddress).trim(),
+        String(orgEmail).trim(),
+        String(orgContact).trim(),
+        remarksText || null,
+      ],
+    );
+
+    const row = result.rows[0];
+    const mail = await sendAppEmail({
+      to: getSuperAdminNotifyEmail(),
+      subject: `New organization signup: ${row.OrgCode}`,
+      text: [
+        "A new organization has signed up and awaits approval.",
+        "",
+        `Organization: ${row.OrgName}`,
+        `Code: ${row.OrgCode}`,
+        `Email: ${row.OrgEmail}`,
+        `Mobile: ${row.OrgContact}`,
+        `Address: ${String(orgAddress).trim()}`,
+        `Brief info: ${remarksText || "(none)"}`,
+        `OrganizationId: ${row.OrganizationId}`,
+        "",
+        "Set Organization IsActive = TRUE after review, then create OrgAdmin users.",
+      ].join("\n"),
+    });
+
+    return res.status(201).json({
+      message:
+        "Organization signup submitted. SuperAdmin will review your request.",
+      data: {
+        OrganizationId: row.OrganizationId,
+        OrgCode: row.OrgCode,
+        OrgName: row.OrgName,
+        IsActive: false,
+      },
+      notify: mail,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+/** SuperAdmin: activate a pending individual user and email them. */
+app.post("/api/signup/approve-user/:userId", async (req, res) => {
+  const userId = Number(req.params.userId);
+  const actorUserId = Number(req.body?.actorUserId);
+  if (!userId) {
+    return res.status(400).json({ message: "Valid user id is required." });
+  }
+  if (!actorUserId) {
+    return res.status(400).json({ message: "actorUserId is required." });
+  }
+
+  try {
+    const actor = await pool.query(
+      `SELECT uc."UserCategoryName"
+       FROM "MasterUser" u
+       INNER JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+       WHERE u."UserId" = $1`,
+      [actorUserId],
+    );
+    const cat = String(actor.rows[0]?.UserCategoryName || "")
+      .trim()
+      .toLowerCase();
+    if (cat !== "superadmin" && cat !== "super admin") {
+      return res.status(403).json({ message: "Only SuperAdmin can approve users." });
+    }
+
+    const result = await pool.query(
+      `UPDATE "MasterUser"
+       SET "IsActive" = true
+       WHERE "UserId" = $1
+       RETURNING "UserId", "UserLoginName", "UserName", "UserEmail", "IsActive",
+                 "OrganizationId"`,
+      [userId],
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const row = result.rows[0];
+    const org = await pool.query(
+      `SELECT "OrgCode" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
+      [row.OrganizationId],
+    );
+    if (row.UserEmail) {
+      await sendAppEmail({
+        to: row.UserEmail,
+        subject: "Your SoftChariot account is approved",
+        text: [
+          `Hello ${row.UserName || row.UserLoginName},`,
+          "",
+          "Your SoftChariot account has been approved. You can now sign in.",
+          "",
+          `Organization code: ${org.rows[0]?.OrgCode || "INDIV"}`,
+          `User name: ${row.UserLoginName}`,
+          "",
+          "Thank you,",
+          "SoftChariot",
+        ].join("\n"),
+      });
+    }
+
+    return res.json({
+      message: "User approved and notification attempted.",
+      data: row,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+/** SuperAdmin: activate a pending organization. */
+app.post("/api/signup/approve-organization/:organizationId", async (req, res) => {
+  const organizationId = Number(req.params.organizationId);
+  const actorUserId = Number(req.body?.actorUserId);
+  if (!organizationId) {
+    return res.status(400).json({ message: "Valid organization id is required." });
+  }
+  if (!actorUserId) {
+    return res.status(400).json({ message: "actorUserId is required." });
+  }
+
+  try {
+    const actor = await pool.query(
+      `SELECT uc."UserCategoryName"
+       FROM "MasterUser" u
+       INNER JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+       WHERE u."UserId" = $1`,
+      [actorUserId],
+    );
+    const cat = String(actor.rows[0]?.UserCategoryName || "")
+      .trim()
+      .toLowerCase();
+    if (cat !== "superadmin" && cat !== "super admin") {
+      return res
+        .status(403)
+        .json({ message: "Only SuperAdmin can approve organizations." });
+    }
+
+    const result = await pool.query(
+      `UPDATE "MasterOrganization"
+       SET "IsActive" = true
+       WHERE "OrganizationId" = $1
+       RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgEmail", "IsActive"`,
+      [organizationId],
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Organization not found." });
+    }
+
+    const row = result.rows[0];
+    if (row.OrgEmail) {
+      await sendAppEmail({
+        to: row.OrgEmail,
+        subject: "Your SoftChariot organization is approved",
+        text: [
+          `Hello,`,
+          "",
+          `Organization "${row.OrgName}" (${row.OrgCode}) has been approved.`,
+          "SuperAdmin will create user accounts for your organization, or contact SoftChariot for next steps.",
+          "",
+          "Thank you,",
+          "SoftChariot",
+        ].join("\n"),
+      });
+    }
+
+    return res.json({
+      message: "Organization approved and notification attempted.",
+      data: row,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.get("/test", async (req, res) => {
   console.log("Origin:", req.headers.origin);
   res.json({ success: true });
@@ -7054,10 +7769,12 @@ app.listen(port, async () => {
     await ensureMasterWorkCreationDate();
     await ensureWorkAbstractSequence();
     await ensureWorkMeasurementSequence();
+    await ensureWorkMeasurementNullableQuantity();
     await ensureMaterialComponentIdSequence();
     await ensureWorkStandardAdditionSchema();
     await ensureMasterItemUserId();
     await ensureWorkEstimateSequences();
+    await ensureSignupSchema();
   } catch (err) {
     console.error("Failed to ensure schema:", err);
   }
