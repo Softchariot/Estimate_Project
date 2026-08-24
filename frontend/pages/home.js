@@ -134,8 +134,7 @@ const initialOrganizationForm = {
   OrgContactPerson: "",
   OrgConPerDesig: "",
   DOrder: "",
-  DOrder1: "",
-  MarkForDeletion: false,
+  IsActive: true,
 };
 
 const initialUserMasterForm = {
@@ -621,6 +620,7 @@ export default function HomePage() {
   const [editingUserMasterId, setEditingUserMasterId] = useState(null);
   const [savingUserMaster, setSavingUserMaster] = useState(false);
   const [loadingMasterUsers, setLoadingMasterUsers] = useState(false);
+  const [userMasterListOrgFilter, setUserMasterListOrgFilter] = useState("");
   const [userCategories, setUserCategories] = useState([]);
   const [userDesignations, setUserDesignations] = useState([]);
   const [designationList, setDesignationList] = useState([]);
@@ -1991,8 +1991,7 @@ export default function HomePage() {
       OrgContactPerson: org.OrgContactPerson || "",
       OrgConPerDesig: org.OrgConPerDesig || "",
       DOrder: org.DOrder ?? "",
-      DOrder1: org.DOrder1 ?? "",
-      MarkForDeletion: Boolean(org.MarkForDeletion),
+      IsActive: org.IsActive !== false,
     });
     setMessage("");
     if (org.OrgCountryId) await loadStates(org.OrgCountryId);
@@ -2028,8 +2027,7 @@ export default function HomePage() {
       orgContactPerson: organizationForm.OrgContactPerson,
       orgConPerDesig: organizationForm.OrgConPerDesig,
       dOrder: organizationForm.DOrder,
-      dOrder1: organizationForm.DOrder1,
-      markForDeletion: organizationForm.MarkForDeletion,
+      isActive: organizationForm.IsActive,
     };
 
     try {
@@ -2097,10 +2095,16 @@ export default function HomePage() {
     }
   };
 
-  const loadMasterUsers = async () => {
+  const loadMasterUsers = async (organizationId) => {
+    const orgFilter =
+      organizationId === undefined
+        ? userMasterListOrgFilter
+        : organizationId;
     setLoadingMasterUsers(true);
     try {
-      const res = await axios.get(`${API_BASE}/api/master-users`);
+      const res = await axios.get(`${API_BASE}/api/master-users`, {
+        params: orgFilter ? { organizationId: orgFilter } : {},
+      });
       if (res.status === 200) {
         setMasterUsers(Array.isArray(res.data) ? res.data : []);
       }
@@ -4614,15 +4618,7 @@ export default function HomePage() {
                       style={inputStyle}
                     />
                   </Field>
-                  <Field label="DOrder1">
-                    <input
-                      name="DOrder1"
-                      value={organizationForm.DOrder1}
-                      onChange={onOrganizationChange}
-                      style={inputStyle}
-                    />
-                  </Field>
-                  <Field label="Mark for deletion">
+                  <Field label="Active">
                     <label
                       style={{
                         display: "flex",
@@ -4634,8 +4630,8 @@ export default function HomePage() {
                     >
                       <input
                         type="checkbox"
-                        name="MarkForDeletion"
-                        checked={organizationForm.MarkForDeletion}
+                        name="IsActive"
+                        checked={organizationForm.IsActive}
                         onChange={onOrganizationChange}
                       />
                       Yes
@@ -4675,7 +4671,7 @@ export default function HomePage() {
                       <th>State</th>
                       <th>District</th>
                       <th>PIN</th>
-                      <th>Deleted</th>
+                      <th>Active</th>
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -4703,9 +4699,9 @@ export default function HomePage() {
                           <td>{org.OrgPinZip || "—"}</td>
                           <td>
                             <Badge
-                              tone={org.MarkForDeletion ? "red" : "green"}
+                              tone={org.IsActive !== false ? "green" : "red"}
                             >
-                              {org.MarkForDeletion ? "Yes" : "No"}
+                              {org.IsActive !== false ? "Yes" : "No"}
                             </Badge>
                           </td>
                           <td>
@@ -4964,6 +4960,39 @@ export default function HomePage() {
 
               <div
                 style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(220px, 320px) 1fr",
+                  gap: 14,
+                  alignItems: "end",
+                  marginBottom: 14,
+                }}
+              >
+                <Field label="Filter list by Organization">
+                  <select
+                    value={userMasterListOrgFilter}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setUserMasterListOrgFilter(next);
+                      loadMasterUsers(next);
+                    }}
+                    style={inputStyle}
+                  >
+                    <option value="">All organizations</option>
+                    {organizations.map((org) => (
+                      <option
+                        key={org.OrganizationId}
+                        value={org.OrganizationId}
+                      >
+                        {org.OrgCode}
+                        {org.OrgName ? ` — ${org.OrgName}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+
+              <div
+                style={{
                   overflowX: "auto",
                   border: `1px solid ${theme.colors.line}`,
                   borderRadius: 10,
@@ -5029,7 +5058,9 @@ export default function HomePage() {
                       ))
                     ) : (
                       <EmptyRow colSpan={9}>
-                        No users found — add one above.
+                        {userMasterListOrgFilter
+                          ? "No users found for this organization."
+                          : "No users found — add one above."}
                       </EmptyRow>
                     )}
                   </tbody>

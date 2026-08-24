@@ -3,7 +3,7 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const { Pool, Client } = require("pg");
-require("dotenv").config();
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const PDFDocument = require("pdfkit");
 
 const app = express();
@@ -20,11 +20,25 @@ app.use(express.json());
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
 const connectionString =
   process.env.DB_STRING ||
-  "postgresql://neondb_owner:npg_7zq0fResbhYE@ep-billowing-band-ansoxrxg-pooler.c-6.us-east-1.aws.neon.tech/01_WERMS?sslmode=require&channel_binding=require";
+  process.env.DATABASE_URL ||
+  "";
+
+if (!connectionString) {
+  console.error(
+    "Missing DB_STRING (or DATABASE_URL). Set it in backend/.env — never commit credentials.",
+  );
+  process.exit(1);
+}
+
+// Neon / managed Postgres often need SSL even when DB_SSL is unset
+const needsSsl =
+  useSsl ||
+  /sslmode=require/i.test(connectionString) ||
+  /\.neon\.tech/i.test(connectionString);
 
 const pool = new Pool({
-  connectionString: connectionString,
-  ssl: useSsl ? { rejectUnauthorized: false } : false,
+  connectionString,
+  ssl: needsSsl ? { rejectUnauthorized: false } : false,
 });
 
 /** Convert a whole-rupee amount to Indian currency words. */
@@ -1005,7 +1019,8 @@ app.get("/api/master-organizations", async (_req, res) => {
               o."OrgCountryId", o."OrgStateId", o."OrgDistrictId",
               o."OrgPinZip", o."OrgEmail", o."OrgContact",
               o."OrgContactPerson", o."OrgConPerDesig",
-              o."DOrder", o."DOrder1", o."MarkForDeletion",
+              o."DOrder",
+              COALESCE(o."IsActive", true) AS "IsActive",
               c."CountryName", s."StateName", d."DistrictName"
        FROM "MasterOrganization" o
        LEFT JOIN "MasterCountry" c ON c."CountryId" = o."OrgCountryId"
@@ -1033,8 +1048,7 @@ app.post("/api/master-organizations", async (req, res) => {
     orgContactPerson,
     orgConPerDesig,
     dOrder,
-    dOrder1,
-    markForDeletion,
+    isActive,
   } = req.body || {};
 
   if (!orgCode || !String(orgCode).trim()) {
@@ -1046,14 +1060,13 @@ app.post("/api/master-organizations", async (req, res) => {
       `INSERT INTO "MasterOrganization"
         ("OrgCode", "OrgName", "OrgAddress", "OrgCountryId", "OrgStateId",
          "OrgDistrictId", "OrgPinZip", "OrgEmail", "OrgContact",
-         "OrgContactPerson", "OrgConPerDesig", "DOrder", "DOrder1",
-         "MarkForDeletion")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         "OrgContactPerson", "OrgConPerDesig", "DOrder", "IsActive")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgAddress",
                  "OrgCountryId", "OrgStateId", "OrgDistrictId",
                  "OrgPinZip", "OrgEmail", "OrgContact",
                  "OrgContactPerson", "OrgConPerDesig",
-                 "DOrder", "DOrder1", "MarkForDeletion"`,
+                 "DOrder", "IsActive"`,
       [
         String(orgCode).trim(),
         orgName ? String(orgName).trim() : null,
@@ -1069,10 +1082,7 @@ app.post("/api/master-organizations", async (req, res) => {
         dOrder === "" || dOrder === null || dOrder === undefined
           ? null
           : Number(dOrder),
-        dOrder1 === "" || dOrder1 === null || dOrder1 === undefined
-          ? null
-          : Number(dOrder1),
-        Boolean(markForDeletion),
+        isActive === undefined || isActive === null ? true : Boolean(isActive),
       ],
     );
     return res.status(201).json({
@@ -1105,8 +1115,7 @@ app.put("/api/master-organizations/:id", async (req, res) => {
     orgContactPerson,
     orgConPerDesig,
     dOrder,
-    dOrder1,
-    markForDeletion,
+    isActive,
   } = req.body || {};
 
   if (!orgCode || !String(orgCode).trim()) {
@@ -1128,14 +1137,13 @@ app.put("/api/master-organizations/:id", async (req, res) => {
            "OrgContactPerson" = $10,
            "OrgConPerDesig" = $11,
            "DOrder" = $12,
-           "DOrder1" = $13,
-           "MarkForDeletion" = $14
-       WHERE "OrganizationId" = $15
+           "IsActive" = $13
+       WHERE "OrganizationId" = $14
        RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgAddress",
                  "OrgCountryId", "OrgStateId", "OrgDistrictId",
                  "OrgPinZip", "OrgEmail", "OrgContact",
                  "OrgContactPerson", "OrgConPerDesig",
-                 "DOrder", "DOrder1", "MarkForDeletion"`,
+                 "DOrder", "IsActive"`,
       [
         String(orgCode).trim(),
         orgName ? String(orgName).trim() : null,
@@ -1151,10 +1159,7 @@ app.put("/api/master-organizations/:id", async (req, res) => {
         dOrder === "" || dOrder === null || dOrder === undefined
           ? null
           : Number(dOrder),
-        dOrder1 === "" || dOrder1 === null || dOrder1 === undefined
-          ? null
-          : Number(dOrder1),
-        Boolean(markForDeletion),
+        isActive === undefined || isActive === null ? true : Boolean(isActive),
         organizationId,
       ],
     );
@@ -1195,7 +1200,10 @@ app.get("/api/user-categories", async (req, res) => {
   }
 });
 
-app.get("/api/master-users", async (_req, res) => {
+app.get("/api/master-users", async (req, res) => {
+  const organizationId = Number(req.query.organizationId);
+  const hasOrgFilter = Boolean(organizationId);
+
   try {
     const result = await pool.query(
       `SELECT u."UserId", u."UserCategoryId", u."OrganizationId", u."DesignationId",
@@ -1208,9 +1216,11 @@ app.get("/api/master-users", async (_req, res) => {
               uc."UserCategoryName"
        FROM "MasterUser" u
        INNER JOIN "MasterOrganization" o ON o."OrganizationId" = u."OrganizationId"
-       INNER JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
-       INNER JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+       LEFT JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
+       LEFT JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+       WHERE ($1::boolean = false OR u."OrganizationId" = $2)
        ORDER BY COALESCE(u."DOrder", 999999), u."UserName"`,
+      [hasOrgFilter, hasOrgFilter ? organizationId : null],
     );
     return res.json(result.rows);
   } catch (error) {
@@ -2684,8 +2694,7 @@ app.post("/api/auth/validate-organization", async (req, res) => {
       `SELECT "OrganizationId", "OrgCode", "OrgName",
               COALESCE("IsActive", true) AS "IsActive"
        FROM "MasterOrganization"
-       WHERE UPPER("OrgCode") = UPPER($1)
-         AND COALESCE("MarkForDeletion", false) = false`,
+       WHERE UPPER("OrgCode") = UPPER($1)`,
       [String(orgCode).trim()],
     );
 
@@ -2714,8 +2723,7 @@ app.post("/api/auth/validate-organization", async (req, res) => {
         const result = await pool.query(
           `SELECT "OrganizationId", "OrgCode", "OrgName"
            FROM "MasterOrganization"
-           WHERE UPPER("OrgCode") = UPPER($1)
-             AND COALESCE("MarkForDeletion", false) = false`,
+           WHERE UPPER("OrgCode") = UPPER($1)`,
           [String(orgCode).trim()],
         );
         if (!result.rows[0]) {
@@ -2991,6 +2999,8 @@ app.delete("/api/measurements/:id", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   const { orgCode, userLoginName, password } = req.body;
+  const pendingMsg =
+    "User Authentication Pending or Failed, Contact the Admin";
 
   if (!orgCode || !String(orgCode).trim()) {
     return res.status(400).json({ message: "Organization code is required." });
@@ -3002,57 +3012,129 @@ app.post("/api/auth/login", async (req, res) => {
     return res.status(400).json({ message: "Password is required." });
   }
 
+  const org = String(orgCode).trim();
+  const login = String(userLoginName).trim();
+
   try {
-    const result = await pool.query(
+    // Prefer org+login match; LEFT JOIN so missing designation still finds the user
+    const found = await pool.query(
       `SELECT u."UserId", u."UserCategoryId", u."OrganizationId", u."DesignationId",
               u."UserLoginName", u."UserName", u."UserAddress",
               u."UserDateOfJoining", u."UserDateOfBirth", u."UserContact",
-              u."UserEmail", u."MarkForDeletion", u."IsActive",
+              u."UserEmail", u."MarkForDeletion", u."UserPWD", u."IsActive",
               u."DateOfRelieving", u."DOrder", u."Remarks",
               d."DesignationName", uc."UserCategoryName",
-              o."OrgCode", o."OrgName"
+              o."OrgCode", o."OrgName",
+              COALESCE(o."IsActive", true) AS "OrgIsActive"
        FROM "MasterUser" u
        INNER JOIN "MasterOrganization" o ON o."OrganizationId" = u."OrganizationId"
-       INNER JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
-       INNER JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+       LEFT JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
+       LEFT JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
        WHERE UPPER(o."OrgCode") = UPPER($1)
          AND UPPER(u."UserLoginName") = UPPER($2)
-         AND u."UserPWD" = $3
-         AND COALESCE(u."MarkForDeletion", false) = false
-         AND COALESCE(o."MarkForDeletion", false) = false`,
-      [String(orgCode).trim(), String(userLoginName).trim(), String(password)],
+         AND COALESCE(u."MarkForDeletion", false) = false`,
+      [org, login],
     );
 
-    if (!result.rows[0]) {
+    let user = found.rows[0] || null;
+
+    // Same login under another org / inactive signup — still show pending message
+    if (!user) {
+      const byLogin = await pool.query(
+        `SELECT u."UserId", u."UserPWD", u."IsActive",
+                o."OrgCode", COALESCE(o."IsActive", true) AS "OrgIsActive"
+         FROM "MasterUser" u
+         INNER JOIN "MasterOrganization" o ON o."OrganizationId" = u."OrganizationId"
+         WHERE UPPER(u."UserLoginName") = UPPER($1)
+           AND COALESCE(u."MarkForDeletion", false) = false
+         ORDER BY u."UserId" DESC
+         LIMIT 5`,
+        [login],
+      );
+      const inactive = byLogin.rows.find(
+        (r) => r.IsActive === false || r.IsActive === "f" || r.OrgIsActive === false,
+      );
+      if (inactive) {
+        return res.status(403).json({ message: pendingMsg });
+      }
       return res
         .status(401)
         .json({ message: "Invalid user name or password." });
     }
 
-    if (result.rows[0].IsActive === false) {
-      return res.status(403).json({
-        message:
-          "Your account is pending SuperAdmin approval. You will be notified when it is activated.",
-      });
+    const userActive = user.IsActive !== false && user.IsActive !== "f";
+    const orgActive = user.OrgIsActive !== false && user.OrgIsActive !== "f";
+
+    if (!userActive || !orgActive) {
+      return res.status(403).json({ message: pendingMsg });
     }
 
-    try {
-      const orgActiveCheck = await pool.query(
-        `SELECT "IsActive" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
-        [result.rows[0].OrganizationId],
-      );
-      if (orgActiveCheck.rows[0] && orgActiveCheck.rows[0].IsActive === false) {
-        return res.status(403).json({
-          message:
-            "Your organization is pending SuperAdmin approval. You will be notified when it is activated.",
-        });
-      }
-    } catch {
-      // IsActive column may not exist yet on older DBs — ignore
+    if (String(user.UserPWD ?? "") !== String(password)) {
+      return res
+        .status(401)
+        .json({ message: "Invalid user name or password." });
     }
 
-    return res.json(result.rows[0]);
+    delete user.UserPWD;
+    delete user.OrgIsActive;
+    return res.json(user);
   } catch (error) {
+    console.error("Login error:", error);
+    // Fallback without Org IsActive column
+    if (error.message && /IsActive/i.test(error.message)) {
+      try {
+        const found = await pool.query(
+          `SELECT u."UserId", u."UserCategoryId", u."OrganizationId", u."DesignationId",
+                  u."UserLoginName", u."UserName", u."UserAddress",
+                  u."UserDateOfJoining", u."UserDateOfBirth", u."UserContact",
+                  u."UserEmail", u."MarkForDeletion", u."UserPWD", u."IsActive",
+                  u."DateOfRelieving", u."DOrder", u."Remarks",
+                  d."DesignationName", uc."UserCategoryName",
+                  o."OrgCode", o."OrgName"
+           FROM "MasterUser" u
+           INNER JOIN "MasterOrganization" o ON o."OrganizationId" = u."OrganizationId"
+           LEFT JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
+           LEFT JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
+           WHERE UPPER(o."OrgCode") = UPPER($1)
+             AND UPPER(u."UserLoginName") = UPPER($2)
+             AND COALESCE(u."MarkForDeletion", false) = false`,
+          [org, login],
+        );
+        if (!found.rows[0]) {
+          const byLogin = await pool.query(
+            `SELECT u."IsActive"
+             FROM "MasterUser" u
+             WHERE UPPER(u."UserLoginName") = UPPER($1)
+               AND COALESCE(u."MarkForDeletion", false) = false
+             LIMIT 1`,
+            [login],
+          );
+          if (
+            byLogin.rows[0] &&
+            (byLogin.rows[0].IsActive === false ||
+              byLogin.rows[0].IsActive === "f")
+          ) {
+            return res.status(403).json({ message: pendingMsg });
+          }
+          return res
+            .status(401)
+            .json({ message: "Invalid user name or password." });
+        }
+        const user = found.rows[0];
+        if (user.IsActive === false || user.IsActive === "f") {
+          return res.status(403).json({ message: pendingMsg });
+        }
+        if (String(user.UserPWD ?? "") !== String(password)) {
+          return res
+            .status(401)
+            .json({ message: "Invalid user name or password." });
+        }
+        delete user.UserPWD;
+        return res.json(user);
+      } catch (err2) {
+        return res.status(500).json({ message: err2.message });
+      }
+    }
     if (error.message && error.message.includes('"UserPWD"')) {
       return res.status(500).json({
         message:
@@ -7206,11 +7288,34 @@ async function ensureMasterOrganizationIdSequence() {
 async function ensureSignupSchema() {
   await pool.query(`
     ALTER TABLE "MasterOrganization"
-      ADD COLUMN IF NOT EXISTS "Remarks" text
+      ADD COLUMN IF NOT EXISTS "IsActive" boolean DEFAULT true
+  `);
+  // Migrate soft-deleted orgs to IsActive=false before dropping MarkForDeletion.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'MasterOrganization' AND column_name = 'MarkForDeletion'
+      ) THEN
+        UPDATE "MasterOrganization"
+        SET "IsActive" = false
+        WHERE COALESCE("MarkForDeletion", false) = true;
+      END IF;
+    END $$;
+  `);
+  // Prefer IsActive over soft-delete / unused columns.
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      DROP COLUMN IF EXISTS "DOrder1"
   `);
   await pool.query(`
     ALTER TABLE "MasterOrganization"
-      ADD COLUMN IF NOT EXISTS "IsActive" boolean DEFAULT true
+      DROP COLUMN IF EXISTS "Remarks"
+  `);
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      DROP COLUMN IF EXISTS "MarkForDeletion"
   `);
   await pool.query(`
     UPDATE "MasterOrganization"
@@ -7221,28 +7326,24 @@ async function ensureSignupSchema() {
   await ensureMasterUserIdSequence();
   await ensureMasterOrganizationIdSequence();
 
-  const orgCode = String(
-    process.env.SIGNUP_INDIVIDUAL_ORG_CODE || "INDIV",
-  ).trim();
+  // Individual signups must use OrganizationId 3 (not a later INDV/INDIV row).
+  const individualOrgId = Number(
+    process.env.SIGNUP_INDIVIDUAL_ORG_ID || 3,
+  );
   const existing = await pool.query(
-    `SELECT "OrganizationId" FROM "MasterOrganization"
-     WHERE UPPER("OrgCode") = UPPER($1)`,
-    [orgCode],
+    `SELECT "OrganizationId", "OrgCode", "OrgName"
+     FROM "MasterOrganization"
+     WHERE "OrganizationId" = $1`,
+    [individualOrgId],
   );
   if (!existing.rows[0]) {
-    await pool.query(
-      `INSERT INTO "MasterOrganization"
-        ("OrgCode", "OrgName", "OrgAddress", "MarkForDeletion", "IsActive", "Remarks")
-       VALUES ($1, $2, $3, false, true, $4)`,
-      [
-        orgCode,
-        "Individual Users",
-        "Self-signup holding organization",
-        "Auto-created for individual user signups",
-      ],
+    console.warn(
+      `WARNING: Individual signup org OrganizationId=${individualOrgId} not found in MasterOrganization.`,
     );
-    console.log(`Signup holding org created: ${orgCode}`);
-    await ensureMasterOrganizationIdSequence();
+  } else {
+    console.log(
+      `Signup individual org: ${existing.rows[0].OrgCode} (OrganizationId=${individualOrgId})`,
+    );
   }
   console.log("Signup schema ensured.");
 }
@@ -7303,21 +7404,22 @@ async function sendAppEmail({ to, subject, text, html }) {
 }
 
 async function resolveIndividualSignupDefaults() {
-  const orgCode = String(
-    process.env.SIGNUP_INDIVIDUAL_ORG_CODE || "INDIV",
-  ).trim();
+  // Fixed holding org for individual self-signup (OrganizationId = 3).
+  const organizationId = Number(
+    process.env.SIGNUP_INDIVIDUAL_ORG_ID || 3,
+  );
   const org = await pool.query(
     `SELECT "OrganizationId", "OrgCode", "OrgName"
      FROM "MasterOrganization"
-     WHERE UPPER("OrgCode") = UPPER($1)
-       AND COALESCE("MarkForDeletion", false) = false`,
-    [orgCode],
+     WHERE "OrganizationId" = $1`,
+    [organizationId],
   );
   if (!org.rows[0]) {
     throw new Error(
-      `Individual signup org "${orgCode}" not found. Restart server to auto-create it.`,
+      `Individual signup organization (OrganizationId=${organizationId}) not found.`,
     );
   }
+  const orgCode = org.rows[0].OrgCode;
 
   const category = await pool.query(
     `SELECT "UserCategoryId", "UserCategoryName"
@@ -7332,30 +7434,28 @@ async function resolveIndividualSignupDefaults() {
     );
   }
 
+  // Fixed designation for individual self-signup (DesignationId = 4).
+  const designationId = Number(
+    process.env.SIGNUP_INDIVIDUAL_DESIGNATION_ID || 4,
+  );
   const designation = await pool.query(
     `SELECT "DesignationId", "DesignationName"
      FROM "MasterDesignation"
-     WHERE COALESCE("MarkForDeletion", false) = false
-     ORDER BY
-       CASE
-         WHEN LOWER("DesignationName") LIKE '%individual%' THEN 0
-         WHEN LOWER("DesignationName") LIKE '%user%' THEN 1
-         ELSE 2
-       END,
-       "DesignationId"
-     LIMIT 1`,
+     WHERE "DesignationId" = $1
+       AND COALESCE("MarkForDeletion", false) = false`,
+    [designationId],
   );
   if (!designation.rows[0]) {
     throw new Error(
-      "No designation found. Create at least one designation in Designation Master.",
+      `Individual signup designation (DesignationId=${designationId}) not found.`,
     );
   }
 
   return {
-    organizationId: Number(org.rows[0].OrganizationId),
-    orgCode: org.rows[0].OrgCode,
+    organizationId,
+    orgCode,
     userCategoryId: Number(category.rows[0].UserCategoryId),
-    designationId: Number(designation.rows[0].DesignationId),
+    designationId,
   };
 }
 
@@ -7571,17 +7671,16 @@ app.post("/api/signup/organization", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO "MasterOrganization"
         ("OrgCode", "OrgName", "OrgAddress", "OrgEmail", "OrgContact",
-         "MarkForDeletion", "IsActive", "Remarks")
-       VALUES ($1,$2,$3,$4,$5,false,false,$6)
+         "IsActive")
+       VALUES ($1,$2,$3,$4,$5,false)
        RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgEmail",
-                 "OrgContact", "IsActive", "Remarks"`,
+                 "OrgContact", "IsActive"`,
       [
         code,
         String(orgName).trim(),
         String(orgAddress).trim(),
         String(orgEmail).trim(),
         String(orgContact).trim(),
-        remarksText || null,
       ],
     );
 
