@@ -164,6 +164,67 @@ function formatInrAmount(n, { roundToRupee = false } = {}) {
   return `₹  ${formatted}`;
 }
 
+const TRIAL_REPORT_FOOTER =
+  "SoftChariot Estimation | Trial Version | For Evaluation Only";
+const TRIAL_REPORT_WATERMARK = "SOFTCHARIOT — TRIAL VERSION";
+
+/** Faint diagonal watermark + trial footer on every buffered page. */
+function applyTrialReportBranding(doc, { pageNumberText } = {}) {
+  const range = doc.bufferedPageRange();
+  const pageCount = range.count;
+  for (let i = 0; i < pageCount; i += 1) {
+    doc.switchToPage(range.start + i);
+    const page = doc.page;
+    const savedMargins = {
+      bottom: page.margins.bottom,
+      top: page.margins.top,
+      left: page.margins.left,
+      right: page.margins.right,
+    };
+    page.margins.bottom = 0;
+    page.margins.top = 0;
+    page.margins.left = 0;
+    page.margins.right = 0;
+
+    const w = page.width;
+    const h = page.height;
+
+    doc.save();
+    doc.fillColor("#888888");
+    doc.opacity(0.08);
+    doc.translate(w / 2, h / 2);
+    doc.rotate(-32);
+    doc.font("Helvetica-Bold").fontSize(32);
+    doc.text(TRIAL_REPORT_WATERMARK, -300, -18, {
+      width: 600,
+      align: "center",
+      lineBreak: false,
+    });
+    doc.restore();
+
+    doc.fillColor("#6a6a6a");
+    doc.font("Helvetica").fontSize(8);
+    if (typeof pageNumberText === "function") {
+      doc.text(pageNumberText(i, pageCount), 40, h - 40, {
+        width: w - 80,
+        align: "center",
+        lineBreak: false,
+      });
+    }
+    doc.text(TRIAL_REPORT_FOOTER, 40, h - 24, {
+      width: w - 80,
+      align: "center",
+      lineBreak: false,
+    });
+    doc.fillColor("#000000");
+
+    page.margins.bottom = savedMargins.bottom;
+    page.margins.top = savedMargins.top;
+    page.margins.left = savedMargins.left;
+    page.margins.right = savedMargins.right;
+  }
+}
+
 /**
  * WorkAbstract historically keyed "ProjectId" to MasterProject.
  * Estimation now selects MasterWork, so we add "WorkId" -> MasterWork and
@@ -4161,9 +4222,12 @@ app.get("/api/generate-report", async (req, res) => {
 
     const params = [projectId];
     let subWorkFilter = "";
-    if (subWorkId && subWorkId !== "all") {
+    const subWorkIdNum = Number(subWorkId);
+    const isSingleSubWork =
+      Boolean(subWorkId) && subWorkId !== "all" && subWorkIdNum > 0;
+    if (isSingleSubWork) {
       subWorkFilter = `AND sw."SubWorkId" = $2`;
-      params.push(subWorkId);
+      params.push(subWorkIdNum);
     }
 
     const query = `
@@ -4306,23 +4370,21 @@ app.get("/api/generate-report", async (req, res) => {
       });
     }
 
+    const abstractFileName = isSingleSubWork
+      ? `Work-${projectId}-SubWork-${subWorkIdNum}-AbstractReport.pdf`
+      : `Work-${projectId}-AbstractReport.pdf`;
+
     // ── Stream the PDF back as a download ──
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${projectName.replace(/[^\w\-]+/g, "_")}_Abstract.pdf"`,
+      `attachment; filename="${abstractFileName}"`,
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
     doc.pipe(res);
 
     const rupeeFonts = registerRupeeFonts(doc);
-
-    const money = (n) =>
-      Number(n || 0).toLocaleString("en-IN", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
 
     // Amount / totals: round to whole Rupees, Indian grouping with ₹
     const rupees = (n) => formatInrAmount(n, { roundToRupee: true });
@@ -4493,6 +4555,7 @@ app.get("/api/generate-report", async (req, res) => {
       doc.text(words, colX.serial, doc.y, { width: 515 });
     });
 
+    applyTrialReportBranding(doc);
     doc.end();
   } catch (err) {
     console.error(err);
@@ -4591,7 +4654,7 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${String(workName).replace(/[^\w\-]+/g, "_")}_RateAnalysis.pdf"`,
+      `attachment; filename="Work-${workId}-RateAnalysis.pdf"`,
     );
 
     const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
@@ -4838,18 +4901,11 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
       doc.moveDown(0.7);
     }
 
-    // Page numbers
-    const range = doc.bufferedPageRange();
-    for (let i = 0; i < range.count; i += 1) {
-      doc.switchToPage(range.start + i);
-      doc.font("Helvetica").fontSize(8);
-      doc.text(
-        `Page ${i + 1} of ${range.count} of Rate Analysis`,
-        left,
-        doc.page.height - 30,
-        { width, align: "center" },
-      );
-    }
+    // Page numbers + trial branding
+    applyTrialReportBranding(doc, {
+      pageNumberText: (i, count) =>
+        `Page ${i + 1} of ${count} of Rate Analysis`,
+    });
 
     doc.end();
   } catch (err) {
@@ -4922,10 +4978,10 @@ app.get("/api/generate-recap-report", async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${projectName.replace(/[^\w\-]+/g, "_")}_Recapitulation.pdf"`,
+      `attachment; filename="Work-${projectId}-Recap.pdf"`,
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
     doc.pipe(res);
 
     const rupeeFonts = registerRupeeFonts(doc);
@@ -5014,6 +5070,7 @@ app.get("/api/generate-recap-report", async (req, res) => {
     doc.font("Helvetica").fontSize(10);
     doc.text("-".repeat(88), left, doc.y);
 
+    applyTrialReportBranding(doc);
     doc.end();
   } catch (err) {
     console.error(err);
@@ -5128,7 +5185,7 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${String(workName).replace(/[^\w\-]+/g, "_")}_LeadStatement.pdf"`,
+      `attachment; filename="Work-${workId}-LeadStatement.pdf"`,
     );
 
     const doc = new PDFDocument({
@@ -5315,15 +5372,9 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
       }
     }
 
-    const pageCount = doc.bufferedPageRange().count;
-    for (let i = 0; i < pageCount; i += 1) {
-      doc.switchToPage(i);
-      doc.font("Helvetica").fontSize(8);
-      doc.text(`Page ${i + 1} of ${pageCount}`, left, doc.page.height - 28, {
-        width,
-        align: "center",
-      });
-    }
+    applyTrialReportBranding(doc, {
+      pageNumberText: (i, count) => `Page ${i + 1} of ${count}`,
+    });
 
     doc.end();
   } catch (err) {
@@ -5354,9 +5405,10 @@ app.get("/api/generate-measurement-report", async (req, res) => {
     //    (with null measurement columns) instead of being dropped ──
     const params = [projectId];
     let subWorkFilter = "";
-    if (subWorkId && subWorkId !== "all") {
+    const subWorkIdNum = Number(subWorkId);
+    if (subWorkId && subWorkId !== "all" && subWorkIdNum > 0) {
       subWorkFilter = `AND sw."SubWorkId" = $2`;
-      params.push(subWorkId);
+      params.push(subWorkIdNum);
     }
 
     const query = `
@@ -5367,6 +5419,8 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           i."ItemId",
           i."ItemNumber",
           i."ItemDescription",
+          y."Year" AS "SSRYear",
+          r."SSRRegionShortName",
           u."UnitShortName",
           wm."MeasurementId",
           wm."Sequence",
@@ -5378,6 +5432,8 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           wm."Quantity"       AS "MeasurementQuantity"
         FROM "WorkAbstract" wa
         JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+        LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+        LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
         JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
         JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
         JOIN "WorkMeasurement" wm ON wm."WorkAbstractId" = wa."WorkAbstractId"
@@ -5431,6 +5487,8 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           itemNumber: row.ItemNumber,
           itemDescription: row.ItemDescription,
           unitShortName: row.UnitShortName,
+          ssrYear: row.SSRYear || "",
+          regionShortName: row.SSRRegionShortName || "",
           measurements: [],
         });
       }
@@ -5461,14 +5519,20 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       }
     }
 
+    const isSingleSubWork =
+      Boolean(subWorkId) && subWorkId !== "all" && subWorkIdNum > 0;
+    const measurementFileName = isSingleSubWork
+      ? `Work-${projectId}-SubWork-${subWorkIdNum}-MeasurementReport.pdf`
+      : `Work-${projectId}-MeasurementReport.pdf`;
+
     // ── Stream the PDF back as a download ──
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${projectName.replace(/[^\w\-]+/g, "_")}_Measurement.pdf"`,
+      `attachment; filename="${measurementFileName}"`,
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
     doc.pipe(res);
 
     const colX = { desc: 40, measurement: 272, qty: 490 };
@@ -5477,8 +5541,7 @@ app.get("/api/generate-measurement-report", async (req, res) => {
     const measurementQtyWidth = 555 - colX.qty;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
 
-    // Title / SSR year / name of work — no table header here, that's drawn
-    // per sub-work group below (so it always sits above the table, as agreed).
+    // Title / name of work — SSR year is shown per item, not in the header.
     const drawPageHeader = () => {
       doc.font("Helvetica-Bold").fontSize(14);
       doc.text("Measurement Sheet", 0, 40, { align: "center" });
@@ -5487,8 +5550,6 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       doc.text(`Name of Work :   ${projectName}`, colX.desc, doc.y, {
         width: descWidth,
       });
-      doc.moveDown(0.3);
-      doc.text("SSR YEAR   2022-2023", 0, doc.y, { align: "right" });
       doc.moveDown(0.5);
     };
 
@@ -5529,10 +5590,16 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
 
       group.items.forEach((item, itemIdx) => {
-        const numberSuffix = item.itemNumber
-          ? ` (Ref Item No: ${item.itemNumber})`
+        const refParts = [];
+        if (item.regionShortName) refParts.push(item.regionShortName);
+        if (item.itemNumber) refParts.push(item.itemNumber);
+        const numberSuffix = refParts.length
+          ? ` (Ref Item No: ${refParts.join(" ")})`
           : "";
-        const descriptionWithNumber = `${item.itemDescription || ""}${numberSuffix}`;
+        const ssrYearSuffix = item.ssrYear
+          ? ` (SSR Year ${item.ssrYear})`
+          : "";
+        const descriptionWithNumber = `${item.itemDescription || ""}${numberSuffix}${ssrYearSuffix}`;
         const itemLabel = `ITEM NO. : ${itemIdx + 1}  ${descriptionWithNumber}`;
         const leftDescWidth = colX.measurement - colX.desc - 10;
 
@@ -5633,6 +5700,7 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       });
     });
 
+    applyTrialReportBranding(doc);
     doc.end();
   } catch (err) {
     console.error(err);
@@ -5749,7 +5817,7 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
       `attachment; filename="SSR_Item_Catalog.pdf"`,
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 40 });
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
     doc.pipe(res);
 
     const money = (n) =>
@@ -5893,6 +5961,7 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
       });
     });
 
+    applyTrialReportBranding(doc);
     doc.end();
   } catch (err) {
     console.error(err);

@@ -644,6 +644,7 @@ export default function HomePage() {
   const [subWorkListDragId, setSubWorkListDragId] = useState(null);
   const [reorderingSubWorks, setReorderingSubWorks] = useState(false);
   const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
+  const [generateReportType, setGenerateReportType] = useState("abstract");
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [loadingEstimate, setLoadingEstimate] = useState(false);
   const [estimateWorkName, setEstimateWorkName] = useState("");
@@ -2690,7 +2691,7 @@ export default function HomePage() {
 
       // Pull the filename the server sent, if present, otherwise fall back
       const disposition = res.headers["content-disposition"];
-      let filename = "Recapitulation.pdf";
+      let filename = `Work-${selectedProjectId}-Recap.pdf`;
       if (disposition) {
         const match = disposition.match(/filename="?([^"]+)"?/);
         if (match?.[1]) filename = match[1];
@@ -2730,7 +2731,7 @@ export default function HomePage() {
       );
 
       const disposition = res.headers["content-disposition"];
-      let filename = "RateAnalysis.pdf";
+      let filename = `Work-${selectedProjectId}-RateAnalysis.pdf`;
       if (disposition) {
         const match = disposition.match(/filename="?([^"]+)"?/);
         if (match?.[1]) filename = match[1];
@@ -2780,7 +2781,7 @@ export default function HomePage() {
       );
 
       const disposition = res.headers["content-disposition"];
-      let filename = "LeadStatement.pdf";
+      let filename = `Work-${selectedProjectId}-LeadStatement.pdf`;
       if (disposition) {
         const match = disposition.match(/filename="?([^"]+)"?/);
         if (match?.[1]) filename = match[1];
@@ -7406,6 +7407,7 @@ export default function HomePage() {
                         <MenuItem
                           onClick={() => {
                             clearEstimationOutputs();
+                            setGenerateReportType("abstract");
                             setGenerateReportModalOpen(true);
                           }}
                         >
@@ -7415,7 +7417,11 @@ export default function HomePage() {
                           Generate Recap Report
                         </MenuItem>
                         <MenuItem
-                          onClick={() => handleGenerateMeasurementReport()}
+                          onClick={() => {
+                            clearEstimationOutputs();
+                            setGenerateReportType("measurement");
+                            setGenerateReportModalOpen(true);
+                          }}
                         >
                           Generate Measurement Report
                         </MenuItem>
@@ -9444,6 +9450,7 @@ export default function HomePage() {
         API_BASE={API_BASE}
         works={worksList}
         defaultWorkId={selectedProjectId}
+        reportType={generateReportType}
       />
       <UserProfileModal
         open={profileOpen}

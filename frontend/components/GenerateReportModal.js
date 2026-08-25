@@ -24,6 +24,7 @@ export default function GenerateReportModal({
   API_BASE,
   works, // [{ MasterWorkId, WorkName }, ...]
   defaultWorkId, // optional — pre-select whatever Work the user already has selected
+  reportType = "abstract", // "abstract" | "measurement"
 }) {
   const [allSubWorks, setAllSubWorks] = useState([]);
   const [loadingSubWorks, setLoadingSubWorks] = useState(false);
@@ -101,6 +102,14 @@ export default function GenerateReportModal({
       )
     : [];
 
+  const isMeasurement = reportType === "measurement";
+  const reportTitle = isMeasurement
+    ? "Generate Measurement Report"
+    : "Generate Abstract Report";
+  const reportHint = isMeasurement
+    ? "Pick a Work, then choose which sub work(s) to include. All sub works are selected by default."
+    : "Pick a Work, then choose which sub work(s) to include. Each sub work prints on its own page with a total at the end.";
+
   const handleGenerate = async () => {
     if (!selectedWorkId) {
       setError("Please select a Work first.");
@@ -109,30 +118,36 @@ export default function GenerateReportModal({
     setGenerating(true);
     setError("");
     try {
+      const endpoint = isMeasurement
+        ? "/api/generate-measurement-report"
+        : "/api/generate-report";
       const params = new URLSearchParams({
         projectId: Number(selectedWorkId),
         subWorkId: selectedSubWorkId, // "all" or a specific SubWorkId
       });
 
-      const res = await fetch(
-        `${API_BASE}/api/generate-report?${params.toString()}`,
-      );
+      const res = await fetch(`${API_BASE}${endpoint}?${params.toString()}`);
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.message || "Report generation failed.");
       }
 
-      const workName =
-        works?.find((w) => String(w.MasterWorkId) === String(selectedWorkId))
-          ?.WorkName || "Abstract";
-
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const safeName = workName.replace(/[^\w\-]+/g, "_");
-      a.download = `${safeName}_Abstract.pdf`;
+      const headerName = res.headers
+        .get("content-disposition")
+        ?.match(/filename="?([^"]+)"?/)?.[1];
+      const isAllSubWorks =
+        !selectedSubWorkId || selectedSubWorkId === "all";
+      const reportLabel = isMeasurement ? "MeasurementReport" : "AbstractReport";
+      a.download =
+        headerName ||
+        (isAllSubWorks
+          ? `Work-${selectedWorkId}-${reportLabel}.pdf`
+          : `Work-${selectedWorkId}-SubWork-${selectedSubWorkId}-${reportLabel}.pdf`);
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -150,11 +165,10 @@ export default function GenerateReportModal({
       <ModalDialog sx={{ minWidth: 400 }}>
         <ModalClose />
         <Typography level="title-lg" sx={{ mb: 1 }}>
-          Generate Report
+          {reportTitle}
         </Typography>
         <Typography level="body-sm" sx={{ mb: 2, color: "neutral.500" }}>
-          Pick a Work, then choose which sub work(s) to include. Each sub work
-          prints on its own page with a total at the end.
+          {reportHint}
         </Typography>
 
         <Stack spacing={2}>
