@@ -80,6 +80,38 @@ export default function SignupPage() {
   const [loginNameHint, setLoginNameHint] = useState("");
   const [orgCodeHint, setOrgCodeHint] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [termsText, setTermsText] = useState("");
+  const [termsDeclaration, setTermsDeclaration] = useState(
+    "I have read, understood and agree to the above SoftChariot Trial Version Terms of Use & User Declaration.",
+  );
+  const [termsLoading, setTermsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadTerms = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/signup/terms`);
+        const data = await res.json();
+        if (!cancelled && data?.text) {
+          setTermsText(data.text);
+          if (data.declaration) setTermsDeclaration(data.declaration);
+        }
+      } catch {
+        if (!cancelled) {
+          setTermsText(
+            "Terms of Use could not be loaded. Please refresh the page and try again.",
+          );
+        }
+      } finally {
+        if (!cancelled) setTermsLoading(false);
+      }
+    };
+    loadTerms();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!individual.userLoginName.trim()) {
@@ -125,13 +157,17 @@ export default function SignupPage() {
 
   const onSubmitIndividual = async (e) => {
     e.preventDefault();
+    if (!acceptedTerms) {
+      setError("Please accept the Terms of Use & User Declaration to continue.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
       const res = await fetch(`${API_BASE}/api/signup/individual`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(individual),
+        body: JSON.stringify({ ...individual, acceptedTerms: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Signup failed.");
@@ -152,13 +188,17 @@ export default function SignupPage() {
 
   const onSubmitOrganization = async (e) => {
     e.preventDefault();
+    if (!acceptedTerms) {
+      setError("Please accept the Terms of Use & User Declaration to continue.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
       const res = await fetch(`${API_BASE}/api/signup/organization`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(organization),
+        body: JSON.stringify({ ...organization, acceptedTerms: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Signup failed.");
@@ -185,7 +225,7 @@ export default function SignupPage() {
         padding: 24,
       }}
     >
-      <div style={{ width: "100%", maxWidth: 520 }}>
+      <div style={{ width: "100%", maxWidth: 640 }}>
         <div style={{ textAlign: "center", marginBottom: 24 }}>
           <h1 style={{ margin: "0 0 8px", fontSize: 28 }}>New User Sign Up</h1>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
@@ -248,6 +288,7 @@ export default function SignupPage() {
           onClick={() => {
             setError("");
             setIndividual(emptyIndividual);
+            setAcceptedTerms(false);
             setStep("individual");
           }}
         >
@@ -259,6 +300,7 @@ export default function SignupPage() {
           onClick={() => {
             setError("");
             setOrganization(emptyOrganization);
+            setAcceptedTerms(false);
             setStep("organization");
           }}
         >
@@ -422,11 +464,59 @@ export default function SignupPage() {
               {individual.remarks.length}/200
             </span>
           </label>
+          <div
+            style={{
+              border: "1px solid #c8d4df",
+              borderRadius: 8,
+              padding: 12,
+              background: "#f7fafc",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+              Terms of Use & User Declaration {requiredStar}
+            </div>
+            <div
+              style={{
+                maxHeight: 220,
+                overflowY: "auto",
+                padding: 10,
+                background: "#fff",
+                border: "1px solid #dde5ec",
+                borderRadius: 6,
+                fontSize: 12,
+                lineHeight: 1.5,
+                whiteSpace: "pre-wrap",
+                color: "#24323f",
+              }}
+            >
+              {termsLoading ? "Loading terms…" : termsText}
+            </div>
+            <label
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "flex-start",
+                marginTop: 10,
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={acceptedTerms}
+                onChange={(e) => setAcceptedTerms(e.target.checked)}
+                required
+                style={{ marginTop: 3 }}
+              />
+              <span>{termsDeclaration}</span>
+            </label>
+          </div>
         </div>
         <div style={{ display: "grid", gap: 10, marginTop: 18 }}>
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !acceptedTerms || termsLoading}
             style={{
               ...primaryButtonStyle,
               cursor: loading ? "not-allowed" : "pointer",
@@ -545,11 +635,59 @@ export default function SignupPage() {
             {organization.remarks.length}/200
           </span>
         </label>
+        <div
+          style={{
+            border: "1px solid #c8d4df",
+            borderRadius: 8,
+            padding: 12,
+            background: "#f7fafc",
+          }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+            Terms of Use & User Declaration {requiredStar}
+          </div>
+          <div
+            style={{
+              maxHeight: 220,
+              overflowY: "auto",
+              padding: 10,
+              background: "#fff",
+              border: "1px solid #dde5ec",
+              borderRadius: 6,
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+              color: "#24323f",
+            }}
+          >
+            {termsLoading ? "Loading terms…" : termsText}
+          </div>
+          <label
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "flex-start",
+              marginTop: 10,
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              required
+              style={{ marginTop: 3 }}
+            />
+            <span>{termsDeclaration}</span>
+          </label>
+        </div>
       </div>
       <div style={{ display: "grid", gap: 10, marginTop: 18 }}>
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || !acceptedTerms || termsLoading}
           style={{
             ...primaryButtonStyle,
             cursor: loading ? "not-allowed" : "pointer",

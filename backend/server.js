@@ -5,6 +5,13 @@ const path = require("path");
 const { Pool, Client } = require("pg");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const PDFDocument = require("pdfkit");
+const {
+  TERMS_VERSION,
+  TERMS_OF_USE_TEXT,
+  TERMS_DECLARATION,
+  buildUserApprovalEmail,
+  buildOrganizationApprovalEmail,
+} = require("./termsOfUse");
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -1413,6 +1420,14 @@ app.put("/api/master-users/:id", async (req, res) => {
   }
 
   try {
+    const previous = await pool.query(
+      `SELECT "IsActive" FROM "MasterUser" WHERE "UserId" = $1`,
+      [userId],
+    );
+    const wasActive = previous.rows[0]
+      ? previous.rows[0].IsActive !== false && previous.rows[0].IsActive !== "f"
+      : true;
+
     const result = await pool.query(
       `UPDATE "MasterUser"
        SET "UserCategoryId" = $1,
@@ -1465,6 +1480,27 @@ app.put("/api/master-users/:id", async (req, res) => {
 
     if (!result.rows[0]) {
       return res.status(404).json({ message: "User not found." });
+    }
+
+    const nowActive =
+      result.rows[0].IsActive !== false && result.rows[0].IsActive !== "f";
+    if (!wasActive && nowActive && result.rows[0].UserEmail) {
+      const org = await pool.query(
+        `SELECT "OrgCode" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
+        [result.rows[0].OrganizationId],
+      );
+      const mail = buildUserApprovalEmail({
+        userName: result.rows[0].UserName,
+        loginName: result.rows[0].UserLoginName,
+        orgCode: org.rows[0]?.OrgCode,
+      });
+      await sendAppEmail({
+        to: result.rows[0].UserEmail,
+        cc: getApprovalCopyEmail(),
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+      });
     }
 
     return res.json({
@@ -7391,6 +7427,22 @@ async function ensureSignupSchema() {
     SET "IsActive" = true
     WHERE "IsActive" IS NULL
   `);
+  await pool.query(`
+    ALTER TABLE "MasterUser"
+      ADD COLUMN IF NOT EXISTS "TermsAcceptedAt" timestamptz
+  `);
+  await pool.query(`
+    ALTER TABLE "MasterUser"
+      ADD COLUMN IF NOT EXISTS "TermsVersion" text
+  `);
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      ADD COLUMN IF NOT EXISTS "TermsAcceptedAt" timestamptz
+  `);
+  await pool.query(`
+    ALTER TABLE "MasterOrganization"
+      ADD COLUMN IF NOT EXISTS "TermsVersion" text
+  `);
 
   await ensureMasterUserIdSequence();
   await ensureMasterOrganizationIdSequence();
@@ -7429,32 +7481,45 @@ function getEmailFromAddress() {
   return process.env.EMAIL_FROM || "noreply@softchariot.com";
 }
 
+function getApprovalCopyEmail() {
+  return (
+    process.env.APPROVAL_COPY_EMAIL ||
+    "softchariot@gmail.com"
+  );
+}
+
 /**
  * Send transactional email. Uses Resend if RESEND_API_KEY is set;
  * otherwise logs (signup still succeeds).
  */
-async function sendAppEmail({ to, subject, text, html }) {
+async function sendAppEmail({ to, cc, subject, text, html }) {
   const recipients = Array.isArray(to) ? to : [to];
   const filtered = recipients.map((t) => String(t || "").trim()).filter(Boolean);
   if (!filtered.length) {
     return { sent: false, reason: "no_recipient" };
   }
+  const toLower = new Set(filtered.map((t) => t.toLowerCase()));
+  const ccList = (Array.isArray(cc) ? cc : cc ? [cc] : [])
+    .map((t) => String(t || "").trim())
+    .filter((t) => t && !toLower.has(t.toLowerCase()));
 
   const resendKey = process.env.RESEND_API_KEY;
   if (resendKey) {
+    const payload = {
+      from: getEmailFromAddress(),
+      to: filtered,
+      subject,
+      text,
+      html: html || undefined,
+    };
+    if (ccList.length) payload.cc = ccList;
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${resendKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: getEmailFromAddress(),
-        to: filtered,
-        subject,
-        text,
-        html: html || undefined,
-      }),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) {
       const body = await response.text();
@@ -7466,6 +7531,7 @@ async function sendAppEmail({ to, subject, text, html }) {
 
   console.log("[email not configured — logged only]", {
     to: filtered,
+    cc: ccList,
     subject,
     text,
   });
@@ -7527,6 +7593,14 @@ async function resolveIndividualSignupDefaults() {
     designationId,
   };
 }
+
+app.get("/api/signup/terms", (_req, res) => {
+  return res.json({
+    version: TERMS_VERSION,
+    declaration: TERMS_DECLARATION,
+    text: TERMS_OF_USE_TEXT,
+  });
+});
 
 app.get("/api/signup/check-login-name", async (req, res) => {
   const name = String(req.query.name || "").trim();
@@ -7591,6 +7665,7 @@ app.post("/api/signup/individual", async (req, res) => {
     userContact,
     userEmail,
     remarks,
+    acceptedTerms,
   } = req.body || {};
 
   if (!userLoginName || !String(userLoginName).trim()) {
@@ -7610,6 +7685,11 @@ app.post("/api/signup/individual", async (req, res) => {
   }
   if (!userEmail || !String(userEmail).trim()) {
     return res.status(400).json({ message: "Email is required." });
+  }
+  if (acceptedTerms !== true) {
+    return res.status(400).json({
+      message: "You must accept the Terms of Use & User Declaration to continue.",
+    });
   }
   const remarksText = remarks ? String(remarks).trim() : "";
   if (remarksText.length > 200) {
@@ -7636,10 +7716,11 @@ app.post("/api/signup/individual", async (req, res) => {
       `INSERT INTO "MasterUser"
         ("UserCategoryId", "OrganizationId", "DesignationId", "UserLoginName",
          "UserName", "UserAddress", "UserContact", "UserEmail",
-         "MarkForDeletion", "UserPWD", "IsActive", "Remarks")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,$9,false,$10)
+         "MarkForDeletion", "UserPWD", "IsActive", "Remarks",
+         "TermsAcceptedAt", "TermsVersion")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,$9,false,$10,NOW(),$11)
        RETURNING "UserId", "UserLoginName", "UserName", "UserEmail", "IsActive",
-                 "OrganizationId", "Remarks"`,
+                 "OrganizationId", "Remarks", "TermsAcceptedAt", "TermsVersion"`,
       [
         defaults.userCategoryId,
         defaults.organizationId,
@@ -7651,6 +7732,7 @@ app.post("/api/signup/individual", async (req, res) => {
         String(userEmail).trim(),
         String(userPWD),
         remarksText || null,
+        TERMS_VERSION,
       ],
     );
 
@@ -7693,8 +7775,15 @@ app.post("/api/signup/individual", async (req, res) => {
 });
 
 app.post("/api/signup/organization", async (req, res) => {
-  const { orgName, orgAddress, orgCode, orgContact, orgEmail, remarks } =
-    req.body || {};
+  const {
+    orgName,
+    orgAddress,
+    orgCode,
+    orgContact,
+    orgEmail,
+    remarks,
+    acceptedTerms,
+  } = req.body || {};
 
   if (!orgName || !String(orgName).trim()) {
     return res.status(400).json({ message: "Organization Name is required." });
@@ -7714,6 +7803,11 @@ app.post("/api/signup/organization", async (req, res) => {
   }
   if (!orgEmail || !String(orgEmail).trim()) {
     return res.status(400).json({ message: "Email is required." });
+  }
+  if (acceptedTerms !== true) {
+    return res.status(400).json({
+      message: "You must accept the Terms of Use & User Declaration to continue.",
+    });
   }
   const remarksText = remarks ? String(remarks).trim() : "";
   if (remarksText.length > 200) {
@@ -7740,16 +7834,17 @@ app.post("/api/signup/organization", async (req, res) => {
     const result = await pool.query(
       `INSERT INTO "MasterOrganization"
         ("OrgCode", "OrgName", "OrgAddress", "OrgEmail", "OrgContact",
-         "IsActive")
-       VALUES ($1,$2,$3,$4,$5,false)
+         "IsActive", "TermsAcceptedAt", "TermsVersion")
+       VALUES ($1,$2,$3,$4,$5,false,NOW(),$6)
        RETURNING "OrganizationId", "OrgCode", "OrgName", "OrgEmail",
-                 "OrgContact", "IsActive"`,
+                 "OrgContact", "IsActive", "TermsAcceptedAt", "TermsVersion"`,
       [
         code,
         String(orgName).trim(),
         String(orgAddress).trim(),
         String(orgEmail).trim(),
         String(orgContact).trim(),
+        TERMS_VERSION,
       ],
     );
 
@@ -7833,20 +7928,17 @@ app.post("/api/signup/approve-user/:userId", async (req, res) => {
       [row.OrganizationId],
     );
     if (row.UserEmail) {
+      const mail = buildUserApprovalEmail({
+        userName: row.UserName,
+        loginName: row.UserLoginName,
+        orgCode: org.rows[0]?.OrgCode,
+      });
       await sendAppEmail({
         to: row.UserEmail,
-        subject: "Your SoftChariot account is approved",
-        text: [
-          `Hello ${row.UserName || row.UserLoginName},`,
-          "",
-          "Your SoftChariot account has been approved. You can now sign in.",
-          "",
-          `Organization code: ${org.rows[0]?.OrgCode || "INDIV"}`,
-          `User name: ${row.UserLoginName}`,
-          "",
-          "Thank you,",
-          "SoftChariot",
-        ].join("\n"),
+        cc: getApprovalCopyEmail(),
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
       });
     }
 
@@ -7901,18 +7993,15 @@ app.post("/api/signup/approve-organization/:organizationId", async (req, res) =>
 
     const row = result.rows[0];
     if (row.OrgEmail) {
+      const mail = buildOrganizationApprovalEmail({
+        orgName: row.OrgName,
+        orgCode: row.OrgCode,
+      });
       await sendAppEmail({
         to: row.OrgEmail,
-        subject: "Your SoftChariot organization is approved",
-        text: [
-          `Hello,`,
-          "",
-          `Organization "${row.OrgName}" (${row.OrgCode}) has been approved.`,
-          "SuperAdmin will create user accounts for your organization, or contact SoftChariot for next steps.",
-          "",
-          "Thank you,",
-          "SoftChariot",
-        ].join("\n"),
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
       });
     }
 
