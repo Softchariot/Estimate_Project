@@ -12,9 +12,16 @@ const {
   buildUserApprovalEmail,
   buildOrganizationApprovalEmail,
 } = require("./termsOfUse");
+const {
+  ensureUserLogTrackSchema,
+  openUserLogSession,
+  closeUserLogSession,
+  heartbeatUserLogSession,
+} = require("./userLogTrack");
 
 const app = express();
 const port = process.env.PORT || 4000;
+app.set("trust proxy", true);
 
 // const allowedOrigins = ("https://estimate-project-omega.vercel.app/" || "http://localhost:3000" || "http://127.0.0.1:3000")
 //   .split(",")
@@ -47,6 +54,28 @@ const pool = new Pool({
   connectionString,
   ssl: needsSsl ? { rejectUnauthorized: false } : false,
 });
+
+pool.on("connect", (client) => {
+  client.query("SET TIME ZONE 'Asia/Kolkata'");
+});
+
+function isSessionUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    String(value || "")
+  );
+}
+
+async function jsonLoginUser(req, res, user) {
+  delete user.UserPWD;
+  delete user.OrgIsActive;
+  try {
+    const session = await openUserLogSession(pool, req, user);
+    user.SessionId = session.sessionId;
+  } catch (err) {
+    console.error("UserLogTrack login insert failed:", err);
+  }
+  return res.json(user);
+}
 
 /** Convert a whole-rupee amount to Indian currency words. */
 function amountInIndianWords(amount) {
@@ -3172,9 +3201,7 @@ app.post("/api/auth/login", async (req, res) => {
         .json({ message: "Invalid user name or password." });
     }
 
-    delete user.UserPWD;
-    delete user.OrgIsActive;
-    return res.json(user);
+    return jsonLoginUser(req, res, user);
   } catch (error) {
     console.error("Login error:", error);
     // Fallback without Org IsActive column
@@ -3226,8 +3253,7 @@ app.post("/api/auth/login", async (req, res) => {
             .status(401)
             .json({ message: "Invalid user name or password." });
         }
-        delete user.UserPWD;
-        return res.json(user);
+        return jsonLoginUser(req, res, user);
       } catch (err2) {
         return res.status(500).json({ message: err2.message });
       }
@@ -3238,6 +3264,106 @@ app.post("/api/auth/login", async (req, res) => {
           "UserPWD column is missing. Run database/add_master_user_pwd.sql on your database.",
       });
     }
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  const sessionId = req.body?.sessionId;
+  const requested = String(req.body?.reason || "UserLogout");
+  let status = "LoggedOut";
+  let reason = "UserLogout";
+  if (requested === "SessionExpired") {
+    status = "Expired";
+    reason = "SessionExpired";
+  }
+  if (!isSessionUuid(sessionId)) {
+    return res.status(400).json({ message: "Valid sessionId is required." });
+  }
+  try {
+    await closeUserLogSession(pool, sessionId, status, reason);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Logout track error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.post("/api/auth/session-heartbeat", async (req, res) => {
+  const sessionId = req.body?.sessionId;
+  if (!isSessionUuid(sessionId)) {
+    return res.status(400).json({ message: "Valid sessionId is required." });
+  }
+  try {
+    const result = await heartbeatUserLogSession(pool, sessionId);
+    if (!result.ok) {
+      return res.status(401).json({ message: "Session expired." });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Heartbeat error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.get("/api/user-log-track", async (req, res) => {
+  const organizationId = Number(req.query.organizationId);
+  const userId = Number(req.query.userId);
+  if (!organizationId) {
+    return res.status(400).json({ message: "Organization is required." });
+  }
+
+  try {
+    const org = await pool.query(
+      `SELECT "OrganizationId", "OrgName"
+       FROM "MasterOrganization"
+       WHERE "OrganizationId" = $1`,
+      [organizationId],
+    );
+    if (!org.rows[0]) {
+      return res.status(404).json({ message: "Organization not found." });
+    }
+
+    let selectedUserName = null;
+    if (userId) {
+      const foundUser = await pool.query(
+        `SELECT "UserId", "UserName", "OrganizationId"
+         FROM "MasterUser"
+         WHERE "UserId" = $1
+           AND COALESCE("MarkForDeletion", false) = false`,
+        [userId],
+      );
+      if (!foundUser.rows[0]) {
+        return res.status(404).json({ message: "User not found." });
+      }
+      if (Number(foundUser.rows[0].OrganizationId) !== organizationId) {
+        return res.status(400).json({
+          message: "Selected user does not belong to this organization.",
+        });
+      }
+      selectedUserName = foundUser.rows[0].UserName;
+    }
+
+    const result = await pool.query(
+      `SELECT t."UserLogTrackId", t."UserId", u."UserName",
+              t."LoginDateTime", t."LogoutDateTime",
+              t."Latitude", t."Longitude",
+              t."SessionStatus", t."DeviceType", t."Browser"
+       FROM public."UserLogTrack" t
+       INNER JOIN public."MasterUser" u ON u."UserId" = t."UserId"
+       WHERE t."OrganizationId" = $1
+         AND ($2::bigint IS NULL OR t."UserId" = $2)
+       ORDER BY t."LoginDateTime" DESC`,
+      [organizationId, userId || null],
+    );
+
+    return res.json({
+      organizationName: org.rows[0].OrgName,
+      userName: selectedUserName,
+      rows: result.rows,
+    });
+  } catch (error) {
+    console.error("User log track load error:", error);
     return res.status(500).json({ message: error.message });
   }
 });
@@ -8032,6 +8158,7 @@ app.listen(port, async () => {
     await ensureMasterItemUserId();
     await ensureWorkEstimateSequences();
     await ensureSignupSchema();
+    await ensureUserLogTrackSchema(pool);
   } catch (err) {
     console.error("Failed to ensure schema:", err);
   }

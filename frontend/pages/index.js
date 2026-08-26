@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
@@ -61,6 +61,36 @@ const requiredStar = (
   <span style={{ color: "#cc2222", fontWeight: 700 }}>*</span>
 );
 
+function requestBrowserLocation() {
+  return new Promise((resolve) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 4000);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        clearTimeout(timer);
+        finish({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+        });
+      },
+      () => {
+        clearTimeout(timer);
+        finish(null);
+      },
+      { enableHighAccuracy: false, timeout: 3500, maximumAge: 600000 }
+    );
+  });
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [orgCode, setOrgCode] = useState("");
@@ -70,6 +100,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const geoRef = useRef(null);
 
   useEffect(() => {
     const saved = sessionStorage.getItem(SESSION_KEY);
@@ -82,6 +113,20 @@ export default function LoginPage() {
       }
     }
   }, [router]);
+
+  useEffect(() => {
+    if (!organization) {
+      geoRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    requestBrowserLocation().then((geo) => {
+      if (!cancelled) geoRef.current = geo;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [organization]);
 
   const onValidateOrganization = async (e) => {
     e.preventDefault();
@@ -114,10 +159,17 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
+      const geo = geoRef.current || (await requestBrowserLocation());
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orgCode, userLoginName, password }),
+        body: JSON.stringify({
+          orgCode,
+          userLoginName,
+          password,
+          latitude: geo?.latitude ?? null,
+          longitude: geo?.longitude ?? null,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Login failed.");
@@ -165,7 +217,7 @@ export default function LoginPage() {
               fontWeight: 500,
             }}
           >
-            Trial Version 1.11 Release 25 Aug 26
+            Trial Version 1.11 Release 26 Aug 26
           </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization

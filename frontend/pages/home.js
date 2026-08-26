@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import Head from "next/head";
 import { useRouter } from "next/router";
 import axios from "axios";
@@ -21,6 +21,9 @@ const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
+const SESSION_IDLE_SECONDS = 120;
+const SESSION_WARNING_SECONDS = 105;
+const SESSION_HEARTBEAT_MS = 10000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — drafting-paper / blueprint palette, tuned to an
@@ -86,6 +89,12 @@ const superAdminMenu = [
     label: "Print SSR",
     status: "active",
     icon: "🖨",
+  },
+  {
+    id: "user-track",
+    label: "User Track Record",
+    status: "active",
+    icon: "📍",
   },
 ];
 
@@ -175,6 +184,22 @@ function toDateInputValue(value) {
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function formatIndiaDateTime(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(d);
 }
 
 function formatRupees(value) {
@@ -522,6 +547,9 @@ function EmptyRow({ colSpan, children }) {
 export default function HomePage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState(null);
+  const [idleSecondsLeft, setIdleSecondsLeft] = useState(null);
+  const markSessionActivityRef = useRef(() => {});
+  const sessionExpiringRef = useRef(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [activeMaster, setActiveMaster] = useState("items");
   const [regionForm, setRegionForm] = useState(initialRegionForm);
@@ -664,6 +692,13 @@ export default function HomePage() {
   const [printSsrSubCategoryId, setPrintSsrSubCategoryId] = useState("");
   const [printSsrSubCategories, setPrintSsrSubCategories] = useState([]);
   const [printingSsr, setPrintingSsr] = useState(false);
+  const [userTrackOrgId, setUserTrackOrgId] = useState("");
+  const [userTrackUserId, setUserTrackUserId] = useState("");
+  const [userTrackUsers, setUserTrackUsers] = useState([]);
+  const [userTrackRows, setUserTrackRows] = useState([]);
+  const [userTrackOrgName, setUserTrackOrgName] = useState("");
+  const [userTrackUserName, setUserTrackUserName] = useState("");
+  const [loadingUserTrack, setLoadingUserTrack] = useState(false);
 
   // Which items in the Checked Items tab have their panel open (tied to checkbox)
   const [checkedForMeasurement, setCheckedForMeasurement] = useState(new Set());
@@ -1874,6 +1909,53 @@ export default function HomePage() {
     } catch (error) {
       console.error(error);
       setProjectFormOrgUsers([]);
+    }
+  };
+
+  const loadUserTrackUsers = async (organizationId) => {
+    if (!organizationId) {
+      setUserTrackUsers([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId },
+      });
+      if (res.status === 200) {
+        setUserTrackUsers(Array.isArray(res.data) ? res.data : []);
+      }
+    } catch (error) {
+      console.error(error);
+      setUserTrackUsers([]);
+    }
+  };
+
+  const loadUserTrackRecord = async (organizationId, userId) => {
+    if (!organizationId) {
+      setUserTrackRows([]);
+      setUserTrackOrgName("");
+      setUserTrackUserName("");
+      return;
+    }
+    setLoadingUserTrack(true);
+    try {
+      const params = { organizationId };
+      if (userId) params.userId = userId;
+      const res = await axios.get(`${API_BASE}/api/user-log-track`, {
+        params,
+      });
+      setUserTrackRows(Array.isArray(res.data?.rows) ? res.data.rows : []);
+      setUserTrackOrgName(res.data?.organizationName || "");
+      setUserTrackUserName(res.data?.userName || "");
+    } catch (error) {
+      setUserTrackRows([]);
+      setUserTrackOrgName("");
+      setUserTrackUserName("");
+      setMessage(
+        `User Track Record load failed: ${error.response?.data?.message || error.message}`,
+      );
+    } finally {
+      setLoadingUserTrack(false);
     }
   };
 
@@ -3394,15 +3476,133 @@ export default function HomePage() {
     }
   }, [activeMaster, currentUser?.UserId]);
 
+  useEffect(() => {
+    if (activeMaster !== "user-track") return;
+    if (!userTrackOrgId) {
+      setUserTrackRows([]);
+      setUserTrackOrgName("");
+      setUserTrackUserName("");
+      return;
+    }
+    loadUserTrackRecord(userTrackOrgId, userTrackUserId);
+  }, [activeMaster, userTrackOrgId, userTrackUserId]);
+
   const onLogout = () => {
+    closeTrackedSession("UserLogout").finally(clearLocalSession);
+  };
+
+  const clearLocalSession = () => {
     sessionStorage.removeItem(SESSION_KEY);
     setCurrentUser(null);
     setProfileOpen(false);
+    setIdleSecondsLeft(null);
     router.replace("/");
   };
 
+  const closeTrackedSession = async (reason) => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY);
+      const sessionId =
+        currentUser?.SessionId ||
+        (saved ? JSON.parse(saved)?.SessionId : null);
+      if (!sessionId) return;
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, reason }),
+        keepalive: true,
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const expireIdleSession = async () => {
+    if (sessionExpiringRef.current) return;
+    sessionExpiringRef.current = true;
+    await closeTrackedSession("SessionExpired");
+    clearLocalSession();
+  };
+
+  useEffect(() => {
+    if (!currentUser) return;
+    sessionExpiringRef.current = false;
+    const idleMs = SESSION_IDLE_SECONDS * 1000;
+    const warnMs = SESSION_WARNING_SECONDS * 1000;
+    let lastActivity = Date.now();
+    let lastHeartbeat = 0;
+    let warningVisible = false;
+    const sessionId = currentUser.SessionId;
+
+    const sendHeartbeat = () => {
+      if (!sessionId) return;
+      const now = Date.now();
+      if (now - lastHeartbeat < SESSION_HEARTBEAT_MS) return;
+      lastHeartbeat = now;
+      fetch(`${API_BASE}/api/auth/session-heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      })
+        .then((res) => {
+          if (res.status === 401) {
+            expireIdleSession();
+          }
+        })
+        .catch(() => {});
+    };
+
+    const bump = (event) => {
+      if (warningVisible && event?.type === "mousemove") return;
+      lastActivity = Date.now();
+      warningVisible = false;
+      setIdleSecondsLeft((prev) => (prev == null ? prev : null));
+      sendHeartbeat();
+    };
+    markSessionActivityRef.current = bump;
+
+    const events = [
+      "mousedown",
+      "mousemove",
+      "keydown",
+      "scroll",
+      "touchstart",
+      "click",
+    ];
+    events.forEach((name) =>
+      window.addEventListener(name, bump, { passive: true, capture: true })
+    );
+
+    const tick = window.setInterval(() => {
+      const idle = Date.now() - lastActivity;
+      if (idle >= idleMs) {
+        expireIdleSession();
+        return;
+      }
+      if (idle >= warnMs) {
+        warningVisible = true;
+        const left = Math.max(1, Math.ceil((idleMs - idle) / 1000));
+        setIdleSecondsLeft((prev) => (prev === left ? prev : left));
+      }
+    }, 250);
+
+    sendHeartbeat();
+
+    return () => {
+      events.forEach((name) =>
+        window.removeEventListener(name, bump, { capture: true })
+      );
+      window.clearInterval(tick);
+      markSessionActivityRef.current = () => {};
+    };
+  }, [currentUser?.SessionId, currentUser?.UserId]);
+
   const onProfileSaved = (data) => {
-    const nextUser = { ...currentUser, ...data };
+    const nextUser = {
+      ...currentUser,
+      ...data,
+      SessionId: currentUser?.SessionId,
+    };
     setCurrentUser(nextUser);
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(nextUser));
   };
@@ -4174,6 +4374,100 @@ export default function HomePage() {
           rel="stylesheet"
         />
       </Head>
+
+      {idleSecondsLeft != null && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="idle-timeout-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 5000,
+            background: "rgba(15, 42, 68, 0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              maxWidth: 420,
+              background: "#fff",
+              borderRadius: 12,
+              border: "1px solid #E1DCCC",
+              boxShadow: "0 16px 48px rgba(19, 35, 57, 0.28)",
+              padding: "28px 28px 22px",
+              textAlign: "center",
+            }}
+          >
+            <div
+              id="idle-timeout-title"
+              style={{
+                fontWeight: 700,
+                fontSize: 18,
+                color: "#132339",
+                marginBottom: 8,
+              }}
+            >
+              Session expiring
+            </div>
+            <p
+              style={{
+                margin: "0 0 18px",
+                color: "#5B6B7C",
+                fontSize: 14,
+                lineHeight: 1.5,
+              }}
+            >
+              You have been idle. You will be logged out in
+            </p>
+            <div
+              style={{
+                fontFamily: theme.font.mono,
+                fontSize: 48,
+                fontWeight: 600,
+                color: "#C2410C",
+                lineHeight: 1,
+                marginBottom: 20,
+              }}
+            >
+              {idleSecondsLeft}
+              <span
+                style={{
+                  display: "block",
+                  marginTop: 6,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: "#5B6B7C",
+                  fontFamily: theme.font.display,
+                }}
+              >
+                second{idleSecondsLeft === 1 ? "" : "s"}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => markSessionActivityRef.current()}
+              style={{
+                width: "100%",
+                padding: "11px 16px",
+                borderRadius: 8,
+                border: "none",
+                background: theme.colors.accent,
+                color: "#fff",
+                fontWeight: 600,
+                fontSize: 14,
+                cursor: "pointer",
+              }}
+            >
+              Continue working
+            </button>
+          </div>
+        </div>
+      )}
 
       <style jsx global>{`
         * {
@@ -6609,6 +6903,138 @@ export default function HomePage() {
                   {printingSsr ? "Printing…" : "Print SSR"}
                 </PrimaryButton>
               </div>
+            </Card>
+          )}
+
+          {/* ── User Track Record ── */}
+          {activeMaster === "user-track" && isSuperAdmin && (
+            <Card
+              eyebrow="Reports · User Track"
+              title="User Track Record"
+              subtitle="Select an organization, optionally a user, and view session log history in India Standard Time."
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 14,
+                }}
+              >
+                <Field label="Select Organization" required>
+                  <select
+                    value={userTrackOrgId}
+                    onChange={(e) => {
+                      const orgId = e.target.value;
+                      setUserTrackOrgId(orgId);
+                      setUserTrackUserId("");
+                      loadUserTrackUsers(orgId);
+                    }}
+                    style={inputStyle}
+                  >
+                    <option value="">Select Organization</option>
+                    {organizations.map((org) => (
+                      <option
+                        key={org.OrganizationId}
+                        value={org.OrganizationId}
+                      >
+                        {org.OrgName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field label="Select User">
+                  <select
+                    value={userTrackUserId}
+                    onChange={(e) => setUserTrackUserId(e.target.value)}
+                    disabled={!userTrackOrgId}
+                    style={inputStyle}
+                  >
+                    <option value="">
+                      {userTrackOrgId
+                        ? "All Users"
+                        : "Select Organization first"}
+                    </option>
+                    {userTrackUsers.map((u) => (
+                      <option key={u.UserId} value={u.UserId}>
+                        {u.UserName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+
+              {userTrackOrgId && (
+                <>
+                  <h3
+                    style={{
+                      margin: "22px 0 12px",
+                      fontSize: 18,
+                      color: theme.colors.ink,
+                    }}
+                  >
+                    User Log for{" "}
+                    {userTrackUserId
+                      ? userTrackUserName || "Selected User"
+                      : "All Users"}{" "}
+                    of {userTrackOrgName || "Organization"}
+                  </h3>
+                  <div style={{ overflowX: "auto" }}>
+                    <table className="wrms-table">
+                      <thead>
+                        <tr>
+                          <th>Sr.No.</th>
+                          {!userTrackUserId && <th>User Name</th>}
+                          <th>Login Time</th>
+                          <th>Logout Time</th>
+                          <th>Latitude</th>
+                          <th>Longitude</th>
+                          <th>SessionStatus</th>
+                          <th>Device Type</th>
+                          <th>Browser</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loadingUserTrack ? (
+                          <EmptyRow colSpan={userTrackUserId ? 8 : 9}>
+                            Loading session log…
+                          </EmptyRow>
+                        ) : userTrackRows.length ? (
+                          userTrackRows.map((row, index) => (
+                            <tr key={row.UserLogTrackId}>
+                              <td>{index + 1}</td>
+                              {!userTrackUserId && (
+                                <td>{row.UserName || "—"}</td>
+                              )}
+                              <td>{formatIndiaDateTime(row.LoginDateTime)}</td>
+                              <td>{formatIndiaDateTime(row.LogoutDateTime)}</td>
+                              <td>
+                                {row.Latitude === null ||
+                                row.Latitude === undefined
+                                  ? "—"
+                                  : row.Latitude}
+                              </td>
+                              <td>
+                                {row.Longitude === null ||
+                                row.Longitude === undefined
+                                  ? "—"
+                                  : row.Longitude}
+                              </td>
+                              <td>{row.SessionStatus || "—"}</td>
+                              <td>{row.DeviceType || "—"}</td>
+                              <td>{row.Browser || "—"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <EmptyRow colSpan={userTrackUserId ? 8 : 9}>
+                            No session log found for this selection.
+                          </EmptyRow>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
             </Card>
           )}
 
