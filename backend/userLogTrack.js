@@ -1,5 +1,14 @@
 const { randomUUID } = require("crypto");
 
+class ExistingUserSessionError extends Error {
+  constructor(deviceName) {
+    super(`You are already logged in on other device ${deviceName}`);
+    this.name = "ExistingUserSessionError";
+    this.code = "EXISTING_USER_SESSION";
+    this.deviceName = deviceName;
+  }
+}
+
 const IDLE_SECONDS = Math.max(
   15,
   Number(process.env.USER_SESSION_IDLE_SECONDS || 120)
@@ -190,6 +199,15 @@ function parseUserAgent(uaRaw) {
   };
 }
 
+function formatDeviceLabel(row) {
+  const name = String(row?.DeviceName || "").trim();
+  if (name) return name.slice(0, 100);
+  const parts = [row?.DeviceType, row?.Browser, row?.OperatingSystem]
+    .map((part) => String(part || "").trim())
+    .filter((part) => part && part !== "Unknown");
+  return (parts.join(" / ") || "Unknown").slice(0, 100);
+}
+
 async function columnSqlType(pool, tableName, columnName) {
   const result = await pool.query(
     `SELECT data_type
@@ -358,6 +376,26 @@ async function openUserLogSession(pool, req, user) {
 
   const sessionId = randomUUID();
   const parsed = parseUserAgent(req.headers["user-agent"]);
+  const deviceName = formatDeviceLabel({
+    DeviceType: parsed.DeviceType,
+    Browser: parsed.Browser,
+    OperatingSystem: parsed.OperatingSystem,
+  });
+
+  await expireStaleUserLogSessions(pool);
+
+  const existing = await pool.query(
+    `SELECT "DeviceName", "DeviceType", "Browser", "OperatingSystem"
+     FROM public."UserLogTrack"
+     WHERE "UserId" = $1
+       AND "SessionStatus" = 'Active'
+     ORDER BY "LoginDateTime" DESC
+     LIMIT 1`,
+    [userId]
+  );
+  if (existing.rows[0]) {
+    throw new ExistingUserSessionError(formatDeviceLabel(existing.rows[0]));
+  }
 
   let ipAddress = getClientIp(req);
   if (!ipAddress || isPrivateIp(ipAddress)) {
@@ -387,12 +425,12 @@ async function openUserLogSession(pool, req, user) {
        "LoginDateTime", "LastActivityDateTime",
        "IPAddress", "Latitude", "Longitude", "Location", "LocationSource",
        "UserAgent", "Browser", "OperatingSystem",
-       "DeviceType", "SessionStatus", "UpdatedAt"
+       "DeviceType", "DeviceName", "SessionStatus", "UpdatedAt"
      ) VALUES (
        $1, $2, $3, NOW(), NOW(),
        NULLIF($4::text, '')::inet, $5, $6, $7, $8,
        $9, $10, $11,
-       $12, 'Active', NOW()
+       $12, $13, 'Active', NOW()
      )`,
     [
       userId,
@@ -407,6 +445,7 @@ async function openUserLogSession(pool, req, user) {
       parsed.Browser,
       parsed.OperatingSystem,
       parsed.DeviceType,
+      deviceName,
     ]
   );
 
@@ -429,7 +468,26 @@ async function closeUserLogSession(pool, sessionId, status, reason) {
   return { closed: result.rowCount > 0 };
 }
 
+async function expireStaleUserLogSessions(pool) {
+  const result = await pool.query(
+    `UPDATE public."UserLogTrack"
+     SET "SessionStatus" = 'Expired',
+         "LogoutReason" = 'SessionExpired',
+         "LogoutDateTime" = LEAST(
+           NOW(),
+           "LastActivityDateTime" + make_interval(secs => $1)
+         ),
+         "UpdatedAt" = NOW()
+     WHERE "SessionStatus" = 'Active'
+       AND EXTRACT(EPOCH FROM (NOW() - "LastActivityDateTime")) > $1
+     RETURNING "UserLogTrackId"`,
+    [IDLE_SECONDS]
+  );
+  return { expired: result.rowCount };
+}
+
 async function heartbeatUserLogSession(pool, sessionId) {
+  await expireStaleUserLogSessions(pool);
   if (!sessionId) {
     return { ok: false, expired: false };
   }
@@ -467,10 +525,12 @@ async function heartbeatUserLogSession(pool, sessionId) {
 }
 
 module.exports = {
+  ExistingUserSessionError,
   IDLE_SECONDS,
   WARNING_SECONDS,
   ensureUserLogTrackSchema,
   openUserLogSession,
+  expireStaleUserLogSessions,
   closeUserLogSession,
   heartbeatUserLogSession,
 };

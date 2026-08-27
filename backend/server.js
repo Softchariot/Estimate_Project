@@ -15,8 +15,10 @@ const {
 const {
   ensureUserLogTrackSchema,
   openUserLogSession,
+  expireStaleUserLogSessions,
   closeUserLogSession,
   heartbeatUserLogSession,
+  ExistingUserSessionError,
 } = require("./userLogTrack");
 
 const app = express();
@@ -72,6 +74,9 @@ async function jsonLoginUser(req, res, user) {
     const session = await openUserLogSession(pool, req, user);
     user.SessionId = session.sessionId;
   } catch (err) {
+    if (err instanceof ExistingUserSessionError) {
+      return res.status(409).json({ message: err.message });
+    }
     console.error("UserLogTrack login insert failed:", err);
   }
   return res.json(user);
@@ -1316,7 +1321,7 @@ app.get("/api/master-users", async (req, res) => {
        LEFT JOIN "MasterDesignation" d ON d."DesignationId" = u."DesignationId"
        LEFT JOIN "MasterUserCategory" uc ON uc."UserCategoryId" = u."UserCategoryId"
        WHERE ($1::boolean = false OR u."OrganizationId" = $2)
-       ORDER BY COALESCE(u."DOrder", 999999), u."UserName"`,
+       ORDER BY u."OrganizationId" ASC, u."UserId" ASC`,
       [hasOrgFilter, hasOrgFilter ? organizationId : null],
     );
     return res.json(result.rows);
@@ -3324,6 +3329,8 @@ app.get("/api/user-log-track", async (req, res) => {
       return res.status(404).json({ message: "Organization not found." });
     }
 
+    await expireStaleUserLogSessions(pool);
+
     let selectedUserName = null;
     if (userId) {
       const foundUser = await pool.query(
@@ -4673,7 +4680,7 @@ app.get("/api/generate-report", async (req, res) => {
           doc.font("Helvetica").fontSize(9);
           doc.text(quantity.toFixed(3), colX.qty, rowTop, { width: 60 });
           doc.text(
-            `${money(rate)}/${item.UnitShortName || ""}`,
+            `${formatInrAmount(rate, { roundToRupee: false })}/${item.UnitShortName || ""}`,
             colX.rate,
             rowTop,
             { width: rateWidth },

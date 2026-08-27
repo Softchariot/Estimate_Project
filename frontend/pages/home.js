@@ -21,6 +21,7 @@ const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
+
 const SESSION_IDLE_SECONDS = 120;
 const SESSION_WARNING_SECONDS = 105;
 const SESSION_HEARTBEAT_MS = 10000;
@@ -200,6 +201,29 @@ function formatIndiaDateTime(value) {
     second: "2-digit",
     hour12: true,
   }).format(d);
+}
+
+function sortMasterUsers(rows) {
+  return [...rows].sort((a, b) => {
+    const orgCmp = Number(a.OrganizationId) - Number(b.OrganizationId);
+    if (orgCmp !== 0) return orgCmp;
+    return Number(a.UserId) - Number(b.UserId);
+  });
+}
+
+function sortOrganizationsByDOrder(rows) {
+  return [...rows].sort((a, b) => {
+    const da =
+      a.DOrder === null || a.DOrder === undefined || a.DOrder === ""
+        ? Number.POSITIVE_INFINITY
+        : Number(a.DOrder);
+    const db =
+      b.DOrder === null || b.DOrder === undefined || b.DOrder === ""
+        ? Number.POSITIVE_INFINITY
+        : Number(b.DOrder);
+    if (da !== db) return da - db;
+    return Number(a.OrganizationId) - Number(b.OrganizationId);
+  });
 }
 
 function formatRupees(value) {
@@ -2189,7 +2213,9 @@ export default function HomePage() {
         params: orgFilter ? { organizationId: orgFilter } : {},
       });
       if (res.status === 200) {
-        setMasterUsers(Array.isArray(res.data) ? res.data : []);
+        setMasterUsers(
+          sortMasterUsers(Array.isArray(res.data) ? res.data : []),
+        );
       }
     } catch (error) {
       setMessage(`User load failed: ${error.message}`);
@@ -6932,7 +6958,7 @@ export default function HomePage() {
                     style={inputStyle}
                   >
                     <option value="">Select Organization</option>
-                    {organizations.map((org) => (
+                    {sortOrganizationsByDOrder(organizations).map((org) => (
                       <option
                         key={org.OrganizationId}
                         value={org.OrganizationId}
