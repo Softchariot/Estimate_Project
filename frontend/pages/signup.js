@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
 
@@ -81,6 +81,8 @@ export default function SignupPage() {
   const [orgCodeHint, setOrgCodeHint] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [orgSoonMessage, setOrgSoonMessage] = useState("");
+  const orgSoonTimerRef = useRef(null);
   const [termsText, setTermsText] = useState("");
   const [termsDeclaration, setTermsDeclaration] = useState(
     "I have read, understood and agree to the above SoftChariot Trial Version Terms of Use & User Declaration.",
@@ -110,6 +112,7 @@ export default function SignupPage() {
     loadTerms();
     return () => {
       cancelled = true;
+      if (orgSoonTimerRef.current) clearTimeout(orgSoonTimerRef.current);
     };
   }, []);
 
@@ -287,6 +290,7 @@ export default function SignupPage() {
           style={{ ...primaryButtonStyle, cursor: "pointer" }}
           onClick={() => {
             setError("");
+            setOrgSoonMessage("");
             setIndividual(emptyIndividual);
             setAcceptedTerms(false);
             setStep("individual");
@@ -296,16 +300,44 @@ export default function SignupPage() {
         </button>
         <button
           type="button"
-          style={{ ...secondaryButtonStyle }}
+          aria-disabled="true"
+          style={{
+            ...secondaryButtonStyle,
+            background: "#f4f6f8",
+            color: "#8a97a3",
+            borderColor: "#d5dde4",
+            cursor: "not-allowed",
+            opacity: 0.85,
+          }}
           onClick={() => {
             setError("");
-            setOrganization(emptyOrganization);
-            setAcceptedTerms(false);
-            setStep("organization");
+            setOrgSoonMessage("This Option will open Shortly");
+            if (orgSoonTimerRef.current) clearTimeout(orgSoonTimerRef.current);
+            orgSoonTimerRef.current = setTimeout(() => {
+              setOrgSoonMessage("");
+            }, 3500);
           }}
         >
           Looking to use this software in your Organization?
         </button>
+        {orgSoonMessage && (
+          <p
+            role="status"
+            style={{
+              margin: 0,
+              padding: "10px 14px",
+              background: "#fff8e8",
+              border: "1px solid #ecd9a8",
+              borderRadius: 6,
+              color: "#8a5a10",
+              fontSize: 14,
+              fontWeight: 600,
+              textAlign: "center",
+            }}
+          >
+            {orgSoonMessage}
+          </p>
+        )}
       </div>,
     );
   }
