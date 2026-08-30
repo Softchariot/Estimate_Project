@@ -991,6 +991,7 @@ function MeasurementPanel({
   subWorkId,
   API_BASE,
   onCommentSaved,
+  onMeasurementsSaved,
 }) {
   const apiBase =
     API_BASE ||
@@ -1342,6 +1343,9 @@ function MeasurementPanel({
         await reloadRows();
       } catch (reloadErr) {
         console.error("Failed to reload measurements:", reloadErr);
+      }
+      if (typeof onMeasurementsSaved === "function") {
+        onMeasurementsSaved(item.WorkAbstractId);
       }
     }
     if (failed) {

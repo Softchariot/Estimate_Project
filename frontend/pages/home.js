@@ -4208,24 +4208,29 @@ export default function HomePage() {
       Number(c.SSRRegionId) === Number(subCategoryForm.SSRRegionId),
   );
 
-  // Toggle measurement panel when the checkbox in Checked Items tab changes
+  // Toggle measurement panel when the checkbox in Checked Items tab changes.
+  // Only one item stays expanded so previous measurements collapse.
   const onCheckedItemToggle = (itemId, checked) => {
-    // keep updateSelectedItems in sync (original behaviour)
     if (checked) {
-      setUpdateSelectedItems((prev) => [...prev, itemId].sort());
+      setUpdateSelectedItems([itemId]);
+      setCheckedForMeasurement(new Set([itemId]));
     } else {
       setUpdateSelectedItems((prev) => prev.filter((id) => id !== itemId));
+      setCheckedForMeasurement((prev) => {
+        const next = new Set(prev);
+        next.delete(itemId);
+        return next;
+      });
     }
-    // show / hide measurement panel
+  };
+
+  const collapseCheckedItemMeasurements = (itemId) => {
     setCheckedForMeasurement((prev) => {
       const next = new Set(prev);
-      if (checked) {
-        next.add(itemId);
-      } else {
-        next.delete(itemId);
-      }
+      next.delete(itemId);
       return next;
     });
+    setUpdateSelectedItems((prev) => prev.filter((id) => id !== itemId));
   };
 
   const persistCheckedItemOrder = async (orderedList) => {
@@ -8681,7 +8686,9 @@ export default function HomePage() {
                         >
                           <span>📐</span>
                           <span>
-                            Check a row to open its measurement panel. Enter
+                            Check a row to open its measurement panel. Only one
+                            item stays open. After you save measurements that
+                            item collapses so you can go to the next. Enter
                             values or paste from Excel (Description | No | L |
                             B | H). Quantity is the product of No × L × B × H.
                           </span>
@@ -8840,6 +8847,11 @@ export default function HomePage() {
                                         projectId={selectedProjectId}
                                         subWorkId={selectedSubWorkId}
                                         API_BASE={API_BASE}
+                                        onMeasurementsSaved={() =>
+                                          collapseCheckedItemMeasurements(
+                                            item.WorkAbstractId,
+                                          )
+                                        }
                                         onCommentSaved={(workAbstractId, comment) => {
                                           setCheckedItemsList((prev) =>
                                             prev.map((row) =>

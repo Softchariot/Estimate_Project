@@ -69,6 +69,31 @@ const emptyOrganization = {
   remarks: "",
 };
 
+const USER_LOGIN_NAME_MAX = 20;
+const USER_ADDRESS_MAX = 100;
+const fieldErrorStyle = { fontWeight: 500, fontSize: 12, color: "#9b1c1c" };
+
+function getUserLoginNameError(value) {
+  const v = String(value ?? "");
+  if (!v) return "";
+  const hasSpace = /\s/.test(v);
+  const tooLong = v.length > USER_LOGIN_NAME_MAX;
+  if (hasSpace && tooLong) {
+    return "User Name must be at most 20 characters and cannot contain spaces.";
+  }
+  if (hasSpace) return "User Name cannot contain spaces.";
+  if (tooLong) return "User Name must be at most 20 characters.";
+  return "";
+}
+
+function getUserAddressError(value) {
+  const v = String(value ?? "");
+  if (v.length > USER_ADDRESS_MAX) {
+    return "Residential Address must be at most 100 characters.";
+  }
+  return "";
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const [step, setStep] = useState("choose"); // choose | individual | organization | done
@@ -116,8 +141,13 @@ export default function SignupPage() {
     };
   }, []);
 
+  const userLoginNameFormatError = getUserLoginNameError(
+    individual.userLoginName,
+  );
+  const userAddressFormatError = getUserAddressError(individual.userAddress);
+
   useEffect(() => {
-    if (!individual.userLoginName.trim()) {
+    if (!individual.userLoginName || userLoginNameFormatError) {
       setLoginNameHint("");
       return undefined;
     }
@@ -125,7 +155,7 @@ export default function SignupPage() {
       try {
         const res = await fetch(
           `${API_BASE}/api/signup/check-login-name?name=${encodeURIComponent(
-            individual.userLoginName.trim(),
+            individual.userLoginName,
           )}`,
         );
         const data = await res.json();
@@ -135,7 +165,7 @@ export default function SignupPage() {
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [individual.userLoginName]);
+  }, [individual.userLoginName, userLoginNameFormatError]);
 
   useEffect(() => {
     if (!organization.orgCode.trim()) {
@@ -162,6 +192,18 @@ export default function SignupPage() {
     e.preventDefault();
     if (!acceptedTerms) {
       setError("Please accept the Terms of Use & User Declaration to continue.");
+      return;
+    }
+    if (!individual.userLoginName) {
+      setError("User Name is required.");
+      return;
+    }
+    if (userLoginNameFormatError) {
+      setError(userLoginNameFormatError);
+      return;
+    }
+    if (userAddressFormatError) {
+      setError(userAddressFormatError);
       return;
     }
     setLoading(true);
@@ -351,7 +393,7 @@ export default function SignupPage() {
         </p>
         <div style={{ display: "grid", gap: 12 }}>
           <label style={labelStyle}>
-            User Name {requiredStar}
+            User Name (Max 20 Characters, with no space) {requiredStar}
             <input
               style={inputStyle}
               value={individual.userLoginName}
@@ -361,10 +403,16 @@ export default function SignupPage() {
               required
               autoFocus
             />
-            {loginNameHint && (
-              <span style={{ fontWeight: 500, fontSize: 12, color: "#5d6c7a" }}>
-                {loginNameHint}
-              </span>
+            {userLoginNameFormatError ? (
+              <span style={fieldErrorStyle}>{userLoginNameFormatError}</span>
+            ) : (
+              loginNameHint && (
+                <span
+                  style={{ fontWeight: 500, fontSize: 12, color: "#5d6c7a" }}
+                >
+                  {loginNameHint}
+                </span>
+              )
             )}
           </label>
           <label style={labelStyle}>
@@ -446,15 +494,19 @@ export default function SignupPage() {
             />
           </label>
           <label style={labelStyle}>
-            Residential Address {requiredStar}
+            Residential Address (Max 100 Characters) {requiredStar}
             <textarea
               style={{ ...inputStyle, minHeight: 72, resize: "vertical" }}
               value={individual.userAddress}
+              maxLength={USER_ADDRESS_MAX}
               onChange={(e) =>
                 setIndividual((p) => ({ ...p, userAddress: e.target.value }))
               }
               required
             />
+            {userAddressFormatError && (
+              <span style={fieldErrorStyle}>{userAddressFormatError}</span>
+            )}
           </label>
           <label style={labelStyle}>
             Mobile Contact {requiredStar}

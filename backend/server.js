@@ -4679,13 +4679,13 @@ app.get("/api/generate-report", async (req, res) => {
         if (!isParent) {
           doc.font("Helvetica").fontSize(9);
           doc.text(quantity.toFixed(3), colX.qty, rowTop, { width: 60 });
+          doc.font(rupeeFonts.regular).fontSize(9);
           doc.text(
             `${formatInrAmount(rate, { roundToRupee: false })}/${item.UnitShortName || ""}`,
             colX.rate,
             rowTop,
             { width: rateWidth },
           );
-          doc.font(rupeeFonts.regular).fontSize(9);
           doc.text(rupees(amount), colX.amount, rowTop, {
             width: amountWidth,
             align: "right",
@@ -6950,6 +6950,8 @@ app.post("/api/populate-work-materials", async (req, res) => {
         [itemId],
       );
 
+      const withCondition = (code, text) => `${code}: ${text}`;
+
       let isRA = false;
       let rateString = "";
       let finalRate = completedRate;
@@ -6961,43 +6963,59 @@ app.post("/api/populate-work-materials", async (req, res) => {
         if (regionId === 1) {
           // Percentage / LabourCess as percent points → divide by 100
           if (!applyLabourCess) {
-            // Labour Cess No:
+            // C1: Labour Cess No
             // FinalRate = CompletedRate + CompletedRate × (Percentage/100)
             finalRate =
               completedRate + completedRate * (percentage / 100);
-            rateString = `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`;
+            rateString = withCondition(
+              "C1",
+              `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`,
+            );
           } else {
-            // Labour Cess Yes:
+            // C2: Labour Cess Yes
             // FinalRate = CompletedRate
             //   + (CompletedRate − CompletedRate×(LabourCess/100)) × (Percentage/100)
             const rateAfterCess =
               completedRate - completedRate * (labourCess / 100);
             finalRate = completedRate + rateAfterCess * (percentage / 100);
-            rateString = `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`;
+            rateString = withCondition(
+              "C2",
+              `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`,
+            );
           }
         } else if (regionId === 2) {
           // Do NOT divide Percentage / LabourCess by 100 (use values as stored)
           if (!applyLabourCess) {
-            // Labour Cess No:
+            // C3: Labour Cess No
             // FinalRate = CompletedRate × Percentage
             finalRate = completedRate * percentage;
-            rateString = `Final Rate = (${formatNum(completedRate)} * ${formatNum(percentage)})`;
+            rateString = withCondition(
+              "C3",
+              `Final Rate = (${formatNum(completedRate)} * ${formatNum(percentage)})`,
+            );
           } else {
-            // Labour Cess Yes:
+            // C4: Labour Cess Yes
             // FinalRate = (CompletedRate − CompletedRate×(LabourCess/100)) × Percentage
             finalRate =
               (completedRate - completedRate * (labourCess / 100)) *
               percentage;
-            rateString = `Final Rate = ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)})`;
+            rateString = withCondition(
+              "C4",
+              `Final Rate = ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)})`,
+            );
           }
         } else {
+          // C5: any other region
           finalRate = completedRate;
-          rateString = `Final Rate = (${formatNum(completedRate)})`;
+          rateString = withCondition(
+            "C5",
+            `Final Rate = (${formatNum(completedRate)})`,
+          );
         }
       } else {
         isRA = true;
         rateAnalysisNo += 1;
-        rateString = `Rate Analysis No ${rateAnalysisNo}`;
+        let rateCondition = "C6";
 
         let sumAmount = 0;
         let materialSequence = 0;
@@ -7049,13 +7067,15 @@ app.post("/api/populate-work-materials", async (req, res) => {
           // ── ApplyLabourCess = NO (match Rate Analysis Report) ──
           // SubTotal = CompletedRate + sumAmount
           if (applyForLead) {
-            // Including Lead Charges: % on SubTotal
+            // C6: Including Lead Charges: % on SubTotal
             // FinalRate = (CompletedRate + sumAmount) * (1 + Percentage/100)
+            rateCondition = "C6";
             finalRate =
               (completedRate + sumAmount) * (1 + percentage / 100);
           } else {
-            // Excluding Lead Charges: % on Basic Rate only
+            // C7: Excluding Lead Charges: % on Basic Rate only
             // FinalRate = CompletedRate + sumAmount + CompletedRate*(Percentage/100)
+            rateCondition = "C7";
             finalRate =
               completedRate +
               sumAmount +
@@ -7068,19 +7088,25 @@ app.post("/api/populate-work-materials", async (req, res) => {
           const rateAfterCess =
             completedRate - completedRate * (labourCess / 100);
           if (applyForLead) {
-            // Including: % on (rateAfterCess + sumAmount)
+            // C8: Including: % on (rateAfterCess + sumAmount)
+            rateCondition = "C8";
             finalRate =
               completedRate +
               sumAmount +
               (rateAfterCess + sumAmount) * (percentage / 100);
           } else {
-            // Excluding: % on rateAfterCess only
+            // C9: Excluding: % on rateAfterCess only
+            rateCondition = "C9";
             finalRate =
               completedRate +
               sumAmount +
               rateAfterCess * (percentage / 100);
           }
         }
+        rateString = withCondition(
+          rateCondition,
+          `Rate Analysis No ${rateAnalysisNo}`,
+        );
       }
 
       await client.query(
@@ -7736,9 +7762,15 @@ app.get("/api/signup/terms", (_req, res) => {
 });
 
 app.get("/api/signup/check-login-name", async (req, res) => {
-  const name = String(req.query.name || "").trim();
-  if (!name) {
+  const name = String(req.query.name || "");
+  if (!name.trim()) {
     return res.status(400).json({ message: "User name is required.", available: false });
+  }
+  if (/\s/.test(name) || name.length > 20) {
+    return res.status(400).json({
+      available: false,
+      message: "User Name must be at most 20 characters and cannot contain spaces.",
+    });
   }
   try {
     const result = await pool.query(
@@ -7804,6 +7836,12 @@ app.post("/api/signup/individual", async (req, res) => {
   if (!userLoginName || !String(userLoginName).trim()) {
     return res.status(400).json({ message: "User Name is required." });
   }
+  const loginName = String(userLoginName);
+  if (/\s/.test(loginName) || loginName.length > 20) {
+    return res.status(400).json({
+      message: "User Name must be at most 20 characters and cannot contain spaces.",
+    });
+  }
   if (!userPWD || !String(userPWD).trim()) {
     return res.status(400).json({ message: "Password is required." });
   }
@@ -7812,6 +7850,11 @@ app.post("/api/signup/individual", async (req, res) => {
   }
   if (!userAddress || !String(userAddress).trim()) {
     return res.status(400).json({ message: "Residential Address is required." });
+  }
+  if (String(userAddress).trim().length > 100) {
+    return res.status(400).json({
+      message: "Residential Address must be at most 100 characters.",
+    });
   }
   if (!userContact || !String(userContact).trim()) {
     return res.status(400).json({ message: "Mobile Contact is required." });
