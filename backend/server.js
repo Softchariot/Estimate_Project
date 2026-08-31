@@ -20,6 +20,14 @@ const {
   heartbeatUserLogSession,
   ExistingUserSessionError,
 } = require("./userLogTrack");
+const {
+  ensureMasterMeasurementGroupSchema,
+  registerMeasurementGroupRoutes,
+} = require("./measurementGroups");
+const {
+  ensureWorkMeasurementGroupSchema,
+  registerWorkMeasurementGroupRoutes,
+} = require("./workMeasurementGroups");
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -56,6 +64,9 @@ const pool = new Pool({
   connectionString,
   ssl: needsSsl ? { rejectUnauthorized: false } : false,
 });
+
+registerMeasurementGroupRoutes(app, pool);
+registerWorkMeasurementGroupRoutes(app, pool);
 
 pool.on("connect", (client) => {
   client.query("SET TIME ZONE 'Asia/Kolkata'");
@@ -8209,6 +8220,8 @@ app.listen(port, async () => {
     await ensureWorkEstimateSequences();
     await ensureSignupSchema();
     await ensureUserLogTrackSchema(pool);
+    await ensureMasterMeasurementGroupSchema(pool);
+    await ensureWorkMeasurementGroupSchema(pool);
   } catch (err) {
     console.error("Failed to ensure schema:", err);
   }

@@ -14,6 +14,7 @@ import {
   MenuItem,
 } from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
+import WorkMeasurementGroupsPanel from "../components/WorkMeasurementGroupsPanel";
 import GenerateReportModal from "../components/GenerateReportModal";
 import UserProfileModal from "../components/UserProfileModal";
 
@@ -114,6 +115,12 @@ const allUsersMenu = [
   },
   { id: "works", label: "Work Master", status: "active", icon: "🏗" },
   { id: "sub-work", label: "Sub Work Master", status: "active", icon: "🧩" },
+  {
+    id: "measurement-groups",
+    label: "Add Measurement Groups",
+    status: "active",
+    icon: "📐",
+  },
   { id: "items", label: "Estimation", status: "active", icon: "📋" },
 ];
 
@@ -278,6 +285,29 @@ function canAccessItemMaster(user) {
     isSuperAdminUser(user) || isOrgAdminUser(user) || isIndvUserUser(user)
   );
 }
+
+/** Holding org for individual users (MasterOrganization.OrganizationId = 3). */
+const INDIVIDUAL_ORGANIZATION_ID = 3;
+const MEASUREMENT_GROUP_NAME_MAX = 50;
+const MEASUREMENT_GROUP_REMARKS_MAX = 200;
+const GROUP_NAME_CHANGE_WARNING =
+  "Changing the Name of this Group will affect the Names of Groups already referred here before…Better to add a New GroupName";
+
+function canAccessMeasurementGroups(user) {
+  if (isSuperAdminUser(user)) return true;
+  const orgId = Number(user?.OrganizationId);
+  if (!user || !Number.isFinite(orgId) || orgId <= 0) return false;
+  if (orgId === INDIVIDUAL_ORGANIZATION_ID) return true;
+  return isOrgAdminUser(user);
+}
+
+const initialMeasurementGroupForm = {
+  GroupName: "",
+  Percentage: "0",
+  IsActive: true,
+  Remarks: "",
+  Sequence: "",
+};
 
 const initialRegionForm = {
   SSRRegionName: "",
@@ -695,6 +725,20 @@ export default function HomePage() {
   const [updateSelectedItems, setUpdateSelectedItems] = useState([]);
   const [subWorkListDragId, setSubWorkListDragId] = useState(null);
   const [reorderingSubWorks, setReorderingSubWorks] = useState(false);
+  const [measurementGroupForm, setMeasurementGroupForm] = useState(
+    initialMeasurementGroupForm,
+  );
+  const [measurementGroupList, setMeasurementGroupList] = useState([]);
+  const [loadingMeasurementGroups, setLoadingMeasurementGroups] =
+    useState(false);
+  const [savingMeasurementGroup, setSavingMeasurementGroup] = useState(false);
+  const [editingMeasurementGroupId, setEditingMeasurementGroupId] =
+    useState(null);
+  const [groupNameLocked, setGroupNameLocked] = useState(false);
+  const [originalGroupName, setOriginalGroupName] = useState("");
+  const [measurementGroupDragId, setMeasurementGroupDragId] = useState(null);
+  const [reorderingMeasurementGroups, setReorderingMeasurementGroups] =
+    useState(false);
   const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
   const [generateReportType, setGenerateReportType] = useState("abstract");
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
@@ -1868,6 +1912,248 @@ export default function HomePage() {
     } finally {
       setSavingSubWork(false);
     }
+  };
+
+  const sessionUser = () =>
+    currentUser ||
+    JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+
+  const resetMeasurementGroupEdit = () => {
+    setEditingMeasurementGroupId(null);
+    setGroupNameLocked(false);
+    setOriginalGroupName("");
+    setMeasurementGroupForm(initialMeasurementGroupForm);
+  };
+
+  const loadMeasurementGroups = async (userOverride) => {
+    const user = userOverride || sessionUser();
+    if (!user?.UserId || !canAccessMeasurementGroups(user)) {
+      setMeasurementGroupList([]);
+      return;
+    }
+    setLoadingMeasurementGroups(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/measurement-groups`, {
+        params: { userId: user.UserId },
+      });
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      setMeasurementGroupList(rows);
+    } catch (err) {
+      setMeasurementGroupList([]);
+      setMessage(
+        `Measurement groups load failed: ${
+          err.response?.data?.message || err.message
+        }`,
+      );
+    } finally {
+      setLoadingMeasurementGroups(false);
+    }
+  };
+
+  const onMeasurementGroupChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    if (name === "IsActive") {
+      setMeasurementGroupForm((prev) => ({
+        ...prev,
+        IsActive: value === "true" || value === true || checked === true,
+      }));
+      return;
+    }
+    setMeasurementGroupForm((prev) => ({
+      ...prev,
+      [name]: type === "checkbox" ? checked : value,
+    }));
+  };
+
+  const requestGroupNameEdit = () => {
+    if (!editingMeasurementGroupId || !groupNameLocked) return;
+    if (window.confirm(GROUP_NAME_CHANGE_WARNING)) {
+      setGroupNameLocked(false);
+    }
+  };
+
+  const startMeasurementGroupEdit = (row) => {
+    setEditingMeasurementGroupId(row.GroupId);
+    setOriginalGroupName(row.GroupName || "");
+    setGroupNameLocked(true);
+    setMeasurementGroupForm({
+      GroupName: row.GroupName || "",
+      Percentage:
+        row.Percentage === null || row.Percentage === undefined
+          ? ""
+          : String(row.Percentage),
+      IsActive: row.IsActive !== false && row.IsActive !== "f",
+      Remarks: row.Remarks || "",
+      Sequence: row.Sequence ?? "",
+    });
+    setMessage("");
+  };
+
+  const onMeasurementGroupSubmit = async (e) => {
+    e.preventDefault();
+    const user = sessionUser();
+    if (!canAccessMeasurementGroups(user)) {
+      setMessage(
+        "Measurement group save failed: you are not permitted to manage these groups.",
+      );
+      return;
+    }
+    const groupName = String(measurementGroupForm.GroupName || "").trim();
+    if (!groupName) {
+      setMessage("Measurement group save failed: Group Name is required.");
+      return;
+    }
+    if (groupName.length > MEASUREMENT_GROUP_NAME_MAX) {
+      setMessage(
+        `Measurement group save failed: Group Name must be at most ${MEASUREMENT_GROUP_NAME_MAX} characters.`,
+      );
+      return;
+    }
+    const percentage = Number(measurementGroupForm.Percentage);
+    if (
+      measurementGroupForm.Percentage === "" ||
+      !Number.isFinite(percentage)
+    ) {
+      setMessage("Measurement group save failed: Percentage must be a number.");
+      return;
+    }
+    const remarks = String(measurementGroupForm.Remarks || "");
+    if (remarks.length > MEASUREMENT_GROUP_REMARKS_MAX) {
+      setMessage(
+        `Measurement group save failed: Remarks must be at most ${MEASUREMENT_GROUP_REMARKS_MAX} characters.`,
+      );
+      return;
+    }
+
+    const isEdit = Boolean(editingMeasurementGroupId);
+    const nameTaken = measurementGroupList.some(
+      (row) =>
+        String(row.GroupName || "").trim().toLowerCase() ===
+          groupName.toLowerCase() &&
+        Number(row.GroupId) !== Number(editingMeasurementGroupId || 0),
+    );
+    if (nameTaken) {
+      const orgId = Number(user?.OrganizationId);
+      setMessage(
+        orgId === INDIVIDUAL_ORGANIZATION_ID
+          ? `Measurement group save failed: Group Name “${groupName}” already exists for this user.`
+          : `Measurement group save failed: Group Name “${groupName}” already exists for this organization.`,
+      );
+      return;
+    }
+    if (
+      isEdit &&
+      groupNameLocked &&
+      groupName !== String(originalGroupName || "").trim()
+    ) {
+      setMessage(
+        "Unlock Group Name with the change warning before renaming this group.",
+      );
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Please review the details.\nDo you want to ${
+          isEdit ? "update this measurement group" : "save this new measurement group"
+        }?`,
+      )
+    ) {
+      setMessage("Save canceled. You can continue editing the form.");
+      return;
+    }
+
+    setSavingMeasurementGroup(true);
+    setMessage("");
+    const payload = {
+      userId: user.UserId,
+      groupName,
+      percentage,
+      isActive: Boolean(measurementGroupForm.IsActive),
+      remarks,
+    };
+    try {
+      const res = await fetch(
+        isEdit
+          ? `${API_BASE}/api/measurement-groups/${editingMeasurementGroupId}`
+          : `${API_BASE}/api/measurement-groups`,
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to save group.");
+      setMessage(
+        isEdit
+          ? "Measurement group updated successfully."
+          : "Measurement group saved successfully.",
+      );
+      resetMeasurementGroupEdit();
+      await loadMeasurementGroups(user);
+    } catch (error) {
+      setMessage(`Measurement group save failed: ${error.message}`);
+    } finally {
+      setSavingMeasurementGroup(false);
+    }
+  };
+
+  const persistMeasurementGroupOrder = async (orderedList) => {
+    const user = sessionUser();
+    if (!user?.UserId || !orderedList.length) return;
+    setReorderingMeasurementGroups(true);
+    try {
+      await axios.put(`${API_BASE}/api/measurement-groups/reorder`, {
+        userId: user.UserId,
+        orderedIds: orderedList.map((row) => row.GroupId),
+      });
+      setMeasurementGroupList(
+        orderedList.map((row, idx) => ({
+          ...row,
+          Sequence: idx + 1,
+        })),
+      );
+    } catch (err) {
+      console.error(err);
+      alert(
+        `Measurement group reorder failed: ${
+          err.response?.data?.message || err.message
+        }`,
+      );
+      loadMeasurementGroups(user);
+    } finally {
+      setReorderingMeasurementGroups(false);
+    }
+  };
+
+  const moveMeasurementGroup = (fromGroupId, toGroupId) => {
+    if (!fromGroupId || !toGroupId || fromGroupId === toGroupId) return;
+    setMeasurementGroupList((prev) => {
+      const fromIdx = prev.findIndex(
+        (r) => Number(r.GroupId) === Number(fromGroupId),
+      );
+      const toIdx = prev.findIndex(
+        (r) => Number(r.GroupId) === Number(toGroupId),
+      );
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      queueMicrotask(() => persistMeasurementGroupOrder(next));
+      return next;
+    });
+  };
+
+  const shiftMeasurementGroup = (groupId, direction) => {
+    const fromIdx = measurementGroupList.findIndex(
+      (r) => Number(r.GroupId) === Number(groupId),
+    );
+    const toIdx = fromIdx + direction;
+    if (fromIdx < 0 || toIdx < 0 || toIdx >= measurementGroupList.length) {
+      return;
+    }
+    moveMeasurementGroup(groupId, measurementGroupList[toIdx].GroupId);
   };
 
   const loadProjects = async () => {
@@ -3513,6 +3799,15 @@ export default function HomePage() {
     loadUserTrackRecord(userTrackOrgId, userTrackUserId);
   }, [activeMaster, userTrackOrgId, userTrackUserId]);
 
+  useEffect(() => {
+    if (activeMaster !== "measurement-groups") return;
+    if (!currentUser?.UserId || !canAccessMeasurementGroups(currentUser)) {
+      setMeasurementGroupList([]);
+      return;
+    }
+    loadMeasurementGroups(currentUser);
+  }, [activeMaster, currentUser?.UserId, currentUser?.OrganizationId]);
+
   const onLogout = () => {
     closeTrackedSession("UserLogout").finally(clearLocalSession);
   };
@@ -4286,6 +4581,7 @@ export default function HomePage() {
   const canManageProjects = isOrgAdmin || isSuperAdmin;
   const canManageMaterials = isSuperAdmin;
   const canManageItemMaster = canAccessItemMaster(currentUser);
+  const canManageMeasurementGroups = canAccessMeasurementGroups(currentUser);
   const itemMasterAllowedRegionId = getItemMasterAllowedRegionId(currentUser);
   const itemMasterRegionOptions = isSuperAdmin
     ? regions
@@ -4649,7 +4945,15 @@ export default function HomePage() {
             {allUsersMenu.map((item) =>
               renderMenuItem(item, {
                 forceDisabled:
-                  item.id === "item-master" ? !canManageItemMaster : false,
+                  item.id === "item-master"
+                    ? !canManageItemMaster
+                    : item.id === "measurement-groups"
+                      ? !canManageMeasurementGroups
+                      : false,
+                disabledTitle:
+                  item.id === "measurement-groups"
+                    ? "Available for SuperAdmin, OrgAdmin of organizations other than 3, and all users of organization 3"
+                    : "Available only for SuperAdmin",
               }),
             )}
           </div>
@@ -8668,7 +8972,7 @@ export default function HomePage() {
                         Select Work and Sub Work above to see previously checked
                         items.
                       </p>
-                    ) : checkedItemsList.length > 0 ? (
+                    ) : (
                       <div style={{ marginTop: 18 }}>
                         <div
                           style={{
@@ -8686,13 +8990,19 @@ export default function HomePage() {
                         >
                           <span>📐</span>
                           <span>
-                            Check a row to open its measurement panel. Only one
-                            item stays open. After you save measurements that
-                            item collapses so you can go to the next. Enter
+                            Check a row to open its measurement panel. Enter
                             values or paste from Excel (Description | No | L |
                             B | H). Quantity is the product of No × L × B × H.
                           </span>
                         </div>
+                        <WorkMeasurementGroupsPanel
+                          apiBase={API_BASE}
+                          userId={currentUser?.UserId}
+                          workId={selectedProjectId}
+                          subWorkId={selectedSubWorkId}
+                        />
+                        {checkedItemsList.length > 0 ? (
+                          <>
                         <div
                           style={{
                             fontSize: 12,
@@ -8875,19 +9185,21 @@ export default function HomePage() {
                             Delete Checked Items
                           </PrimaryButton>
                         </div>
-                      </div>
-                    ) : (
+                          </>
+                        ) : (
                       <p
                         style={{
                           color: theme.colors.inkSoft,
                           fontSize: 13.5,
-                          marginTop: 18,
+                          marginTop: 8,
                           fontStyle: "italic",
                         }}
                       >
                         No checked items for this Work and Sub Work yet. Select
                         items in the SSR Items List and click Insert.
                       </p>
+                        )}
+                      </div>
                     )}
                   </TabPanel>
                 </Tabs>
@@ -9899,6 +10211,328 @@ export default function HomePage() {
                     ) : (
                       <EmptyRow colSpan={isSuperAdmin ? 7 : 6}>
                         No sub works found for this work — add one above.
+                      </EmptyRow>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {/* ── Measurement Groups ── */}
+          {activeMaster === "measurement-groups" &&
+            canManageMeasurementGroups && (
+            <Card
+              eyebrow="Master · Measurement Group"
+              title={
+                editingMeasurementGroupId
+                  ? `Edit measurement group #${editingMeasurementGroupId}`
+                  : "Add Measurement Groups"
+              }
+              subtitle={
+                Number(currentUser?.OrganizationId) ===
+                INDIVIDUAL_ORGANIZATION_ID
+                  ? "Groups are saved for the signed-in user. Sequence is numbered separately for each user and can be changed in the list below."
+                  : "Groups are saved for the signed-in organization. Sequence is assigned automatically for this organization and can be changed in the list below."
+              }
+            >
+              <FormShell onSubmit={onMeasurementGroupSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 2.2fr) minmax(140px, 1fr) minmax(120px, 0.85fr)",
+                    gap: 14,
+                    alignItems: "start",
+                  }}
+                >
+                  <Field label="Group Name (Max 50 Characters)" required>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input
+                        name="GroupName"
+                        value={measurementGroupForm.GroupName}
+                        onChange={onMeasurementGroupChange}
+                        required
+                        maxLength={MEASUREMENT_GROUP_NAME_MAX}
+                        readOnly={Boolean(
+                          editingMeasurementGroupId && groupNameLocked,
+                        )}
+                        style={{
+                          ...inputStyle,
+                          width: "100%",
+                          background:
+                            editingMeasurementGroupId && groupNameLocked
+                              ? "#F3F1EA"
+                              : inputStyle.background,
+                        }}
+                      />
+                      {editingMeasurementGroupId && groupNameLocked && (
+                        <SecondaryButton onClick={requestGroupNameEdit}>
+                          Change name
+                        </SecondaryButton>
+                      )}
+                    </div>
+                    {editingMeasurementGroupId && groupNameLocked && (
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 500,
+                          color: theme.colors.amber,
+                        }}
+                      >
+                        Group Name is locked. Use Change name to rename.
+                      </span>
+                    )}
+                  </Field>
+                  <Field label="Percentage" required>
+                    <input
+                      name="Percentage"
+                      type="number"
+                      step="any"
+                      value={measurementGroupForm.Percentage}
+                      onChange={onMeasurementGroupChange}
+                      required
+                      style={{ ...inputStyle, width: "100%" }}
+                    />
+                  </Field>
+                  <Field label="Is Active" required>
+                    <select
+                      name="IsActive"
+                      value={measurementGroupForm.IsActive ? "true" : "false"}
+                      onChange={onMeasurementGroupChange}
+                      required
+                      style={{ ...inputStyle, width: "100%" }}
+                    >
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  </Field>
+                  {editingMeasurementGroupId && (
+                    <Field label="Sequence">
+                      <input
+                        value={measurementGroupForm.Sequence}
+                        readOnly
+                        style={{
+                          ...inputStyle,
+                          background: "#F3F1EA",
+                        }}
+                        title="Change order by dragging rows in the list"
+                      />
+                    </Field>
+                  )}
+                  <Field label="Remarks (Max 200 Characters)" span>
+                    <textarea
+                      name="Remarks"
+                      value={measurementGroupForm.Remarks}
+                      onChange={onMeasurementGroupChange}
+                      maxLength={MEASUREMENT_GROUP_REMARKS_MAX}
+                      rows={3}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 72,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 500,
+                        color: theme.colors.inkSoft,
+                      }}
+                    >
+                      {String(measurementGroupForm.Remarks || "").length}/
+                      {MEASUREMENT_GROUP_REMARKS_MAX}
+                    </span>
+                  </Field>
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                  <PrimaryButton disabled={savingMeasurementGroup}>
+                    {savingMeasurementGroup
+                      ? "Saving…"
+                      : editingMeasurementGroupId
+                        ? "Update group"
+                        : "Save group"}
+                  </PrimaryButton>
+                  {editingMeasurementGroupId && (
+                    <SecondaryButton
+                      onClick={resetMeasurementGroupEdit}
+                      disabled={savingMeasurementGroup}
+                    >
+                      Cancel edit
+                    </SecondaryButton>
+                  )}
+                </div>
+              </FormShell>
+
+              {measurementGroupList.length > 0 && (
+                <div
+                  style={{
+                    fontSize: 12.5,
+                    color: theme.colors.inkSoft,
+                    marginBottom: 8,
+                  }}
+                >
+                  Drag ⠿ or use ▲ ▼ to change group sequence (starts at 1).
+                  {reorderingMeasurementGroups ? " Updating sequence…" : ""}
+                </div>
+              )}
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
+                <table className="wrms-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 40 }}>Seq</th>
+                      <th style={{ width: 28 }} />
+                      <th>ID</th>
+                      <th>Group Name</th>
+                      <th>Percentage</th>
+                      <th>Active</th>
+                      <th>Remarks</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingMeasurementGroups ? (
+                      <EmptyRow colSpan={8}>Loading…</EmptyRow>
+                    ) : measurementGroupList.length ? (
+                      measurementGroupList.map((row) => {
+                        const isActive =
+                          row.IsActive !== false && row.IsActive !== "f";
+                        return (
+                          <tr
+                            key={row.GroupId}
+                            onDragOver={(e) => {
+                              if (!measurementGroupDragId) return;
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              const fromId =
+                                e.dataTransfer.getData("text/plain") ||
+                                measurementGroupDragId;
+                              moveMeasurementGroup(fromId, row.GroupId);
+                              setMeasurementGroupDragId(null);
+                            }}
+                            style={
+                              Number(measurementGroupDragId) ===
+                              Number(row.GroupId)
+                                ? { opacity: 0.55 }
+                                : undefined
+                            }
+                          >
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                fontWeight: 700,
+                                color: theme.colors.accent,
+                                textAlign: "center",
+                              }}
+                            >
+                              {row.Sequence ?? ""}
+                            </td>
+                            <td
+                              draggable={!reorderingMeasurementGroups}
+                              onDragStart={(e) => {
+                                setMeasurementGroupDragId(row.GroupId);
+                                e.dataTransfer.effectAllowed = "move";
+                                e.dataTransfer.setData(
+                                  "text/plain",
+                                  String(row.GroupId),
+                                );
+                              }}
+                              onDragEnd={() => setMeasurementGroupDragId(null)}
+                              title="Drag to reorder"
+                              style={{
+                                cursor: reorderingMeasurementGroups
+                                  ? "default"
+                                  : "grab",
+                                color: theme.colors.inkSoft,
+                                textAlign: "center",
+                                userSelect: "none",
+                              }}
+                            >
+                              ⠿
+                            </td>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                color: theme.colors.inkSoft,
+                              }}
+                            >
+                              {row.GroupId}
+                            </td>
+                            <td>{row.GroupName}</td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.Percentage ?? ""}
+                            </td>
+                            <td>
+                              <Badge tone={isActive ? "green" : "red"}>
+                                {isActive ? "Yes" : "No"}
+                              </Badge>
+                            </td>
+                            <td>{row.Remarks || "—"}</td>
+                            <td>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: 6,
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <GhostIconButton
+                                  onClick={() =>
+                                    shiftMeasurementGroup(row.GroupId, -1)
+                                  }
+                                  disabled={
+                                    reorderingMeasurementGroups ||
+                                    measurementGroupList.findIndex(
+                                      (g) =>
+                                        Number(g.GroupId) ===
+                                        Number(row.GroupId),
+                                    ) === 0
+                                  }
+                                  title="Move up"
+                                >
+                                  ▲
+                                </GhostIconButton>
+                                <GhostIconButton
+                                  onClick={() =>
+                                    shiftMeasurementGroup(row.GroupId, 1)
+                                  }
+                                  disabled={
+                                    reorderingMeasurementGroups ||
+                                    measurementGroupList.findIndex(
+                                      (g) =>
+                                        Number(g.GroupId) ===
+                                        Number(row.GroupId),
+                                    ) ===
+                                      measurementGroupList.length - 1
+                                  }
+                                  title="Move down"
+                                >
+                                  ▼
+                                </GhostIconButton>
+                                <SecondaryButton
+                                  onClick={() => startMeasurementGroupEdit(row)}
+                                >
+                                  Edit
+                                </SecondaryButton>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <EmptyRow colSpan={8}>
+                        No measurement groups found — add one above.
                       </EmptyRow>
                     )}
                   </tbody>
