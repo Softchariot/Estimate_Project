@@ -974,12 +974,20 @@ app.get("/api/ssr-items-load", async (req, res) => {
     if (userId) {
       const auth = await requireItemMasterAccess(userId);
       if (!auth.error && auth.isOrgAdmin) {
+        const selectedRegion = Number(regionId);
         const orgId = Number(auth.actor.OrganizationId);
-        if (Number.isFinite(orgId) && orgId > 0) {
+        if (
+          selectedRegion === ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+          Number.isFinite(orgId) &&
+          orgId > 0
+        ) {
           params.push(orgId);
           query += ` AND i."UserId" IN (
             SELECT mu."UserId" FROM "MasterUser" mu WHERE mu."OrganizationId" = $${params.length}
           )`;
+        } else if (selectedRegion === ITEM_MASTER_INDV_USER_REGION_ID) {
+          params.push(Number(auth.actor.UserId));
+          query += ` AND i."UserId" = $${params.length}`;
         }
       }
     }
@@ -7257,17 +7265,29 @@ async function requireSuperOrOrgAdmin(userId, itemId) {
   return { actor, isSuperAdmin, isOrgAdmin };
 }
 
-/** OrgAdmin may only manage RA for items created by users in their organization. */
+/** OrgAdmin may only manage RA for org NON SSR items (region 3); SSR regions are shared. */
 async function assertOrgAdminMaterialItemAccess(auth, itemId) {
   if (!auth?.isOrgAdmin) return null;
   const itemResult = await pool.query(
-    `SELECT i."UserId" FROM "MasterItem" i WHERE i."ItemId" = $1`,
+    `SELECT i."UserId", i."RegionId" FROM "MasterItem" i WHERE i."ItemId" = $1`,
     [Number(itemId)],
   );
   if (!itemResult.rows[0]) {
     return { status: 404, message: "Item not found." };
   }
-  return assertOrgAdminItemOwnership(auth, itemResult.rows[0].UserId);
+  const regionId = Number(itemResult.rows[0].RegionId);
+  if (regionId === ITEM_MASTER_ORG_ADMIN_REGION_ID) {
+    return assertOrgAdminItemOwnership(auth, itemResult.rows[0].UserId);
+  }
+  if (regionId === ITEM_MASTER_INDV_USER_REGION_ID) {
+    if (Number(itemResult.rows[0].UserId) !== Number(auth.actor.UserId)) {
+      return {
+        status: 403,
+        message: "You can only manage Rate Analysis for your own NON SSR items.",
+      };
+    }
+  }
+  return null;
 }
 
 function parseRegionIds(query) {
@@ -7281,6 +7301,33 @@ function parseRegionIds(query) {
     .filter((value) => Number.isFinite(value) && value > 0);
 }
 
+/** Same owner rules as item listing: org-scope region 3, user-scope region 4. */
+async function catalogOwnerFilterSql(userId, alias, params) {
+  if (!userId) return "";
+  const auth = await requireItemMasterAccess(userId);
+  if (auth.error || !auth.isOrgAdmin) return "";
+  const orgId = Number(auth.actor.OrganizationId);
+  if (!Number.isFinite(orgId) || orgId <= 0) return "";
+  params.push(orgId);
+  const orgParam = params.length;
+  params.push(Number(auth.actor.UserId));
+  const userParam = params.length;
+  return `
+    AND (
+      ${alias}."SSRRegionId" NOT IN (${ITEM_MASTER_ORG_ADMIN_REGION_ID}, ${ITEM_MASTER_INDV_USER_REGION_ID})
+      OR (
+        ${alias}."SSRRegionId" = ${ITEM_MASTER_ORG_ADMIN_REGION_ID}
+        AND ${alias}."UserId" IN (
+          SELECT mu."UserId" FROM "MasterUser" mu WHERE mu."OrganizationId" = $${orgParam}
+        )
+      )
+      OR (
+        ${alias}."SSRRegionId" = ${ITEM_MASTER_INDV_USER_REGION_ID}
+        AND ${alias}."UserId" = $${userParam}
+      )
+    )`;
+}
+
 app.get("/api/master-materials", async (req, res) => {
   const regionIds = parseRegionIds(req.query);
   if (!regionIds.length) {
@@ -7289,6 +7336,8 @@ app.get("/api/master-materials", async (req, res) => {
     });
   }
   try {
+    const params = [regionIds];
+    const ownerSql = await catalogOwnerFilterSql(req.query.userId, "m", params);
     const result = await pool.query(
       `SELECT m."MaterialId", m."SSRRegionId", m."ItemCode",
               m."MaterialDescription",
@@ -7301,8 +7350,9 @@ app.get("/api/master-materials", async (req, res) => {
        LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
        LEFT JOIN "MasterUnit" lu ON lu."UnitId" = m."MaterialLocalUnitId"
        WHERE m."SSRRegionId" = ANY($1::int[])
+       ${ownerSql}
        ORDER BY m."ItemCode" ASC NULLS LAST, m."MaterialDescription" ASC`,
-      [regionIds],
+      params,
     );
     return res.json(result.rows);
   } catch (error) {
@@ -7640,6 +7690,8 @@ app.get("/api/master-labours", async (req, res) => {
     });
   }
   try {
+    const params = [regionIds];
+    const ownerSql = await catalogOwnerFilterSql(req.query.userId, "l", params);
     const result = await pool.query(
       `SELECT l."LabourId", l."SSRRegionId", l."ItemCode",
               l."LabourDescription", l."LabourRate", l."UnitId",
@@ -7647,8 +7699,9 @@ app.get("/api/master-labours", async (req, res) => {
        FROM "MasterLabour" l
        LEFT JOIN "MasterUnit" u ON u."UnitId" = l."UnitId"
        WHERE l."SSRRegionId" = ANY($1::int[])
+       ${ownerSql}
        ORDER BY l."ItemCode" ASC NULLS LAST, l."LabourDescription" ASC`,
-      [regionIds],
+      params,
     );
     return res.json(result.rows);
   } catch (error) {
@@ -7888,6 +7941,8 @@ app.get("/api/master-machineries", async (req, res) => {
     });
   }
   try {
+    const params = [regionIds];
+    const ownerSql = await catalogOwnerFilterSql(req.query.userId, "m", params);
     const result = await pool.query(
       `SELECT m."MachineryId", m."SSRRegionId", m."ItemCode",
               m."MachineryDescription", m."MachineryRate", m."UnitId",
@@ -7895,8 +7950,9 @@ app.get("/api/master-machineries", async (req, res) => {
        FROM "MasterMachinery" m
        LEFT JOIN "MasterUnit" u ON u."UnitId" = m."UnitId"
        WHERE m."SSRRegionId" = ANY($1::int[])
+       ${ownerSql}
        ORDER BY m."ItemCode" ASC NULLS LAST, m."MachineryDescription" ASC`,
-      [regionIds],
+      params,
     );
     return res.json(result.rows);
   } catch (error) {

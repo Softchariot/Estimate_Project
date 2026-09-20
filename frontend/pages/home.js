@@ -707,14 +707,20 @@ function LabourComponentsPanel({
   const [labourMessage, setLabourMessage] = useState("");
 
   useEffect(() => {
-    const catalogRegionId = regionIds || regionId;
+    const catalogRegionId =
+      regionIds !== undefined && regionIds !== null ? regionIds : regionId;
     if (!catalogRegionId) {
       setLabourMasterList([]);
       return undefined;
     }
     let cancelled = false;
     axios
-      .get(`${apiBase}/api/master-labours`, { params: { regionId: catalogRegionId } })
+      .get(`${apiBase}/api/master-labours`, {
+        params: {
+          regionId: catalogRegionId,
+          ...(userId ? { userId } : {}),
+        },
+      })
       .then((res) => {
         if (!cancelled) {
           setLabourMasterList(Array.isArray(res.data) ? res.data : []);
@@ -726,7 +732,7 @@ function LabourComponentsPanel({
     return () => {
       cancelled = true;
     };
-  }, [apiBase, regionId, regionIds]);
+  }, [apiBase, regionId, regionIds, userId]);
 
   const loadLabourComponents = async (nextItemId) => {
     if (!nextItemId) {
@@ -1400,7 +1406,8 @@ function MachineryComponentsPanel({
   const [machineryMessage, setMachineryMessage] = useState("");
 
   useEffect(() => {
-    const catalogRegionId = regionIds || regionId;
+    const catalogRegionId =
+      regionIds !== undefined && regionIds !== null ? regionIds : regionId;
     if (!catalogRegionId) {
       setMachineryMasterList([]);
       return undefined;
@@ -1408,7 +1415,10 @@ function MachineryComponentsPanel({
     let cancelled = false;
     axios
       .get(`${apiBase}/api/master-machineries`, {
-        params: { regionId: catalogRegionId },
+        params: {
+          regionId: catalogRegionId,
+          ...(userId ? { userId } : {}),
+        },
       })
       .then((res) => {
         if (!cancelled) {
@@ -1421,7 +1431,7 @@ function MachineryComponentsPanel({
     return () => {
       cancelled = true;
     };
-  }, [apiBase, regionId, regionIds]);
+  }, [apiBase, regionId, regionIds, userId]);
 
   const loadMachineryComponents = async (nextItemId) => {
     if (!nextItemId) {
@@ -2758,6 +2768,13 @@ export default function HomePage() {
         );
         return stillThere ? prev : "";
       });
+      setMaterialRegionId((prev) => {
+        if (!prev) return prev;
+        const stillThere = list.some(
+          (r) => Number(r.SSRRegionId) === Number(prev),
+        );
+        return stillThere ? prev : "";
+      });
     } catch (error) {
       console.error(error);
       setEstimationRegions([]);
@@ -3197,10 +3214,14 @@ export default function HomePage() {
     setMaterialItemsViewed(false);
   };
 
-  const componentCatalogRegionIds = getComponentCatalogRegionIds(
-    materialRegionId,
-    materialRALogic,
-  ).join(",");
+  const componentCatalogRegionIds = (() => {
+    if (!materialItemsViewed) return "";
+    if (isNonSsrMaterialRegion(materialRegionId) && !materialRALogic) return "";
+    return getComponentCatalogRegionIds(
+      materialRegionId,
+      materialRALogic,
+    ).join(",");
+  })();
 
   const persistMaterialRALogic = async (itemId, logic) => {
     if (!itemId || !logic) return;
@@ -3287,8 +3308,10 @@ export default function HomePage() {
       return;
     }
     try {
+      const params = { regionId: ids };
+      if (currentUser?.UserId) params.userId = currentUser.UserId;
       const res = await axios.get(`${API_BASE}/api/master-materials`, {
-        params: { regionId: ids },
+        params,
       });
       setMaterialMasterList(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
@@ -5753,7 +5776,10 @@ export default function HomePage() {
   }, [router]);
 
   useEffect(() => {
-    if (activeMaster === "items" && currentUser?.UserId) {
+    if (
+      (activeMaster === "items" || activeMaster === "materials") &&
+      currentUser?.UserId
+    ) {
       loadEstimationRegions(currentUser);
     }
   }, [activeMaster, currentUser?.UserId]);
@@ -6557,11 +6583,6 @@ export default function HomePage() {
     ? regions
     : regions.filter(
         (r) => Number(r.SSRRegionId) === Number(itemMasterAllowedRegionId),
-      );
-  const materialRegionOptions = isSuperAdmin
-    ? regions
-    : regions.filter(
-        (r) => Number(r.SSRRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID,
       );
   const itemMasterRoleBanner = isOrgAdmin
     ? "Organization Admins can only add, list, and edit NON SSR items entered by their organization"
@@ -9363,21 +9384,6 @@ export default function HomePage() {
                 title="Material Components"
                 subtitle="Select SSR region, year, category and an item to view, add, or edit MasterRAComponent rows."
               >
-                {isOrgAdmin ? (
-                  <div
-                    style={{
-                      marginBottom: 12,
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      background: "#EEF4FA",
-                      color: "#35506B",
-                      fontSize: 13,
-                    }}
-                  >
-                    Organization Admins can only manage Rate Analysis for NON
-                    SSR items entered by their organization.
-                  </div>
-                ) : null}
                 <div
                   style={{
                     display: "grid",
@@ -9410,7 +9416,7 @@ export default function HomePage() {
                       style={inputStyle}
                     >
                       <option value="">Select SSR Region</option>
-                      {materialRegionOptions.map((r) => (
+                      {estimationRegions.map((r) => (
                         <option key={r.SSRRegionId} value={r.SSRRegionId}>
                           {r.SSRRegionShortName || r.SSRRegionName}
                         </option>
