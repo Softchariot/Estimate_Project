@@ -11,11 +11,11 @@ class ExistingUserSessionError extends Error {
 
 const IDLE_SECONDS = Math.max(
   15,
-  Number(process.env.USER_SESSION_IDLE_SECONDS || 120)
+  Number(process.env.USER_SESSION_IDLE_SECONDS || 300)
 );
 const WARNING_SECONDS = Math.max(
   5,
-  Number(process.env.USER_SESSION_WARNING_SECONDS || 105)
+  Number(process.env.USER_SESSION_WARNING_SECONDS || 285)
 );
 
 function pushIpCandidates(list, value) {
@@ -89,8 +89,20 @@ function isPrivateIp(ip) {
 }
 
 function readClientGps(body) {
-  const latitude = Number(body?.latitude);
-  const longitude = Number(body?.longitude);
+  const latRaw = body?.latitude;
+  const lonRaw = body?.longitude;
+  if (
+    latRaw === null ||
+    latRaw === undefined ||
+    latRaw === "" ||
+    lonRaw === null ||
+    lonRaw === undefined ||
+    lonRaw === ""
+  ) {
+    return null;
+  }
+  const latitude = Number(latRaw);
+  const longitude = Number(lonRaw);
   if (
     !Number.isFinite(latitude) ||
     !Number.isFinite(longitude) ||
@@ -403,21 +415,10 @@ async function openUserLogSession(pool, req, user) {
     if (publicIp) ipAddress = publicIp;
   }
 
-  const gps = readClientGps(req.body);
-  let latitude = gps?.latitude ?? null;
-  let longitude = gps?.longitude ?? null;
-  let location = null;
-  let locationSource = gps ? "GPS" : null;
-
-  if (!gps) {
-    const ipLocation = await lookupIpLocation(ipAddress);
-    if (ipLocation) {
-      latitude = ipLocation.latitude;
-      longitude = ipLocation.longitude;
-      location = ipLocation.location;
-      locationSource = ipLocation.locationSource;
-    }
-  }
+  const latitude = null;
+  const longitude = null;
+  const location = null;
+  const locationSource = null;
 
   await pool.query(
     `INSERT INTO public."UserLogTrack" (

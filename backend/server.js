@@ -410,6 +410,42 @@ async function ensureMaterialComponentIdSequence() {
   console.log("MasterMaterialComponent Id sequence ensured.");
 }
 
+async function ensureMasterMaterialComponentDescription() {
+  await pool.query(`
+    ALTER TABLE public."MasterMaterialComponent"
+      ADD COLUMN IF NOT EXISTS "Description" varchar(200)
+  `);
+  console.log("MasterMaterialComponent Description ensured.");
+}
+
+const RA_COMPONENT_TYPE_MATERIAL = "Ma";
+const RA_COMPONENT_TYPE_LABOUR = "La";
+const RA_COMPONENT_TYPE_MACHINERY = "Mc";
+const RA_COMPONENT_DESC_MAX = 100;
+
+async function ensureRAComponentYearIdNullable() {
+  await pool.query(`
+    ALTER TABLE public."MasterRAComponent"
+      ALTER COLUMN "YearId" DROP NOT NULL
+  `);
+}
+
+async function ensureRAComponentIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"MasterRAComponent"', 'RAComponentId') AS seq
+  `);
+  const seq = seqRes.rows[0]?.seq;
+  if (!seq) return;
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("RAComponentId"), 0)::bigint AS max
+     FROM "MasterRAComponent"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+}
+
 /** Ensure WorkMeasurement.Sequence is populated per item (starts at 1). */
 async function ensureWorkMeasurementSequence() {
   await pool.query(`
@@ -886,11 +922,12 @@ app.get("/api/master-years", async (req, res) => {
 });
 
 app.get("/api/ssr-items-load", async (req, res) => {
-  const { regionId, categoryId, subCategoryId, ssrYearId } = req.query;
+  const { regionId, categoryId, subCategoryId, ssrYearId, search, userId } = req.query;
   console.log("Region Id: ", regionId);
   console.log("Category Id: ", categoryId);
   console.log("Sub Category Id: ", subCategoryId);
   console.log("SSR Year Id: ", ssrYearId);
+  console.log("Search: ", search);
 
   if (!regionId || !categoryId) {
     return res.status(400).json({
@@ -922,6 +959,29 @@ app.get("/api/ssr-items-load", async (req, res) => {
     if (subCategoryId !== undefined && subCategoryId !== null && String(subCategoryId).trim() !== "") {
       params.push(subCategoryId);
       query += ` AND i."SubCategoryId" = $${params.length}`;
+    }
+
+    const searchText = String(search || "").trim();
+    if (searchText) {
+      const escaped = searchText.replace(/[\\%_]/g, "\\$&");
+      params.push(`%${escaped}%`);
+      query += ` AND (
+        i."ItemNumber" ILIKE $${params.length} ESCAPE '\\'
+        OR COALESCE(i."ItemDescription", '') ILIKE $${params.length} ESCAPE '\\'
+      )`;
+    }
+
+    if (userId) {
+      const auth = await requireItemMasterAccess(userId);
+      if (!auth.error && auth.isOrgAdmin) {
+        const orgId = Number(auth.actor.OrganizationId);
+        if (Number.isFinite(orgId) && orgId > 0) {
+          params.push(orgId);
+          query += ` AND i."UserId" IN (
+            SELECT mu."UserId" FROM "MasterUser" mu WHERE mu."OrganizationId" = $${params.length}
+          )`;
+        }
+      }
     }
 
     query += ` ORDER BY i."ItemNumber" ASC`;
@@ -7154,7 +7214,7 @@ app.post("/api/populate-work-materials", async (req, res) => {
 });
 
 /** Resolve acting user and confirm SuperAdmin or OrgAdmin. */
-async function requireSuperOrOrgAdmin(userId) {
+async function requireSuperOrOrgAdmin(userId, itemId) {
   if (!userId) {
     return { error: { status: 400, message: "userId is required." } };
   }
@@ -7177,36 +7237,73 @@ async function requireSuperOrOrgAdmin(userId) {
     .replace(/\s+/g, "");
   const isSuperAdmin = category === "superadmin";
   const isOrgAdmin = category === "orgadmin";
-  if (!isSuperAdmin) {
+  if (!isSuperAdmin && !isOrgAdmin) {
     return {
       error: {
         status: 403,
-        message: "Only SuperAdmin can manage material components.",
+        message: "Only SuperAdmin or OrgAdmin can manage material components.",
       },
     };
+  }
+  if (isOrgAdmin && itemId != null && String(itemId).trim() !== "") {
+    const itemAccess = await assertOrgAdminMaterialItemAccess(
+      { actor, isOrgAdmin },
+      itemId,
+    );
+    if (itemAccess) {
+      return { error: itemAccess };
+    }
   }
   return { actor, isSuperAdmin, isOrgAdmin };
 }
 
+/** OrgAdmin may only manage RA for items created by users in their organization. */
+async function assertOrgAdminMaterialItemAccess(auth, itemId) {
+  if (!auth?.isOrgAdmin) return null;
+  const itemResult = await pool.query(
+    `SELECT i."UserId" FROM "MasterItem" i WHERE i."ItemId" = $1`,
+    [Number(itemId)],
+  );
+  if (!itemResult.rows[0]) {
+    return { status: 404, message: "Item not found." };
+  }
+  return assertOrgAdminItemOwnership(auth, itemResult.rows[0].UserId);
+}
+
+function parseRegionIds(query) {
+  const raw = query?.regionIds ?? query?.regionId;
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return [];
+  }
+  return String(raw)
+    .split(",")
+    .map((value) => Number(String(value).trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
 app.get("/api/master-materials", async (req, res) => {
-  const { regionId } = req.query;
+  const regionIds = parseRegionIds(req.query);
+  if (!regionIds.length) {
+    return res.status(400).json({
+      message: "SSR Region is required to list materials.",
+    });
+  }
   try {
-    const params = [];
-    let query = `
-      SELECT m."MaterialId", m."SSRRegionId", m."MaterialDescription",
-             m."MaterialShortDescription" AS "MaterialShortName",
-             m."MaterialUnitId", m."MaterialLocalUnitId",
-             u."UnitShortName" AS "MaterialUnitShortName",
-             lu."UnitShortName" AS "MaterialLocalUnitShortName"
-      FROM "MasterMaterial" m
-      LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
-      LEFT JOIN "MasterUnit" lu ON lu."UnitId" = m."MaterialLocalUnitId"`;
-    if (regionId !== undefined && regionId !== null && String(regionId).trim() !== "") {
-      params.push(Number(regionId));
-      query += ` WHERE m."SSRRegionId" = $1`;
-    }
-    query += ` ORDER BY m."MaterialShortDescription" ASC`;
-    const result = await pool.query(query, params);
+    const result = await pool.query(
+      `SELECT m."MaterialId", m."SSRRegionId", m."ItemCode",
+              m."MaterialDescription",
+              m."MaterialShortDescription" AS "MaterialShortName",
+              m."MaterialRate",
+              m."MaterialUnitId", m."MaterialLocalUnitId",
+              u."UnitShortName" AS "MaterialUnitShortName",
+              lu."UnitShortName" AS "MaterialLocalUnitShortName"
+       FROM "MasterMaterial" m
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
+       LEFT JOIN "MasterUnit" lu ON lu."UnitId" = m."MaterialLocalUnitId"
+       WHERE m."SSRRegionId" = ANY($1::int[])
+       ORDER BY m."ItemCode" ASC NULLS LAST, m."MaterialDescription" ASC`,
+      [regionIds],
+    );
     return res.json(result.rows);
   } catch (error) {
     console.error(error);
@@ -7221,18 +7318,24 @@ app.get("/api/material-components", async (req, res) => {
   }
   try {
     const result = await pool.query(
-      `SELECT mc."MaterialComponentId", mc."ItemId", mc."MaterialId",
+      `SELECT ra."RAComponentId" AS "MaterialComponentId",
+              ra."ItemId",
+              ra."ComponentId" AS "MaterialId",
+              m."ItemCode",
               m."MaterialShortDescription" AS "MaterialShortName",
               m."MaterialDescription",
-              mc."MaterialComponent", mc."MaterialUnitId",
-              u."UnitShortName" AS "MaterialUnitShortName",
-              mc."PageNumber", mc."Number", mc."SubNumber"
-       FROM "MasterMaterialComponent" mc
-       INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
-       LEFT JOIN "MasterUnit" u ON u."UnitId" = mc."MaterialUnitId"
-       WHERE mc."ItemId" = $1
-       ORDER BY mc."MaterialComponentId" ASC`,
-      [Number(itemId)],
+              m."MaterialRate",
+              ra."Description",
+              ra."Component" AS "MaterialComponent",
+              ra."UnitId" AS "MaterialUnitId",
+              u."UnitShortName" AS "MaterialUnitShortName"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterMaterial" m ON m."MaterialId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = ra."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_MATERIAL],
     );
     return res.json({ data: result.rows });
   } catch (error) {
@@ -7247,12 +7350,13 @@ app.post("/api/material-components", async (req, res) => {
     ItemId,
     MaterialId,
     MaterialComponent,
+    Description,
     PageNumber,
     Number: CompNumber,
     SubNumber,
   } = req.body || {};
 
-  const auth = await requireSuperOrOrgAdmin(userId);
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -7272,6 +7376,13 @@ app.post("/api/material-components", async (req, res) => {
     return res.status(400).json({ message: "MaterialComponent is required." });
   }
 
+  const descriptionText = String(Description || "").trim();
+  if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+    return res.status(400).json({
+      message: `Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+    });
+  }
+
   try {
     const materialResult = await pool.query(
       `SELECT "MaterialLocalUnitId"
@@ -7287,41 +7398,41 @@ app.post("/api/material-components", async (req, res) => {
       });
     }
 
-    await ensureMaterialComponentIdSequence();
+    await ensureRAComponentIdSequence();
 
     const result = await pool.query(
-      `INSERT INTO "MasterMaterialComponent"
-       ("ItemId", "MaterialId", "MaterialComponent", "MaterialUnitId",
-        "PageNumber", "Number", "SubNumber")
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING "MaterialComponentId", "ItemId", "MaterialId",
-                 "MaterialComponent", "MaterialUnitId",
-                 "PageNumber", "Number", "SubNumber"`,
+      `INSERT INTO "MasterRAComponent"
+       ("ItemId", "ComponentType", "ComponentId", "UnitId",
+        "Component", "Description")
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING "RAComponentId" AS "MaterialComponentId",
+                 "ItemId",
+                 "ComponentId" AS "MaterialId",
+                 "Component" AS "MaterialComponent",
+                 "UnitId" AS "MaterialUnitId",
+                 "Description"`,
       [
         Number(ItemId),
+        RA_COMPONENT_TYPE_MATERIAL,
         Number(MaterialId),
-        Number(MaterialComponent),
         Number(materialLocalUnitId),
-        PageNumber === "" || PageNumber === null || PageNumber === undefined
-          ? null
-          : Number(PageNumber),
-        CompNumber === "" || CompNumber === null || CompNumber === undefined
-          ? null
-          : Number(CompNumber),
-        SubNumber ? String(SubNumber).trim() : null,
+        Number(MaterialComponent),
+        descriptionText || null,
       ],
     );
     return res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: error.message });
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
   }
 });
 
 app.post("/api/material-components/batch", async (req, res) => {
   const { userId, ItemId, rows } = req.body || {};
 
-  const auth = await requireSuperOrOrgAdmin(userId);
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -7335,14 +7446,22 @@ app.post("/api/material-components/batch", async (req, res) => {
 
   const client = await pool.connect();
   try {
-    await ensureMaterialComponentIdSequence();
+    await ensureRAComponentIdSequence();
     await client.query("BEGIN");
 
     const inserted = [];
     for (let i = 0; i < rows.length; i += 1) {
       const row = rows[i] || {};
-      const { MaterialId, MaterialComponent, PageNumber, SubNumber } = row;
-      const CompNumber = row.Number;
+      const { MaterialId, MaterialComponent, Description } = row;
+      const descriptionText = String(Description || "").trim();
+      if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+        throw Object.assign(
+          new Error(
+            `Row ${i + 1}: Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+          ),
+          { status: 400 },
+        );
+      }
 
       if (!MaterialId) {
         throw Object.assign(new Error(`Row ${i + 1}: MaterialId is required.`), {
@@ -7378,25 +7497,23 @@ app.post("/api/material-components/batch", async (req, res) => {
       }
 
       const result = await client.query(
-        `INSERT INTO "MasterMaterialComponent"
-         ("ItemId", "MaterialId", "MaterialComponent", "MaterialUnitId",
-          "PageNumber", "Number", "SubNumber")
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING "MaterialComponentId", "ItemId", "MaterialId",
-                   "MaterialComponent", "MaterialUnitId",
-                   "PageNumber", "Number", "SubNumber"`,
+        `INSERT INTO "MasterRAComponent"
+         ("ItemId", "ComponentType", "ComponentId", "UnitId",
+          "Component", "Description")
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING "RAComponentId" AS "MaterialComponentId",
+                   "ItemId",
+                   "ComponentId" AS "MaterialId",
+                   "Component" AS "MaterialComponent",
+                   "UnitId" AS "MaterialUnitId",
+                   "Description"`,
         [
           Number(ItemId),
+          RA_COMPONENT_TYPE_MATERIAL,
           Number(MaterialId),
-          Number(MaterialComponent),
           Number(materialLocalUnitId),
-          PageNumber === "" || PageNumber === null || PageNumber === undefined
-            ? null
-            : Number(PageNumber),
-          CompNumber === "" || CompNumber === null || CompNumber === undefined
-            ? null
-            : Number(CompNumber),
-          SubNumber ? String(SubNumber).trim() : null,
+          Number(MaterialComponent),
+          descriptionText || null,
         ],
       );
       inserted.push(result.rows[0]);
@@ -7426,12 +7543,13 @@ app.put("/api/material-components/:id", async (req, res) => {
     ItemId,
     MaterialId,
     MaterialComponent,
+    Description,
     PageNumber,
     Number: CompNumber,
     SubNumber,
   } = req.body || {};
 
-  const auth = await requireSuperOrOrgAdmin(userId);
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -7451,7 +7569,15 @@ app.put("/api/material-components/:id", async (req, res) => {
     return res.status(400).json({ message: "MaterialComponent is required." });
   }
 
+  const descriptionText = String(Description || "").trim();
+  if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+    return res.status(400).json({
+      message: `Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+    });
+  }
+
   try {
+    await ensureRAComponentIdSequence();
     const materialResult = await pool.query(
       `SELECT "MaterialLocalUnitId"
        FROM "MasterMaterial"
@@ -7467,30 +7593,28 @@ app.put("/api/material-components/:id", async (req, res) => {
     }
 
     const result = await pool.query(
-      `UPDATE "MasterMaterialComponent"
+      `UPDATE "MasterRAComponent"
        SET "ItemId" = $1,
-           "MaterialId" = $2,
-           "MaterialComponent" = $3,
-           "MaterialUnitId" = $4,
-           "PageNumber" = $5,
-           "Number" = $6,
-           "SubNumber" = $7
-       WHERE "MaterialComponentId" = $8
-       RETURNING "MaterialComponentId", "ItemId", "MaterialId",
-                 "MaterialComponent", "MaterialUnitId",
-                 "PageNumber", "Number", "SubNumber"`,
+           "ComponentType" = $2,
+           "ComponentId" = $3,
+           "Component" = $4,
+           "UnitId" = $5,
+           "Description" = $6
+       WHERE "RAComponentId" = $7
+         AND "ComponentType" = $2
+       RETURNING "RAComponentId" AS "MaterialComponentId",
+                 "ItemId",
+                 "ComponentId" AS "MaterialId",
+                 "Component" AS "MaterialComponent",
+                 "UnitId" AS "MaterialUnitId",
+                 "Description"`,
       [
         Number(ItemId),
+        RA_COMPONENT_TYPE_MATERIAL,
         Number(MaterialId),
         Number(MaterialComponent),
         Number(materialLocalUnitId),
-        PageNumber === "" || PageNumber === null || PageNumber === undefined
-          ? null
-          : Number(PageNumber),
-        CompNumber === "" || CompNumber === null || CompNumber === undefined
-          ? null
-          : Number(CompNumber),
-        SubNumber ? String(SubNumber).trim() : null,
+        descriptionText || null,
         Number(id),
       ],
     );
@@ -7502,7 +7626,1266 @@ app.put("/api/material-components/:id", async (req, res) => {
     return res.json(result.rows[0]);
   } catch (error) {
     console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
+app.get("/api/master-labours", async (req, res) => {
+  const regionIds = parseRegionIds(req.query);
+  if (!regionIds.length) {
+    return res.status(400).json({
+      message: "SSR Region is required to list labour.",
+    });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT l."LabourId", l."SSRRegionId", l."ItemCode",
+              l."LabourDescription", l."LabourRate", l."UnitId",
+              u."UnitShortName"
+       FROM "MasterLabour" l
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = l."UnitId"
+       WHERE l."SSRRegionId" = ANY($1::int[])
+       ORDER BY l."ItemCode" ASC NULLS LAST, l."LabourDescription" ASC`,
+      [regionIds],
+    );
+    return res.json(result.rows);
+  } catch (error) {
+    console.error(error);
     return res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/labour-components", async (req, res) => {
+  const { itemId } = req.query;
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId is required." });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT ra."RAComponentId" AS "LabourComponentId",
+              ra."ItemId",
+              ra."ComponentId" AS "LabourId",
+              l."ItemCode",
+              l."LabourDescription",
+              l."LabourRate",
+              ra."Description",
+              ra."Component" AS "LabourComponent",
+              ra."UnitId",
+              u."UnitShortName"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterLabour" l ON l."LabourId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = ra."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_LABOUR],
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/labour-components/batch", async (req, res) => {
+  const { userId, ItemId, rows } = req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ message: "rows array is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureRAComponentIdSequence();
+    await client.query("BEGIN");
+
+    const inserted = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const { LabourId, LabourComponent, Description } = row;
+      const descriptionText = String(Description || "").trim();
+      if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+        throw Object.assign(
+          new Error(
+            `Row ${i + 1}: Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+          ),
+          { status: 400 },
+        );
+      }
+      if (!LabourId) {
+        throw Object.assign(new Error(`Row ${i + 1}: Labour is required.`), {
+          status: 400,
+        });
+      }
+      if (
+        LabourComponent === "" ||
+        LabourComponent === null ||
+        LabourComponent === undefined ||
+        Number.isNaN(Number(LabourComponent))
+      ) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: Labour Component is required.`),
+          { status: 400 },
+        );
+      }
+
+      const labourResult = await client.query(
+        `SELECT "UnitId"
+         FROM "MasterLabour"
+         WHERE "LabourId" = $1`,
+        [Number(LabourId)],
+      );
+      const unitId = labourResult.rows[0]?.UnitId;
+      if (!unitId) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: selected labour has no Unit.`),
+          { status: 400 },
+        );
+      }
+
+      const result = await client.query(
+        `INSERT INTO "MasterRAComponent"
+         ("ItemId", "ComponentType", "ComponentId", "UnitId",
+          "Component", "Description")
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING "RAComponentId" AS "LabourComponentId",
+                   "ItemId",
+                   "ComponentId" AS "LabourId",
+                   "Component" AS "LabourComponent",
+                   "UnitId",
+                   "Description"`,
+        [
+          Number(ItemId),
+          RA_COMPONENT_TYPE_LABOUR,
+          Number(LabourId),
+          Number(unitId),
+          Number(LabourComponent),
+          descriptionText || null,
+        ],
+      );
+      inserted.push(result.rows[0]);
+    }
+
+    await client.query("COMMIT");
+    return res.status(201).json({ data: inserted, count: inserted.length });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/api/labour-components/:id", async (req, res) => {
+  const { id } = req.params;
+  const { userId, ItemId, LabourId, LabourComponent, Description } =
+    req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!LabourId) {
+    return res.status(400).json({ message: "Labour is required." });
+  }
+  if (
+    LabourComponent === "" ||
+    LabourComponent === null ||
+    LabourComponent === undefined ||
+    Number.isNaN(Number(LabourComponent))
+  ) {
+    return res.status(400).json({ message: "Labour Component is required." });
+  }
+
+  const descriptionText = String(Description || "").trim();
+  if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+    return res.status(400).json({
+      message: `Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+    });
+  }
+
+  try {
+    await ensureRAComponentIdSequence();
+    const labourResult = await pool.query(
+      `SELECT "UnitId"
+       FROM "MasterLabour"
+       WHERE "LabourId" = $1`,
+      [Number(LabourId)],
+    );
+    const unitId = labourResult.rows[0]?.UnitId;
+    if (!unitId) {
+      return res.status(400).json({
+        message: "Selected labour has no Unit. Cannot update component.",
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE "MasterRAComponent"
+       SET "ItemId" = $1,
+           "ComponentType" = $2,
+           "ComponentId" = $3,
+           "Component" = $4,
+           "UnitId" = $5,
+           "Description" = $6
+       WHERE "RAComponentId" = $7
+         AND "ComponentType" = $2
+       RETURNING "RAComponentId" AS "LabourComponentId",
+                 "ItemId",
+                 "ComponentId" AS "LabourId",
+                 "Component" AS "LabourComponent",
+                 "UnitId",
+                 "Description"`,
+      [
+        Number(ItemId),
+        RA_COMPONENT_TYPE_LABOUR,
+        Number(LabourId),
+        Number(LabourComponent),
+        Number(unitId),
+        descriptionText || null,
+        Number(id),
+      ],
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Labour component not found." });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
+app.get("/api/master-machineries", async (req, res) => {
+  const regionIds = parseRegionIds(req.query);
+  if (!regionIds.length) {
+    return res.status(400).json({
+      message: "SSR Region is required to list machinery.",
+    });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT m."MachineryId", m."SSRRegionId", m."ItemCode",
+              m."MachineryDescription", m."MachineryRate", m."UnitId",
+              u."UnitShortName"
+       FROM "MasterMachinery" m
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."UnitId"
+       WHERE m."SSRRegionId" = ANY($1::int[])
+       ORDER BY m."ItemCode" ASC NULLS LAST, m."MachineryDescription" ASC`,
+      [regionIds],
+    );
+    return res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/machinery-components", async (req, res) => {
+  const { itemId } = req.query;
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId is required." });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT ra."RAComponentId" AS "MachineryComponentId",
+              ra."ItemId",
+              ra."ComponentId" AS "MachineryId",
+              m."ItemCode",
+              m."MachineryDescription",
+              m."MachineryRate",
+              ra."Description",
+              ra."Component" AS "MachineryComponent",
+              ra."UnitId",
+              u."UnitShortName"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterMachinery" m ON m."MachineryId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = ra."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_MACHINERY],
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/machinery-components/batch", async (req, res) => {
+  const { userId, ItemId, rows } = req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ message: "rows array is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureRAComponentIdSequence();
+    await client.query("BEGIN");
+
+    const inserted = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const { MachineryId, MachineryComponent, Description } = row;
+      const descriptionText = String(Description || "").trim();
+      if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+        throw Object.assign(
+          new Error(
+            `Row ${i + 1}: Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+          ),
+          { status: 400 },
+        );
+      }
+      if (!MachineryId) {
+        throw Object.assign(new Error(`Row ${i + 1}: Machinery is required.`), {
+          status: 400,
+        });
+      }
+      if (
+        MachineryComponent === "" ||
+        MachineryComponent === null ||
+        MachineryComponent === undefined ||
+        Number.isNaN(Number(MachineryComponent))
+      ) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: Machinery Component is required.`),
+          { status: 400 },
+        );
+      }
+
+      const machineryResult = await client.query(
+        `SELECT "UnitId"
+         FROM "MasterMachinery"
+         WHERE "MachineryId" = $1`,
+        [Number(MachineryId)],
+      );
+      const unitId = machineryResult.rows[0]?.UnitId;
+      if (!unitId) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: selected machinery has no Unit.`),
+          { status: 400 },
+        );
+      }
+
+      const result = await client.query(
+        `INSERT INTO "MasterRAComponent"
+         ("ItemId", "ComponentType", "ComponentId", "UnitId",
+          "Component", "Description")
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING "RAComponentId" AS "MachineryComponentId",
+                   "ItemId",
+                   "ComponentId" AS "MachineryId",
+                   "Component" AS "MachineryComponent",
+                   "UnitId",
+                   "Description"`,
+        [
+          Number(ItemId),
+          RA_COMPONENT_TYPE_MACHINERY,
+          Number(MachineryId),
+          Number(unitId),
+          Number(MachineryComponent),
+          descriptionText || null,
+        ],
+      );
+      inserted.push(result.rows[0]);
+    }
+
+    await client.query("COMMIT");
+    return res.status(201).json({ data: inserted, count: inserted.length });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/api/machinery-components/:id", async (req, res) => {
+  const { id } = req.params;
+  const { userId, ItemId, MachineryId, MachineryComponent, Description } =
+    req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!MachineryId) {
+    return res.status(400).json({ message: "Machinery is required." });
+  }
+  if (
+    MachineryComponent === "" ||
+    MachineryComponent === null ||
+    MachineryComponent === undefined ||
+    Number.isNaN(Number(MachineryComponent))
+  ) {
+    return res.status(400).json({ message: "Machinery Component is required." });
+  }
+
+  const descriptionText = String(Description || "").trim();
+  if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+    return res.status(400).json({
+      message: `Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+    });
+  }
+
+  try {
+    await ensureRAComponentIdSequence();
+    const machineryResult = await pool.query(
+      `SELECT "UnitId"
+       FROM "MasterMachinery"
+       WHERE "MachineryId" = $1`,
+      [Number(MachineryId)],
+    );
+    const unitId = machineryResult.rows[0]?.UnitId;
+    if (!unitId) {
+      return res.status(400).json({
+        message: "Selected machinery has no Unit. Cannot update component.",
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE "MasterRAComponent"
+       SET "ItemId" = $1,
+           "ComponentType" = $2,
+           "ComponentId" = $3,
+           "Component" = $4,
+           "UnitId" = $5,
+           "Description" = $6
+       WHERE "RAComponentId" = $7
+         AND "ComponentType" = $2
+       RETURNING "RAComponentId" AS "MachineryComponentId",
+                 "ItemId",
+                 "ComponentId" AS "MachineryId",
+                 "Component" AS "MachineryComponent",
+                 "UnitId",
+                 "Description"`,
+      [
+        Number(ItemId),
+        RA_COMPONENT_TYPE_MACHINERY,
+        Number(MachineryId),
+        Number(MachineryComponent),
+        Number(unitId),
+        descriptionText || null,
+        Number(id),
+      ],
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Machinery component not found." });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
+const RA_PARAMETER_FIELDS = [
+  { key: "RAQuantity", label: "R A Quantity", defaultValue: 0 },
+  { key: "Scaffolding", label: "Scaffolding", defaultValue: 0 },
+  { key: "Sundries", label: "Sundries", defaultValue: 0 },
+  { key: "WaterCharges", label: "Water Charges", defaultValue: 0 },
+  { key: "QCCharges", label: "Q C Charges", defaultValue: 0 },
+  { key: "Formwork", label: "Formwork", defaultValue: 0 },
+  { key: "LabourAmenities", label: "Labour Amenities", defaultValue: 0 },
+  { key: "LabourCess", label: "Labour Cess", defaultValue: 1 },
+  { key: "CPOHCharges", label: "CP & OH Charges", defaultValue: 15 },
+  { key: "WCharges", label: "W Charges", defaultValue: 1 },
+  { key: "GSTCharges", label: "GST Charges", defaultValue: 18 },
+];
+
+function defaultRAParameterRow() {
+  const row = {};
+  for (const field of RA_PARAMETER_FIELDS) {
+    row[field.key] = field.defaultValue;
+  }
+  return row;
+}
+
+function mapRAParameterRow(row) {
+  const mapped = defaultRAParameterRow();
+  mapped.Reference = "";
+  mapped.UnitName = "";
+  if (!row) return mapped;
+  mapped.RAParameterId = row.RAParameterId;
+  mapped.ItemId = row.ItemId;
+  mapped.Reference = row.Reference == null ? "" : String(row.Reference);
+  mapped.UnitName = row.UnitName == null ? "" : String(row.UnitName);
+  for (const field of RA_PARAMETER_FIELDS) {
+    const value = row[field.key];
+    mapped[field.key] =
+      value === null || value === undefined
+        ? field.defaultValue
+        : Number(value);
+  }
+  return mapped;
+}
+
+function parseRAParameterBody(body) {
+  const parsed = {};
+  for (const field of RA_PARAMETER_FIELDS) {
+    const raw = body?.[field.key];
+    if (raw === "" || raw === null || raw === undefined) {
+      parsed[field.key] = field.defaultValue;
+      continue;
+    }
+    const n = Number(raw);
+    if (Number.isNaN(n)) {
+      throw Object.assign(new Error(`${field.label} must be a number.`), {
+        status: 400,
+      });
+    }
+    parsed[field.key] = n;
+  }
+  return parsed;
+}
+
+function raLogicFromRegionId(regionId, requestedLogic) {
+  const id = Number(regionId);
+  if (id === 1) return "PWD";
+  if (id === 2) return "CPWD";
+  const requested = String(requestedLogic || "").trim().toUpperCase();
+  if (requested === "PWD" || requested === "CPWD") return requested;
+  return "OTHER";
+}
+
+async function ensureRAParameterSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public."RAParameter" (
+      "RAParameterId" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      "ItemId" integer,
+      "RAQuantity" double precision,
+      "Scaffolding" double precision DEFAULT 0,
+      "Sundries" double precision DEFAULT 0,
+      "WaterCharges" double precision DEFAULT 0,
+      "QCCharges" double precision DEFAULT 0,
+      "Formwork" double precision DEFAULT 0,
+      "LabourAmenities" double precision DEFAULT 1,
+      "LabourCess" double precision DEFAULT 1,
+      "CPOHCharges" double precision DEFAULT 15,
+      "WCharges" double precision DEFAULT 1,
+      "GSTCharges" double precision DEFAULT 18,
+      "Reference" varchar,
+      "RALogic" varchar
+    )
+  `);
+  const addColumns = [
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "ItemId" integer`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "RAQuantity" double precision`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "Scaffolding" double precision DEFAULT 0`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "Sundries" double precision DEFAULT 0`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "WaterCharges" double precision DEFAULT 0`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "QCCharges" double precision DEFAULT 0`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "Formwork" double precision DEFAULT 0`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "LabourAmenities" double precision DEFAULT 1`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "LabourCess" double precision DEFAULT 1`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "CPOHCharges" double precision DEFAULT 15`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "WCharges" double precision DEFAULT 1`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "GSTCharges" double precision DEFAULT 18`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "Reference" varchar`,
+    `ALTER TABLE public."RAParameter" ADD COLUMN IF NOT EXISTS "RALogic" varchar`,
+  ];
+  for (const sql of addColumns) {
+    try {
+      await pool.query(sql);
+    } catch (error) {
+      console.warn("RAParameter column ensure:", error.message);
+    }
+  }
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS "UX_RAParameter_ItemId"
+      ON public."RAParameter" ("ItemId")
+      WHERE "ItemId" IS NOT NULL
+  `);
+  console.log("RAParameter schema ensured.");
+}
+
+async function ensureRAParameterIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"RAParameter"', 'RAParameterId') AS seq
+  `);
+  const seq = seqRes.rows[0]?.seq;
+  if (!seq) return;
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("RAParameterId"), 0)::bigint AS max
+     FROM "RAParameter"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+}
+
+app.get("/api/ra-parameters", async (req, res) => {
+  const { itemId } = req.query;
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId is required." });
+  }
+  try {
+    const itemResult = await pool.query(
+      `SELECT i."ItemId", u."UnitName"
+       FROM "MasterItem" i
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       WHERE i."ItemId" = $1`,
+      [Number(itemId)],
+    );
+    if (!itemResult.rows[0]) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+
+    const result = await pool.query(
+      `SELECT "RAParameterId", "ItemId",
+              "RAQuantity", "Scaffolding", "Sundries", "WaterCharges",
+              "QCCharges", "Formwork", "LabourAmenities", "LabourCess",
+              "CPOHCharges", "WCharges", "GSTCharges", "Reference"
+       FROM "RAParameter"
+       WHERE "ItemId" = $1
+       ORDER BY "RAParameterId" ASC
+       LIMIT 1`,
+      [Number(itemId)],
+    );
+    const row = result.rows[0];
+    const data = mapRAParameterRow(row);
+    data.ItemId = Number(itemId);
+    data.UnitName = itemResult.rows[0].UnitName || "";
+    return res.json({
+      data,
+      exists: Boolean(row),
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.put("/api/ra-parameters", async (req, res) => {
+  const { userId, ItemId } = req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+
+  try {
+    const parsed = parseRAParameterBody(req.body || {});
+    const referenceText = String((req.body || {}).Reference || "").trim();
+    const itemResult = await pool.query(
+      `SELECT i."ItemId", i."RegionId", u."UnitName"
+       FROM "MasterItem" i
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       WHERE i."ItemId" = $1`,
+      [Number(ItemId)],
+    );
+    if (!itemResult.rows[0]) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+    const raLogic = raLogicFromRegionId(
+      itemResult.rows[0].RegionId,
+      (req.body || {}).RALogic,
+    );
+
+    const existing = await pool.query(
+      `SELECT "RAParameterId"
+       FROM "RAParameter"
+       WHERE "ItemId" = $1
+       ORDER BY "RAParameterId" ASC
+       LIMIT 1`,
+      [Number(ItemId)],
+    );
+
+    const columns = RA_PARAMETER_FIELDS.map((field) => `"${field.key}"`).join(
+      ", ",
+    );
+    const values = RA_PARAMETER_FIELDS.map((field) => parsed[field.key]);
+
+    let result;
+    if (existing.rows[0]) {
+      const assignments = RA_PARAMETER_FIELDS.map(
+        (field, index) => `"${field.key}" = $${index + 1}`,
+      ).join(", ");
+      const referenceIndex = RA_PARAMETER_FIELDS.length + 1;
+      const logicIndex = RA_PARAMETER_FIELDS.length + 2;
+      const idIndex = RA_PARAMETER_FIELDS.length + 3;
+      result = await pool.query(
+        `UPDATE "RAParameter"
+         SET ${assignments},
+             "Reference" = $${referenceIndex},
+             "RALogic" = $${logicIndex}
+         WHERE "RAParameterId" = $${idIndex}
+         RETURNING "RAParameterId", "ItemId", ${columns}, "Reference", "RALogic"`,
+        [
+          ...values,
+          referenceText || null,
+          raLogic,
+          existing.rows[0].RAParameterId,
+        ],
+      );
+    } else {
+      await ensureRAParameterIdSequence();
+      const placeholders = RA_PARAMETER_FIELDS.map(
+        (_field, index) => `$${index + 2}`,
+      ).join(", ");
+      const referencePlaceholder = `$${RA_PARAMETER_FIELDS.length + 2}`;
+      const logicPlaceholder = `$${RA_PARAMETER_FIELDS.length + 3}`;
+      result = await pool.query(
+        `INSERT INTO "RAParameter"
+         ("ItemId", ${columns}, "Reference", "RALogic")
+         VALUES ($1, ${placeholders}, ${referencePlaceholder}, ${logicPlaceholder})
+         RETURNING "RAParameterId", "ItemId", ${columns}, "Reference", "RALogic"`,
+        [Number(ItemId), ...values, referenceText || null, raLogic],
+      );
+    }
+
+    const data = mapRAParameterRow(result.rows[0]);
+    data.UnitName = itemResult.rows[0]?.UnitName || "";
+    data.RALogic = result.rows[0]?.RALogic || raLogic;
+    return res.json({
+      data,
+      exists: true,
+    });
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
+app.put("/api/ra-parameters/logic", async (req, res) => {
+  const { userId, ItemId, RALogic } = req.body || {};
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  const logic = String(RALogic || "").trim().toUpperCase();
+  if (logic !== "PWD" && logic !== "CPWD") {
+    return res.status(400).json({ message: "RALogic must be PWD or CPWD." });
+  }
+
+  try {
+    const itemResult = await pool.query(
+      `SELECT "ItemId" FROM "MasterItem" WHERE "ItemId" = $1`,
+      [Number(ItemId)],
+    );
+    if (!itemResult.rows[0]) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+
+    const existing = await pool.query(
+      `SELECT "RAParameterId"
+       FROM "RAParameter"
+       WHERE "ItemId" = $1
+       ORDER BY "RAParameterId" ASC
+       LIMIT 1`,
+      [Number(ItemId)],
+    );
+
+    let result;
+    if (existing.rows[0]) {
+      result = await pool.query(
+        `UPDATE "RAParameter"
+         SET "RALogic" = $1
+         WHERE "RAParameterId" = $2
+         RETURNING "RAParameterId", "ItemId", "RALogic"`,
+        [logic, existing.rows[0].RAParameterId],
+      );
+    } else {
+      await ensureRAParameterIdSequence();
+      const defaults = defaultRAParameterRow();
+      const columns = RA_PARAMETER_FIELDS.map((field) => `"${field.key}"`).join(
+        ", ",
+      );
+      const placeholders = RA_PARAMETER_FIELDS.map(
+        (_field, index) => `$${index + 2}`,
+      ).join(", ");
+      result = await pool.query(
+        `INSERT INTO "RAParameter"
+         ("ItemId", ${columns}, "RALogic")
+         VALUES ($1, ${placeholders}, $${RA_PARAMETER_FIELDS.length + 2})
+         RETURNING "RAParameterId", "ItemId", "RALogic"`,
+        [
+          Number(ItemId),
+          ...RA_PARAMETER_FIELDS.map((field) => defaults[field.key]),
+          logic,
+        ],
+      );
+    }
+
+    return res.json({ data: result.rows[0], exists: true });
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
+function roundMoney(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function roundToFivePaise(n) {
+  return Math.round((Number(n) || 0) * 20) / 20;
+}
+
+function formatQty(n) {
+  const value = Number(n) || 0;
+  if (Number.isInteger(value)) return String(value);
+  return value.toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+}
+
+app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
+  const { itemId, userId } = req.query;
+  const auth = await requireSuperOrOrgAdmin(userId, itemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId is required." });
+  }
+
+  try {
+    const itemResult = await pool.query(
+      `SELECT i."ItemId", i."ItemNumber", i."ItemCode",
+              i."ItemDescription", i."ItemShortDescription",
+              i."RegionId", i."SSRYearId",
+              u."UnitName", u."UnitShortName",
+              r."SSRRegionShortName", r."SSRRegionName",
+              y."Year" AS "SSRYear"
+       FROM "MasterItem" i
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+       LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+       WHERE i."ItemId" = $1`,
+      [Number(itemId)],
+    );
+    const item = itemResult.rows[0];
+    if (!item) {
+      return res.status(404).json({ message: "Item not found." });
+    }
+
+    const paramResult = await pool.query(
+      `SELECT *
+       FROM "RAParameter"
+       WHERE "ItemId" = $1
+       ORDER BY "RAParameterId" ASC
+       LIMIT 1`,
+      [Number(itemId)],
+    );
+    if (!paramResult.rows[0]) {
+      return res.status(400).json({
+        message: "Please save Rate Analysis Parameters first.",
+      });
+    }
+    const params = mapRAParameterRow(paramResult.rows[0]);
+
+    const materials = await pool.query(
+      `SELECT m."ItemCode",
+              COALESCE(
+                NULLIF(BTRIM(m."MaterialShortDescription"), ''),
+                NULLIF(BTRIM(m."MaterialDescription"), '')
+              ) AS "ComponentName",
+              NULLIF(BTRIM(ra."Description"), '') AS "Description",
+              u."UnitShortName",
+              ra."Component" AS "Quantity",
+              (m."MaterialRate" * COALESCE(m."ConversionFactor", 1)) AS "Rate"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterMaterial" m ON m."MaterialId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u
+         ON u."UnitId" = COALESCE(m."MaterialLocalUnitId", m."MaterialUnitId")
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_MATERIAL],
+    );
+    const labours = await pool.query(
+      `SELECT l."ItemCode",
+              NULLIF(BTRIM(l."LabourDescription"), '') AS "ComponentName",
+              NULLIF(BTRIM(ra."Description"), '') AS "Description",
+              u."UnitShortName",
+              ra."Component" AS "Quantity",
+              l."LabourRate" AS "Rate"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterLabour" l ON l."LabourId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = l."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_LABOUR],
+    );
+    const machineries = await pool.query(
+      `SELECT m."ItemCode",
+              NULLIF(BTRIM(m."MachineryDescription"), '') AS "ComponentName",
+              NULLIF(BTRIM(ra."Description"), '') AS "Description",
+              u."UnitShortName",
+              ra."Component" AS "Quantity",
+              m."MachineryRate" AS "Rate"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterMachinery" m ON m."MachineryId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_MACHINERY],
+    );
+
+    const unitLabel = item.UnitName || item.UnitShortName || "";
+    const itemNumber = String(item.ItemNumber || "").trim();
+    const fullDescription = String(item.ItemDescription || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const regionLabel =
+      String(item.SSRRegionShortName || item.SSRRegionName || "").trim();
+    const dsrYear =
+      item.SSRYear != null && String(item.SSRYear).trim() !== ""
+        ? String(item.SSRYear).trim()
+        : item.SSRYearId != null
+          ? String(item.SSRYearId)
+          : "—";
+    const raQty = Number(params.RAQuantity) || 0;
+    const safeFileItem = (itemNumber || String(itemId)).replace(
+      /[^\w.-]+/g,
+      "_",
+    );
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Item-${safeFileItem}-RateAnalysis.pdf"`,
+    );
+
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
+    const fonts = registerRupeeFonts(doc);
+    doc.pipe(res);
+
+    const left = Math.round(40 * 1.05 * 1.1 * 1.15);
+    const right = 555;
+    const width = right - left;
+    const colCodeW = 48;
+    const colUnitW = Math.round(40 * 0.95 * 0.9);
+    const colQtyW = Math.round(54 * 0.95 * 0.9);
+    const colRateW = Math.round(85 * 0.95 * 0.9);
+    const colAmtW = Math.round(108 * 0.95 * 0.9);
+    const colAmt = right - colAmtW;
+    const colRate = colAmt - colRateW;
+    const colQty = colRate - colQtyW;
+    const colUnit = colQty - colUnitW;
+    const colCode = left;
+    const colDesc = left + colCodeW;
+    const colDescW = Math.max(120, colUnit - colDesc - 4);
+    const pageBottom = doc.page.height - doc.page.margins.bottom;
+
+    const rs = (n) => formatInrAmount(roundMoney(n));
+
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > pageBottom - 28) {
+        doc.addPage();
+        return true;
+      }
+      return false;
+    };
+
+    const drawLine = () => {
+      doc
+        .moveTo(left, doc.y)
+        .lineTo(right, doc.y)
+        .strokeColor("#333333")
+        .lineWidth(0.6)
+        .stroke();
+      doc.moveDown(0.25);
+    };
+
+    const drawAmount = (value, x, y, w) => {
+      doc.font(fonts.regular).fontSize(9).text(rs(value), x, y, {
+        width: w,
+        align: "right",
+        lineBreak: false,
+      });
+    };
+
+    const drawTableHeader = () => {
+      ensureSpace(28);
+      const y = doc.y;
+      doc.font("Helvetica-Bold").fontSize(8);
+      doc.text("DSR Code", colCode, y, { width: colCodeW });
+      doc.text("Component & Description", colDesc, y, { width: colDescW });
+      doc.text("Unit", colUnit, y, { width: colUnitW });
+      doc.text("Quantity", colQty, y, { width: colQtyW, align: "right" });
+      doc.text("Rate", colRate, y, { width: colRateW, align: "right" });
+      doc.text("Amount", colAmt, y, { width: colAmtW, align: "right" });
+      doc.y = y + 14;
+      drawLine();
+    };
+
+    const drawComponentRow = (row) => {
+      const code = String(row.ItemCode || "");
+      const componentName = String(row.ComponentName || "").trim();
+      const extraDesc = String(row.Description || "").trim();
+      const combinedText = extraDesc
+        ? `${componentName} -- ${extraDesc}`
+        : componentName;
+      const unit = String(row.UnitShortName || "");
+      const qty = Number(row.Quantity) || 0;
+      const rate = Number(row.Rate) || 0;
+      const amount = roundMoney(qty * rate);
+      doc.font("Helvetica-Bold").fontSize(9);
+      const descHeight = Math.max(
+        12,
+        doc.heightOfString(combinedText || " ", { width: colDescW }),
+      );
+      ensureSpace(descHeight + 8);
+      const y = doc.y;
+      doc.font("Helvetica").fontSize(9);
+      doc.text(code, colCode, y, { width: colCodeW });
+      if (componentName && extraDesc) {
+        doc.font("Helvetica-Bold").fontSize(9);
+        doc.text(componentName, colDesc, y, {
+          width: colDescW,
+          continued: true,
+        });
+        doc.font("Helvetica").fontSize(9);
+        doc.text(` -- ${extraDesc}`, { width: colDescW });
+      } else {
+        doc.font(componentName ? "Helvetica-Bold" : "Helvetica").fontSize(9);
+        doc.text(combinedText, colDesc, y, { width: colDescW });
+      }
+      doc.font("Helvetica").fontSize(9);
+      doc.text(unit, colUnit, y, { width: colUnitW });
+      doc.text(formatQty(qty), colQty, y, { width: colQtyW, align: "right" });
+      drawAmount(rate, colRate, y, colRateW);
+      drawAmount(amount, colAmt, y, colAmtW);
+      doc.y = y + descHeight + 4;
+      return amount;
+    };
+
+    const drawLabelAmount = (label, amount, bold = false) => {
+      ensureSpace(18);
+      const y = doc.y;
+      doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(9);
+      doc.text(label, left, y, { width: colAmt - left - 8 });
+      drawAmount(amount, colAmt, y, colAmtW);
+      doc.y = y + 14;
+    };
+
+    const drawSection = (title, rows) => {
+      ensureSpace(22);
+      doc.font("Helvetica-Bold").fontSize(10);
+      doc.text(title, left, doc.y, { width });
+      doc.moveDown(0.2);
+      let total = 0;
+      if (!rows.length) {
+        doc.font("Helvetica").fontSize(9).text("—", left, doc.y);
+        doc.moveDown(0.3);
+      } else {
+        for (const row of rows) {
+          total += drawComponentRow(row);
+        }
+      }
+      drawLine();
+      drawLabelAmount(`Total ${title.charAt(0)}`, total, true);
+      drawLine();
+      return roundMoney(total);
+    };
+
+    // Header
+    doc.font("Helvetica-Bold").fontSize(16);
+    doc.text("RATE ANALYSIS", left, doc.y, {
+      width,
+      align: "center",
+    });
+    doc.moveDown(0.55);
+    doc.font("Helvetica-Bold").fontSize(11);
+    const headerY = doc.y;
+    doc.text(
+      `DSR REGION${regionLabel ? `  ${regionLabel}` : ""}`,
+      left,
+      headerY,
+      { width: width * 0.58 },
+    );
+    doc.text(`DSR Year ${dsrYear}`, left + width * 0.58, headerY, {
+      width: width * 0.42,
+      align: "right",
+    });
+    doc.y = headerY + 18;
+    doc.font("Helvetica-Bold").fontSize(11);
+    doc.text(`Item Code  ${itemNumber || "—"}`, left, doc.y, { width });
+    doc.moveDown(0.25);
+    if (fullDescription) {
+      doc.font("Helvetica").fontSize(10);
+      doc.text(fullDescription, left, doc.y, {
+        width,
+        align: "justify",
+      });
+      doc.moveDown(0.35);
+    }
+    doc.font("Helvetica-Bold").fontSize(10);
+    doc.text(
+      `Rate Analysis for    ${formatQty(raQty)}    ${unitLabel}`.trim(),
+      left,
+      doc.y,
+      { width },
+    );
+    doc.moveDown(0.35);
+    doc.font("Helvetica").fontSize(9);
+    doc.text(`Reference: ${params.Reference || ""}`, left, doc.y, { width });
+    doc.moveDown(0.45);
+    drawTableHeader();
+
+    const totalA = drawSection("A: MATERIAL", materials.rows);
+    const totalB = drawSection("B: LABOUR", labours.rows);
+    const totalC = drawSection("C: MACHINERY", machineries.rows);
+    let running = roundMoney(totalA + totalB + totalC);
+    drawLabelAmount("Total A+B+C", running, true);
+    drawLine();
+
+    const optionalAdds = [
+      { key: "Scaffolding", label: "Scaffolding" },
+      { key: "Sundries", label: "Sundries" },
+      { key: "WaterCharges", label: "Water Charges" },
+      { key: "QCCharges", label: "Q.C. Charges" },
+      { key: "Formwork", label: "Formwork" },
+      { key: "LabourAmenities", label: "Labour Amenities" },
+    ];
+    for (const add of optionalAdds) {
+      const pct = Number(params[add.key]) || 0;
+      if (!pct) continue;
+      const extra = roundMoney(running * (pct / 100));
+      drawLabelAmount(`Add ${formatQty(pct)}% ${add.label}`, extra);
+      running = roundMoney(running + extra);
+      drawLabelAmount("Total", running, true);
+      drawLine();
+    }
+
+    const wcPct = Number(params.WCharges) || 0;
+    const wcAmt = roundMoney(running * (wcPct / 100));
+    drawLabelAmount(`Add ${formatQty(wcPct)}% W.C.`, wcAmt);
+    running = roundMoney(running + wcAmt);
+    drawLabelAmount("Total", running, true);
+    drawLine();
+
+    const cpohPct = Number(params.CPOHCharges) || 0;
+    const cpohAmt = roundMoney(running * (cpohPct / 100));
+    drawLabelAmount(`Add ${formatQty(cpohPct)}% for C.P. & O.H.`, cpohAmt);
+    running = roundMoney(running + cpohAmt);
+    drawLabelAmount("Total", running, true);
+    drawLine();
+
+    const cessPct = Number(params.LabourCess) || 0;
+    const cessAmt = roundMoney(running * (cessPct / 100));
+    drawLabelAmount(`Add labour cess ${formatQty(cessPct)}%`, cessAmt);
+    running = roundMoney(running + cessAmt);
+    drawLabelAmount("Total", running, true);
+    drawLine();
+
+    const gstPct = Number(params.GSTCharges) || 0;
+    const gstAmt = roundMoney(running * (gstPct / 100));
+    drawLabelAmount(`Add ${formatQty(gstPct)}% GST`, gstAmt);
+    running = roundMoney(running + gstAmt);
+    drawLine();
+    drawLabelAmount("", running, true);
+
+    const perUnit = raQty ? roundMoney(running / raQty) : 0;
+    const sayRate = roundToFivePaise(perUnit);
+
+    doc.moveDown(0.55);
+    ensureSpace(56);
+    const drawRightCostLine = (label, amount) => {
+      const y = doc.y;
+      const amtText = rs(amount);
+      doc.font(fonts.regular).fontSize(10);
+      const amtWidth = Math.max(colAmtW, doc.widthOfString(amtText) + 2);
+      doc.font("Helvetica-Bold").fontSize(10);
+      const labelText = `${label}   `;
+      doc.text(labelText, left, y, {
+        width: right - amtWidth - left,
+        align: "right",
+        lineBreak: false,
+      });
+      doc.font(fonts.regular).fontSize(10);
+      doc.text(amtText, right - amtWidth, y, {
+        width: amtWidth,
+        align: "right",
+        lineBreak: false,
+      });
+      doc.y = y + 16;
+    };
+    drawRightCostLine(
+      `Cost of ${formatQty(raQty)} ${unitLabel}`.trim(),
+      running,
+    );
+    drawRightCostLine(
+      `Cost of 1 ${unitLabel || "Unit"}`.trim(),
+      perUnit,
+    );
+    drawRightCostLine("Say", sayRate);
+
+    applyTrialReportBranding(doc, {
+      pageNumberText: (i, count) => `-- ${i + 1} of ${count} --`,
+    });
+    doc.end();
+  } catch (error) {
+    console.error(error);
+    if (!res.headersSent) {
+      return res.status(500).json({ message: error.message });
+    }
   }
 });
 
@@ -8215,6 +9598,9 @@ app.listen(port, async () => {
     await ensureWorkMeasurementSequence();
     await ensureWorkMeasurementNullableQuantity();
     await ensureMaterialComponentIdSequence();
+    await ensureRAComponentIdSequence();
+    await ensureRAComponentYearIdNullable();
+    await ensureMasterMaterialComponentDescription();
     await ensureWorkStandardAdditionSchema();
     await ensureMasterItemUserId();
     await ensureWorkEstimateSequences();
@@ -8222,6 +9608,7 @@ app.listen(port, async () => {
     await ensureUserLogTrackSchema(pool);
     await ensureMasterMeasurementGroupSchema(pool);
     await ensureWorkMeasurementGroupSchema(pool);
+    await ensureRAParameterSchema();
   } catch (err) {
     console.error("Failed to ensure schema:", err);
   }

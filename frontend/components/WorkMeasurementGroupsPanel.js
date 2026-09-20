@@ -12,8 +12,9 @@ export default function WorkMeasurementGroupsPanel({
   userId,
   workId,
   subWorkId,
+  reloadToken = 0,
+  onClose,
 }) {
-  const [open, setOpen] = useState(false);
   const [catalog, setCatalog] = useState([]);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -21,32 +22,8 @@ export default function WorkMeasurementGroupsPanel({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [dragId, setDragId] = useState(null);
-  const [savedCount, setSavedCount] = useState(0);
 
   const canUse = Boolean(userId && workId && subWorkId);
-
-  useEffect(() => {
-    if (!canUse) {
-      setSavedCount(0);
-      return undefined;
-    }
-    let cancelled = false;
-    axios
-      .get(`${apiBase}/api/work-measurement-groups`, {
-        params: { userId, workId, subWorkId },
-      })
-      .then((res) => {
-        if (cancelled) return;
-        const list = Array.isArray(res.data?.data) ? res.data.data : [];
-        setSavedCount(list.length);
-      })
-      .catch(() => {
-        if (!cancelled) setSavedCount(0);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [canUse, userId, workId, subWorkId, apiBase]);
 
   const loadAll = async () => {
     if (!canUse) return;
@@ -94,7 +71,6 @@ export default function WorkMeasurementGroupsPanel({
       });
 
       setCatalog(catalogRows);
-      setSavedCount(assignedList.length);
       setRows(
         orderedMaster.map((group) => {
           const saved = assignedByGroupId.get(Number(group.GroupId));
@@ -129,9 +105,9 @@ export default function WorkMeasurementGroupsPanel({
   };
 
   useEffect(() => {
-    if (!open || !canUse) return;
+    if (!canUse) return;
     loadAll();
-  }, [open, canUse, userId, workId, subWorkId, apiBase]);
+  }, [canUse, userId, workId, subWorkId, apiBase, reloadToken]);
 
   const updateRow = (localId, field, value) => {
     setRows((prev) =>
@@ -208,7 +184,6 @@ export default function WorkMeasurementGroupsPanel({
         })),
       });
       setMessage(res.data?.message || "Measurement groups saved.");
-      setSavedCount(selectedRows.length);
       await loadAll();
     } catch (err) {
       setError(
@@ -231,36 +206,9 @@ export default function WorkMeasurementGroupsPanel({
     boxSizing: "border-box",
   };
 
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <button
-        type="button"
-        onClick={() => {
-          setError("");
-          setMessage("");
-          if (open) {
-            loadAll();
-            return;
-          }
-          setOpen(true);
-        }}
-        disabled={!canUse}
-        style={{
-          fontSize: 13.5,
-          fontWeight: 600,
-          padding: "9px 16px",
-          borderRadius: 8,
-          border: "1px solid #2F7DE1",
-          background: open ? "#EAF2FF" : "#2F7DE1",
-          color: open ? "#185FA5" : "#fff",
-          cursor: canUse ? "pointer" : "not-allowed",
-        }}
-      >
-        Add Measurement Groups
-        {savedCount ? ` (${savedCount})` : ""}
-      </button>
+  if (!canUse) return null;
 
-      {open && (
+  return (
         <div
           style={{
             marginTop: 12,
@@ -268,6 +216,7 @@ export default function WorkMeasurementGroupsPanel({
             background: "#fff",
             border: "1px solid #d5dde4",
             borderRadius: 10,
+            boxSizing: "border-box",
           }}
         >
           <div
@@ -547,9 +496,9 @@ export default function WorkMeasurementGroupsPanel({
                 <button
                   type="button"
                   onClick={() => {
-                    setOpen(false);
                     setError("");
                     setMessage("");
+                    if (typeof onClose === "function") onClose();
                   }}
                   disabled={saving}
                   style={{
@@ -569,8 +518,6 @@ export default function WorkMeasurementGroupsPanel({
             </>
           )}
         </div>
-      )}
-    </div>
   );
 }
 

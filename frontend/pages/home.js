@@ -23,8 +23,8 @@ const SESSION_KEY = "werms_user";
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
 
-const SESSION_IDLE_SECONDS = 120;
-const SESSION_WARNING_SECONDS = 105;
+const SESSION_IDLE_SECONDS = 300;
+const SESSION_WARNING_SECONDS = 285;
 const SESSION_HEARTBEAT_MS = 10000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -362,16 +362,72 @@ const initialItemMasterForm = {
   PageNumber: "",
 };
 
+const MATERIAL_COMPONENT_DESC_MAX = 100;
+
 const initialMaterialComponentForm = {
   MaterialId: "",
+  Description: "",
   MaterialComponent: "",
   MaterialUnitId: "",
 };
+
+function formatMaterialLabel(material) {
+  if (!material) return "";
+  const code = String(material.ItemCode || "").trim();
+  const description = String(material.MaterialDescription || "").trim();
+  if (code && description) return `${code} ${description}`;
+  return (
+    code ||
+    description ||
+    material.MaterialShortName ||
+    String(material.MaterialId || "")
+  );
+}
+
+function hasItemUnitId(item) {
+  return (
+    item?.UnitId != null &&
+    item.UnitId !== "" &&
+    Number(item.UnitId) > 0
+  );
+}
+
+function isNonSsrMaterialRegion(regionId) {
+  const id = Number(regionId);
+  return id === 3 || id === 4;
+}
+
+function getComponentCatalogRegionIds(selectedRegionId, raLogic) {
+  const selected = Number(selectedRegionId);
+  if (!selected) return [];
+  if (selected === 3 || selected === 4) {
+    if (raLogic === "PWD") return [1, selected];
+    if (raLogic === "CPWD") return [2, selected];
+    return [selected];
+  }
+  return [selected];
+}
+
+function formatMaterialRate(value) {
+  return formatRupees(value);
+}
+
+function materialMatchesPickerSearch(material, search) {
+  const query = String(search || "").trim().toLowerCase();
+  if (!query) return true;
+  const code = String(material?.ItemCode || "").toLowerCase();
+  if (code.includes(query)) return true;
+  const description = String(material?.MaterialDescription || "").toLowerCase();
+  if (description.includes(query)) return true;
+  const shortName = String(material?.MaterialShortName || "").toLowerCase();
+  return shortName.includes(query);
+}
 
 function createMaterialDraftRow() {
   return {
     key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     MaterialId: "",
+    Description: "",
     MaterialComponent: "",
     MaterialUnitId: "",
   };
@@ -594,6 +650,1816 @@ function EmptyRow({ colSpan, children }) {
   );
 }
 
+const LABOUR_COMPONENT_DESC_MAX = 100;
+
+function formatLabourLabel(labour) {
+  if (!labour) return "";
+  const code = String(labour.ItemCode || "").trim();
+  const description = String(labour.LabourDescription || "").trim();
+  if (code && description) return `${code} ${description}`;
+  return code || description || String(labour.LabourId || "");
+}
+
+function labourMatchesPickerSearch(labour, search) {
+  const query = String(search || "").trim().toLowerCase();
+  if (!query) return true;
+  const code = String(labour?.ItemCode || "").toLowerCase();
+  if (code.includes(query)) return true;
+  const description = String(labour?.LabourDescription || "").toLowerCase();
+  return description.includes(query);
+}
+
+function createLabourDraftRow() {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    LabourId: "",
+    Description: "",
+    LabourComponent: "",
+    UnitId: "",
+  };
+}
+
+function LabourComponentsPanel({
+  apiBase,
+  userId,
+  itemId,
+  regionId,
+  regionIds,
+  canEdit,
+  inputStyle,
+}) {
+  const [labourMasterList, setLabourMasterList] = useState([]);
+  const [labourPickerSearch, setLabourPickerSearch] = useState("");
+  const [labourComponentList, setLabourComponentList] = useState([]);
+  const [loadingLabourComponents, setLoadingLabourComponents] = useState(false);
+  const [labourDraftRows, setLabourDraftRows] = useState([
+    createLabourDraftRow(),
+  ]);
+  const [editingLabourComponentId, setEditingLabourComponentId] =
+    useState(null);
+  const [labourComponentForm, setLabourComponentForm] = useState({
+    LabourId: "",
+    Description: "",
+    LabourComponent: "",
+    UnitId: "",
+  });
+  const [savingLabourComponent, setSavingLabourComponent] = useState(false);
+  const [labourMessage, setLabourMessage] = useState("");
+
+  useEffect(() => {
+    const catalogRegionId = regionIds || regionId;
+    if (!catalogRegionId) {
+      setLabourMasterList([]);
+      return undefined;
+    }
+    let cancelled = false;
+    axios
+      .get(`${apiBase}/api/master-labours`, { params: { regionId: catalogRegionId } })
+      .then((res) => {
+        if (!cancelled) {
+          setLabourMasterList(Array.isArray(res.data) ? res.data : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLabourMasterList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, regionId, regionIds]);
+
+  const loadLabourComponents = async (nextItemId) => {
+    if (!nextItemId) {
+      setLabourComponentList([]);
+      return;
+    }
+    setLoadingLabourComponents(true);
+    try {
+      const res = await axios.get(`${apiBase}/api/labour-components`, {
+        params: { itemId: nextItemId },
+      });
+      setLabourComponentList(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      setLabourComponentList([]);
+      setLabourMessage(
+        `Failed to load labour components: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoadingLabourComponents(false);
+    }
+  };
+
+  useEffect(() => {
+    setLabourPickerSearch("");
+    setEditingLabourComponentId(null);
+    setLabourComponentForm({
+      LabourId: "",
+      Description: "",
+      LabourComponent: "",
+      UnitId: "",
+    });
+    setLabourDraftRows([createLabourDraftRow()]);
+    setLabourMessage("");
+    loadLabourComponents(itemId);
+  }, [itemId]);
+
+  const onLabourFormChange = (e) => {
+    const { name, value } = e.target;
+    setLabourComponentForm((prev) => {
+      if (name === "LabourId") {
+        const labour = labourMasterList.find(
+          (row) => Number(row.LabourId) === Number(value),
+        );
+        return {
+          ...prev,
+          LabourId: value,
+          UnitId: labour?.UnitId ? String(labour.UnitId) : "",
+        };
+      }
+      return { ...prev, [name]: value };
+    });
+  };
+
+  const onLabourDraftChange = (rowKey, name, value) => {
+    setLabourDraftRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row;
+        if (name === "LabourId") {
+          const labour = labourMasterList.find(
+            (item) => Number(item.LabourId) === Number(value),
+          );
+          return {
+            ...row,
+            LabourId: value,
+            UnitId: labour?.UnitId ? String(labour.UnitId) : "",
+          };
+        }
+        return { ...row, [name]: value };
+      }),
+    );
+  };
+
+  const resetLabourEdit = () => {
+    setEditingLabourComponentId(null);
+    setLabourComponentForm({
+      LabourId: "",
+      Description: "",
+      LabourComponent: "",
+      UnitId: "",
+    });
+    setLabourDraftRows([createLabourDraftRow()]);
+  };
+
+  const startLabourEdit = (row) => {
+    const labour = labourMasterList.find(
+      (item) => Number(item.LabourId) === Number(row.LabourId),
+    );
+    setEditingLabourComponentId(row.LabourComponentId);
+    setLabourComponentForm({
+      LabourId: String(row.LabourId || ""),
+      Description: row.Description == null ? "" : String(row.Description),
+      LabourComponent:
+        row.LabourComponent === null || row.LabourComponent === undefined
+          ? ""
+          : String(row.LabourComponent),
+      UnitId: labour?.UnitId
+        ? String(labour.UnitId)
+        : String(row.UnitId || ""),
+    });
+  };
+
+  const onLabourSubmit = async (e) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setLabourMessage("Only SuperAdmin or OrgAdmin can manage labour components.");
+      return;
+    }
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (editingLabourComponentId) {
+      if (!labourComponentForm.LabourId || labourComponentForm.LabourComponent === "") {
+        alert("Labour and Labour Component are required.");
+        return;
+      }
+      if (!labourComponentForm.UnitId) {
+        alert("Selected labour has no Unit. Choose another labour.");
+        return;
+      }
+      if (
+        String(labourComponentForm.Description || "").length >
+        LABOUR_COMPONENT_DESC_MAX
+      ) {
+        alert(
+          `Description must be at most ${LABOUR_COMPONENT_DESC_MAX} characters.`,
+        );
+        return;
+      }
+      if (!window.confirm("Update this labour component?")) return;
+      setSavingLabourComponent(true);
+      setLabourMessage("");
+      try {
+        await axios.put(
+          `${apiBase}/api/labour-components/${editingLabourComponentId}`,
+          {
+            userId,
+            ItemId: itemId,
+            LabourId: labourComponentForm.LabourId,
+            Description: String(labourComponentForm.Description || "").trim(),
+            LabourComponent: labourComponentForm.LabourComponent,
+          },
+        );
+        setLabourMessage("Labour component updated.");
+        resetLabourEdit();
+        await loadLabourComponents(itemId);
+      } catch (err) {
+        setLabourMessage(
+          `Labour component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSavingLabourComponent(false);
+      }
+      return;
+    }
+
+    const validRows = labourDraftRows.filter(
+      (row) => row.LabourId && row.LabourComponent !== "",
+    );
+    if (!validRows.length) {
+      alert("Add at least one labour with a component value.");
+      return;
+    }
+    if (validRows.find((row) => !row.UnitId)) {
+      alert(
+        "One or more selected labour rows have no Unit. Choose another labour.",
+      );
+      return;
+    }
+    if (
+      validRows.find(
+        (row) =>
+          String(row.Description || "").length > LABOUR_COMPONENT_DESC_MAX,
+      )
+    ) {
+      alert(
+        `Description must be at most ${LABOUR_COMPONENT_DESC_MAX} characters.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        validRows.length === 1
+          ? "Save this labour component?"
+          : `Save ${validRows.length} labour components?`,
+      )
+    ) {
+      return;
+    }
+
+    setSavingLabourComponent(true);
+    setLabourMessage("");
+    try {
+      const res = await axios.post(`${apiBase}/api/labour-components/batch`, {
+        userId,
+        ItemId: itemId,
+        rows: validRows.map((row) => ({
+          LabourId: row.LabourId,
+          Description: String(row.Description || "").trim(),
+          LabourComponent: row.LabourComponent,
+        })),
+      });
+      const count = res.data?.count || validRows.length;
+      setLabourMessage(
+        count === 1
+          ? "Labour component saved."
+          : `${count} labour components saved.`,
+      );
+      setLabourDraftRows([createLabourDraftRow()]);
+      await loadLabourComponents(itemId);
+    } catch (err) {
+      setLabourMessage(
+        `Labour component save failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setSavingLabourComponent(false);
+    }
+  };
+
+  const readonlyInputStyle = {
+    ...inputStyle,
+    background: "#EEF1F4",
+    color: theme.colors.inkSoft,
+    cursor: "not-allowed",
+  };
+
+  return (
+    <Card
+      eyebrow="MasterRAComponent"
+      title={
+        editingLabourComponentId
+          ? `Edit labour component #${editingLabourComponentId}`
+          : itemId
+            ? `Labour components for item #${itemId}`
+            : "Labour components"
+      }
+      subtitle="Add or edit labour component rows for the selected item."
+    >
+      {!itemId ? (
+        <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
+          Select an item from the list to manage its labour components.
+        </div>
+      ) : (
+        <>
+          {labourMessage && (
+            <div
+              style={{
+                fontSize: 13,
+                marginBottom: 12,
+                color: labourMessage.toLowerCase().includes("fail")
+                  ? "#C6362C"
+                  : "#2A7D4F",
+              }}
+            >
+              {labourMessage}
+            </div>
+          )}
+          <div
+            style={{
+              overflowX: "auto",
+              border: `1px solid ${theme.colors.line}`,
+              borderRadius: 10,
+            }}
+          >
+            <table className="wrms-table">
+              <thead>
+                <tr>
+                  <th>Sr.No.</th>
+                  <th>Labour</th>
+                  <th>Description</th>
+                  <th>Labour Component</th>
+                  <th>Unit</th>
+                  <th>Labour Rate</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingLabourComponents ? (
+                  <EmptyRow colSpan={7}>Loading…</EmptyRow>
+                ) : labourComponentList.length ? (
+                  labourComponentList.map((row, index) => (
+                    <tr key={row.LabourComponentId}>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {index + 1}
+                      </td>
+                      <td>{formatLabourLabel(row) || row.LabourId}</td>
+                      <td>{row.Description || ""}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {row.LabourComponent}
+                      </td>
+                      <td>{row.UnitShortName || row.UnitId}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {formatRupees(row.LabourRate)}
+                      </td>
+                      <td>
+                        <GhostIconButton
+                          tone={theme.colors.accent}
+                          onClick={() => startLabourEdit(row)}
+                        >
+                          ✎ Edit
+                        </GhostIconButton>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <EmptyRow colSpan={7}>
+                    No labour components for this item — add one below.
+                  </EmptyRow>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <FormShell onSubmit={onLabourSubmit}>
+              {editingLabourComponentId ? (
+                <>
+                  <div style={{ marginBottom: 14 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={labourPickerSearch}
+                        onChange={(e) => setLabourPickerSearch(e.target.value)}
+                        placeholder="Type Item Code or text to filter Labour"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
+                      gap: 14,
+                    }}
+                  >
+                    <Field label="Labour" required>
+                      <select
+                        name="LabourId"
+                        value={labourComponentForm.LabourId}
+                        onChange={onLabourFormChange}
+                        required
+                        style={inputStyle}
+                      >
+                        <option value="">Select Labour</option>
+                        {labourMasterList
+                          .filter(
+                            (row) =>
+                              Number(row.LabourId) ===
+                                Number(labourComponentForm.LabourId) ||
+                              labourMatchesPickerSearch(
+                                row,
+                                labourPickerSearch,
+                              ),
+                          )
+                          .map((row) => (
+                            <option key={row.LabourId} value={row.LabourId}>
+                              {formatLabourLabel(row)}
+                            </option>
+                          ))}
+                      </select>
+                    </Field>
+                    <Field label="Description">
+                      <input
+                        name="Description"
+                        value={labourComponentForm.Description}
+                        maxLength={LABOUR_COMPONENT_DESC_MAX}
+                        onChange={onLabourFormChange}
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Labour Component" required>
+                      <input
+                        name="LabourComponent"
+                        type="number"
+                        step="any"
+                        value={labourComponentForm.LabourComponent}
+                        onChange={onLabourFormChange}
+                        required
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Unit">
+                      <input
+                        value={
+                          labourMasterList.find(
+                            (row) =>
+                              Number(row.LabourId) ===
+                              Number(labourComponentForm.LabourId),
+                          )?.UnitShortName || ""
+                        }
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                    <Field label="Labour Rate">
+                      <input
+                        value={formatRupees(
+                          labourMasterList.find(
+                            (row) =>
+                              Number(row.LabourId) ===
+                              Number(labourComponentForm.LabourId),
+                          )?.LabourRate,
+                        )}
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                    <PrimaryButton disabled={savingLabourComponent}>
+                      {savingLabourComponent
+                        ? "Saving…"
+                        : "Update component"}
+                    </PrimaryButton>
+                    <SecondaryButton type="button" onClick={resetLabourEdit}>
+                      Cancel edit
+                    </SecondaryButton>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      marginBottom: 10,
+                      color: theme.colors.ink,
+                    }}
+                  >
+                    Add components (one or more)
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={labourPickerSearch}
+                        onChange={(e) => setLabourPickerSearch(e.target.value)}
+                        placeholder="Type Item Code or text to filter Labour"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {labourDraftRows.map((row, index) => {
+                      const selectedLabour = labourMasterList.find(
+                        (item) =>
+                          Number(item.LabourId) === Number(row.LabourId),
+                      );
+                      return (
+                        <div
+                          key={row.key}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns:
+                              "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
+                            gap: 12,
+                            alignItems: "end",
+                            padding: 12,
+                            border: `1px solid ${theme.colors.line}`,
+                            borderRadius: 8,
+                            background: "#fff",
+                          }}
+                        >
+                          <Field label={`Labour ${index + 1}`} required>
+                            <select
+                              value={row.LabourId}
+                              onChange={(e) =>
+                                onLabourDraftChange(
+                                  row.key,
+                                  "LabourId",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            >
+                              <option value="">Select Labour</option>
+                              {labourMasterList
+                                .filter(
+                                  (item) =>
+                                    Number(item.LabourId) ===
+                                      Number(row.LabourId) ||
+                                    labourMatchesPickerSearch(
+                                      item,
+                                      labourPickerSearch,
+                                    ),
+                                )
+                                .map((item) => (
+                                  <option
+                                    key={item.LabourId}
+                                    value={item.LabourId}
+                                  >
+                                    {formatLabourLabel(item)}
+                                  </option>
+                                ))}
+                            </select>
+                          </Field>
+                          <Field label="Description">
+                            <input
+                              value={row.Description}
+                              maxLength={LABOUR_COMPONENT_DESC_MAX}
+                              onChange={(e) =>
+                                onLabourDraftChange(
+                                  row.key,
+                                  "Description",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Labour Component" required>
+                            <input
+                              type="number"
+                              step="any"
+                              value={row.LabourComponent}
+                              onChange={(e) =>
+                                onLabourDraftChange(
+                                  row.key,
+                                  "LabourComponent",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Unit">
+                            <input
+                              value={selectedLabour?.UnitShortName || ""}
+                              disabled
+                              readOnly
+                              placeholder="From selected labour"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <Field label="Labour Rate">
+                            <input
+                              value={formatRupees(selectedLabour?.LabourRate)}
+                              disabled
+                              readOnly
+                              placeholder="From selected labour"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <SecondaryButton
+                            type="button"
+                            onClick={() =>
+                              setLabourDraftRows((prev) => {
+                                if (prev.length <= 1) {
+                                  return [createLabourDraftRow()];
+                                }
+                                return prev.filter((item) => item.key !== row.key);
+                              })
+                            }
+                            style={{ marginBottom: 2 }}
+                          >
+                            Remove
+                          </SecondaryButton>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      marginTop: 18,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <SecondaryButton
+                      type="button"
+                      onClick={() =>
+                        setLabourDraftRows((prev) => [
+                          ...prev,
+                          createLabourDraftRow(),
+                        ])
+                      }
+                    >
+                      + Add another labour
+                    </SecondaryButton>
+                    <PrimaryButton disabled={savingLabourComponent}>
+                      {savingLabourComponent
+                        ? "Saving…"
+                        : labourDraftRows.filter(
+                              (row) =>
+                                row.LabourId && row.LabourComponent !== "",
+                            ).length > 1
+                          ? "Save all components"
+                          : "Save component"}
+                    </PrimaryButton>
+                  </div>
+                </>
+              )}
+            </FormShell>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+const MACHINERY_COMPONENT_DESC_MAX = 100;
+
+function formatMachineryLabel(machinery) {
+  if (!machinery) return "";
+  const code = String(machinery.ItemCode || "").trim();
+  const description = String(machinery.MachineryDescription || "").trim();
+  if (code && description) return `${code} ${description}`;
+  return code || description || String(machinery.MachineryId || "");
+}
+
+function machineryMatchesPickerSearch(machinery, search) {
+  const query = String(search || "").trim().toLowerCase();
+  if (!query) return true;
+  const code = String(machinery?.ItemCode || "").toLowerCase();
+  if (code.includes(query)) return true;
+  const description = String(
+    machinery?.MachineryDescription || "",
+  ).toLowerCase();
+  return description.includes(query);
+}
+
+function createMachineryDraftRow() {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    MachineryId: "",
+    Description: "",
+    MachineryComponent: "",
+    UnitId: "",
+  };
+}
+
+function MachineryComponentsPanel({
+  apiBase,
+  userId,
+  itemId,
+  regionId,
+  regionIds,
+  canEdit,
+  inputStyle,
+}) {
+  const [machineryMasterList, setMachineryMasterList] = useState([]);
+  const [machineryPickerSearch, setMachineryPickerSearch] = useState("");
+  const [machineryComponentList, setMachineryComponentList] = useState([]);
+  const [loadingMachineryComponents, setLoadingMachineryComponents] =
+    useState(false);
+  const [machineryDraftRows, setMachineryDraftRows] = useState([
+    createMachineryDraftRow(),
+  ]);
+  const [editingMachineryComponentId, setEditingMachineryComponentId] =
+    useState(null);
+  const [machineryComponentForm, setMachineryComponentForm] = useState({
+    MachineryId: "",
+    Description: "",
+    MachineryComponent: "",
+    UnitId: "",
+  });
+  const [savingMachineryComponent, setSavingMachineryComponent] =
+    useState(false);
+  const [machineryMessage, setMachineryMessage] = useState("");
+
+  useEffect(() => {
+    const catalogRegionId = regionIds || regionId;
+    if (!catalogRegionId) {
+      setMachineryMasterList([]);
+      return undefined;
+    }
+    let cancelled = false;
+    axios
+      .get(`${apiBase}/api/master-machineries`, {
+        params: { regionId: catalogRegionId },
+      })
+      .then((res) => {
+        if (!cancelled) {
+          setMachineryMasterList(Array.isArray(res.data) ? res.data : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setMachineryMasterList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, regionId, regionIds]);
+
+  const loadMachineryComponents = async (nextItemId) => {
+    if (!nextItemId) {
+      setMachineryComponentList([]);
+      return;
+    }
+    setLoadingMachineryComponents(true);
+    try {
+      const res = await axios.get(`${apiBase}/api/machinery-components`, {
+        params: { itemId: nextItemId },
+      });
+      setMachineryComponentList(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      setMachineryComponentList([]);
+      setMachineryMessage(
+        `Failed to load machinery components: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoadingMachineryComponents(false);
+    }
+  };
+
+  useEffect(() => {
+    setMachineryPickerSearch("");
+    setEditingMachineryComponentId(null);
+    setMachineryComponentForm({
+      MachineryId: "",
+      Description: "",
+      MachineryComponent: "",
+      UnitId: "",
+    });
+    setMachineryDraftRows([createMachineryDraftRow()]);
+    setMachineryMessage("");
+    loadMachineryComponents(itemId);
+  }, [itemId]);
+
+  const onMachineryFormChange = (e) => {
+    const { name, value } = e.target;
+    setMachineryComponentForm((prev) => {
+      if (name === "MachineryId") {
+        const machinery = machineryMasterList.find(
+          (row) => Number(row.MachineryId) === Number(value),
+        );
+        return {
+          ...prev,
+          MachineryId: value,
+          UnitId: machinery?.UnitId ? String(machinery.UnitId) : "",
+        };
+      }
+      return { ...prev, [name]: value };
+    });
+  };
+
+  const onMachineryDraftChange = (rowKey, name, value) => {
+    setMachineryDraftRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row;
+        if (name === "MachineryId") {
+          const machinery = machineryMasterList.find(
+            (item) => Number(item.MachineryId) === Number(value),
+          );
+          return {
+            ...row,
+            MachineryId: value,
+            UnitId: machinery?.UnitId ? String(machinery.UnitId) : "",
+          };
+        }
+        return { ...row, [name]: value };
+      }),
+    );
+  };
+
+  const resetMachineryEdit = () => {
+    setEditingMachineryComponentId(null);
+    setMachineryComponentForm({
+      MachineryId: "",
+      Description: "",
+      MachineryComponent: "",
+      UnitId: "",
+    });
+    setMachineryDraftRows([createMachineryDraftRow()]);
+  };
+
+  const startMachineryEdit = (row) => {
+    const machinery = machineryMasterList.find(
+      (item) => Number(item.MachineryId) === Number(row.MachineryId),
+    );
+    setEditingMachineryComponentId(row.MachineryComponentId);
+    setMachineryComponentForm({
+      MachineryId: String(row.MachineryId || ""),
+      Description: row.Description == null ? "" : String(row.Description),
+      MachineryComponent:
+        row.MachineryComponent === null ||
+        row.MachineryComponent === undefined
+          ? ""
+          : String(row.MachineryComponent),
+      UnitId: machinery?.UnitId
+        ? String(machinery.UnitId)
+        : String(row.UnitId || ""),
+    });
+  };
+
+  const onMachinerySubmit = async (e) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setMachineryMessage("Only SuperAdmin or OrgAdmin can manage machinery components.");
+      return;
+    }
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (editingMachineryComponentId) {
+      if (
+        !machineryComponentForm.MachineryId ||
+        machineryComponentForm.MachineryComponent === ""
+      ) {
+        alert("Machinery and Machinery Component are required.");
+        return;
+      }
+      if (!machineryComponentForm.UnitId) {
+        alert("Selected machinery has no Unit. Choose another machinery.");
+        return;
+      }
+      if (
+        String(machineryComponentForm.Description || "").length >
+        MACHINERY_COMPONENT_DESC_MAX
+      ) {
+        alert(
+          `Description must be at most ${MACHINERY_COMPONENT_DESC_MAX} characters.`,
+        );
+        return;
+      }
+      if (!window.confirm("Update this machinery component?")) return;
+      setSavingMachineryComponent(true);
+      setMachineryMessage("");
+      try {
+        await axios.put(
+          `${apiBase}/api/machinery-components/${editingMachineryComponentId}`,
+          {
+            userId,
+            ItemId: itemId,
+            MachineryId: machineryComponentForm.MachineryId,
+            Description: String(
+              machineryComponentForm.Description || "",
+            ).trim(),
+            MachineryComponent: machineryComponentForm.MachineryComponent,
+          },
+        );
+        setMachineryMessage("Machinery component updated.");
+        resetMachineryEdit();
+        await loadMachineryComponents(itemId);
+      } catch (err) {
+        setMachineryMessage(
+          `Machinery component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSavingMachineryComponent(false);
+      }
+      return;
+    }
+
+    const validRows = machineryDraftRows.filter(
+      (row) => row.MachineryId && row.MachineryComponent !== "",
+    );
+    if (!validRows.length) {
+      alert("Add at least one machinery with a component value.");
+      return;
+    }
+    if (validRows.find((row) => !row.UnitId)) {
+      alert(
+        "One or more selected machinery rows have no Unit. Choose another machinery.",
+      );
+      return;
+    }
+    if (
+      validRows.find(
+        (row) =>
+          String(row.Description || "").length > MACHINERY_COMPONENT_DESC_MAX,
+      )
+    ) {
+      alert(
+        `Description must be at most ${MACHINERY_COMPONENT_DESC_MAX} characters.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        validRows.length === 1
+          ? "Save this machinery component?"
+          : `Save ${validRows.length} machinery components?`,
+      )
+    ) {
+      return;
+    }
+
+    setSavingMachineryComponent(true);
+    setMachineryMessage("");
+    try {
+      const res = await axios.post(
+        `${apiBase}/api/machinery-components/batch`,
+        {
+          userId,
+          ItemId: itemId,
+          rows: validRows.map((row) => ({
+            MachineryId: row.MachineryId,
+            Description: String(row.Description || "").trim(),
+            MachineryComponent: row.MachineryComponent,
+          })),
+        },
+      );
+      const count = res.data?.count || validRows.length;
+      setMachineryMessage(
+        count === 1
+          ? "Machinery component saved."
+          : `${count} machinery components saved.`,
+      );
+      setMachineryDraftRows([createMachineryDraftRow()]);
+      await loadMachineryComponents(itemId);
+    } catch (err) {
+      setMachineryMessage(
+        `Machinery component save failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setSavingMachineryComponent(false);
+    }
+  };
+
+  const readonlyInputStyle = {
+    ...inputStyle,
+    background: "#EEF1F4",
+    color: theme.colors.inkSoft,
+    cursor: "not-allowed",
+  };
+
+  return (
+    <Card
+      eyebrow="MasterRAComponent"
+      title={
+        editingMachineryComponentId
+          ? `Edit machinery component #${editingMachineryComponentId}`
+          : itemId
+            ? `Machinery components for item #${itemId}`
+            : "Machinery components"
+      }
+      subtitle="Add or edit machinery component rows for the selected item."
+    >
+      {!itemId ? (
+        <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
+          Select an item from the list to manage its machinery components.
+        </div>
+      ) : (
+        <>
+          {machineryMessage && (
+            <div
+              style={{
+                fontSize: 13,
+                marginBottom: 12,
+                color: machineryMessage.toLowerCase().includes("fail")
+                  ? "#C6362C"
+                  : "#2A7D4F",
+              }}
+            >
+              {machineryMessage}
+            </div>
+          )}
+          <div
+            style={{
+              overflowX: "auto",
+              border: `1px solid ${theme.colors.line}`,
+              borderRadius: 10,
+            }}
+          >
+            <table className="wrms-table">
+              <thead>
+                <tr>
+                  <th>Sr.No.</th>
+                  <th>Machinery</th>
+                  <th>Description</th>
+                  <th>Machinery Component</th>
+                  <th>Unit</th>
+                  <th>Machinery Rate</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingMachineryComponents ? (
+                  <EmptyRow colSpan={7}>Loading…</EmptyRow>
+                ) : machineryComponentList.length ? (
+                  machineryComponentList.map((row, index) => (
+                    <tr key={row.MachineryComponentId}>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {index + 1}
+                      </td>
+                      <td>
+                        {formatMachineryLabel(row) || row.MachineryId}
+                      </td>
+                      <td>{row.Description || ""}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {row.MachineryComponent}
+                      </td>
+                      <td>{row.UnitShortName || row.UnitId}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {formatRupees(row.MachineryRate)}
+                      </td>
+                      <td>
+                        <GhostIconButton
+                          tone={theme.colors.accent}
+                          onClick={() => startMachineryEdit(row)}
+                        >
+                          ✎ Edit
+                        </GhostIconButton>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <EmptyRow colSpan={7}>
+                    No machinery components for this item — add one below.
+                  </EmptyRow>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <FormShell onSubmit={onMachinerySubmit}>
+              {editingMachineryComponentId ? (
+                <>
+                  <div style={{ marginBottom: 14 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={machineryPickerSearch}
+                        onChange={(e) =>
+                          setMachineryPickerSearch(e.target.value)
+                        }
+                        placeholder="Type Item Code or text to filter Machinery"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
+                      gap: 14,
+                    }}
+                  >
+                    <Field label="Machinery" required>
+                      <select
+                        name="MachineryId"
+                        value={machineryComponentForm.MachineryId}
+                        onChange={onMachineryFormChange}
+                        required
+                        style={inputStyle}
+                      >
+                        <option value="">Select Machinery</option>
+                        {machineryMasterList
+                          .filter(
+                            (row) =>
+                              Number(row.MachineryId) ===
+                                Number(
+                                  machineryComponentForm.MachineryId,
+                                ) ||
+                              machineryMatchesPickerSearch(
+                                row,
+                                machineryPickerSearch,
+                              ),
+                          )
+                          .map((row) => (
+                            <option
+                              key={row.MachineryId}
+                              value={row.MachineryId}
+                            >
+                              {formatMachineryLabel(row)}
+                            </option>
+                          ))}
+                      </select>
+                    </Field>
+                    <Field label="Description">
+                      <input
+                        name="Description"
+                        value={machineryComponentForm.Description}
+                        maxLength={MACHINERY_COMPONENT_DESC_MAX}
+                        onChange={onMachineryFormChange}
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Machinery Component" required>
+                      <input
+                        name="MachineryComponent"
+                        type="number"
+                        step="any"
+                        value={machineryComponentForm.MachineryComponent}
+                        onChange={onMachineryFormChange}
+                        required
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Unit">
+                      <input
+                        value={
+                          machineryMasterList.find(
+                            (row) =>
+                              Number(row.MachineryId) ===
+                              Number(machineryComponentForm.MachineryId),
+                          )?.UnitShortName || ""
+                        }
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                    <Field label="Machinery Rate">
+                      <input
+                        value={formatRupees(
+                          machineryMasterList.find(
+                            (row) =>
+                              Number(row.MachineryId) ===
+                              Number(machineryComponentForm.MachineryId),
+                          )?.MachineryRate,
+                        )}
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                    <PrimaryButton disabled={savingMachineryComponent}>
+                      {savingMachineryComponent
+                        ? "Saving…"
+                        : "Update component"}
+                    </PrimaryButton>
+                    <SecondaryButton
+                      type="button"
+                      onClick={resetMachineryEdit}
+                    >
+                      Cancel edit
+                    </SecondaryButton>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      marginBottom: 10,
+                      color: theme.colors.ink,
+                    }}
+                  >
+                    Add components (one or more)
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={machineryPickerSearch}
+                        onChange={(e) =>
+                          setMachineryPickerSearch(e.target.value)
+                        }
+                        placeholder="Type Item Code or text to filter Machinery"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {machineryDraftRows.map((row, index) => {
+                      const selectedMachinery = machineryMasterList.find(
+                        (item) =>
+                          Number(item.MachineryId) ===
+                          Number(row.MachineryId),
+                      );
+                      return (
+                        <div
+                          key={row.key}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns:
+                              "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
+                            gap: 12,
+                            alignItems: "end",
+                            padding: 12,
+                            border: `1px solid ${theme.colors.line}`,
+                            borderRadius: 8,
+                            background: "#fff",
+                          }}
+                        >
+                          <Field label={`Machinery ${index + 1}`} required>
+                            <select
+                              value={row.MachineryId}
+                              onChange={(e) =>
+                                onMachineryDraftChange(
+                                  row.key,
+                                  "MachineryId",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            >
+                              <option value="">Select Machinery</option>
+                              {machineryMasterList
+                                .filter(
+                                  (item) =>
+                                    Number(item.MachineryId) ===
+                                      Number(row.MachineryId) ||
+                                    machineryMatchesPickerSearch(
+                                      item,
+                                      machineryPickerSearch,
+                                    ),
+                                )
+                                .map((item) => (
+                                  <option
+                                    key={item.MachineryId}
+                                    value={item.MachineryId}
+                                  >
+                                    {formatMachineryLabel(item)}
+                                  </option>
+                                ))}
+                            </select>
+                          </Field>
+                          <Field label="Description">
+                            <input
+                              value={row.Description}
+                              maxLength={MACHINERY_COMPONENT_DESC_MAX}
+                              onChange={(e) =>
+                                onMachineryDraftChange(
+                                  row.key,
+                                  "Description",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Machinery Component" required>
+                            <input
+                              type="number"
+                              step="any"
+                              value={row.MachineryComponent}
+                              onChange={(e) =>
+                                onMachineryDraftChange(
+                                  row.key,
+                                  "MachineryComponent",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Unit">
+                            <input
+                              value={selectedMachinery?.UnitShortName || ""}
+                              disabled
+                              readOnly
+                              placeholder="From selected machinery"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <Field label="Machinery Rate">
+                            <input
+                              value={formatRupees(
+                                selectedMachinery?.MachineryRate,
+                              )}
+                              disabled
+                              readOnly
+                              placeholder="From selected machinery"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <SecondaryButton
+                            type="button"
+                            onClick={() =>
+                              setMachineryDraftRows((prev) => {
+                                if (prev.length <= 1) {
+                                  return [createMachineryDraftRow()];
+                                }
+                                return prev.filter(
+                                  (item) => item.key !== row.key,
+                                );
+                              })
+                            }
+                            style={{ marginBottom: 2 }}
+                          >
+                            Remove
+                          </SecondaryButton>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      marginTop: 18,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <SecondaryButton
+                      type="button"
+                      onClick={() =>
+                        setMachineryDraftRows((prev) => [
+                          ...prev,
+                          createMachineryDraftRow(),
+                        ])
+                      }
+                    >
+                      + Add another machinery
+                    </SecondaryButton>
+                    <PrimaryButton disabled={savingMachineryComponent}>
+                      {savingMachineryComponent
+                        ? "Saving…"
+                        : machineryDraftRows.filter(
+                              (row) =>
+                                row.MachineryId &&
+                                row.MachineryComponent !== "",
+                            ).length > 1
+                          ? "Save all components"
+                          : "Save component"}
+                    </PrimaryButton>
+                  </div>
+                </>
+              )}
+            </FormShell>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+const RA_PARAMETER_FIELDS = [
+  { key: "RAQuantity", label: "R A Quantity", defaultValue: "0" },
+  { key: "Scaffolding", label: "Scaffolding", defaultValue: "0" },
+  { key: "Sundries", label: "Sundries", defaultValue: "0" },
+  { key: "WaterCharges", label: "Water Charges", defaultValue: "0" },
+  { key: "QCCharges", label: "Q C Charges", defaultValue: "0" },
+  { key: "Formwork", label: "Formwork", defaultValue: "0" },
+  { key: "LabourAmenities", label: "Labour Amenities", defaultValue: "0" },
+  { key: "LabourCess", label: "Labour Cess", defaultValue: "1" },
+  { key: "CPOHCharges", label: "CP & OH Charges", defaultValue: "15" },
+  { key: "WCharges", label: "W Charges", defaultValue: "1" },
+  { key: "GSTCharges", label: "GST Charges", defaultValue: "18" },
+];
+
+function createRAParameterForm() {
+  const form = {};
+  RA_PARAMETER_FIELDS.forEach((field) => {
+    form[field.key] = field.defaultValue;
+  });
+  form.Reference = "";
+  return form;
+}
+
+function RateAnalysisParametersPanel({
+  apiBase,
+  userId,
+  itemId,
+  raLogic,
+  canEdit,
+  inputStyle,
+}) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(createRAParameterForm);
+  const [unitName, setUnitName] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [message, setMessage] = useState("");
+  const [exists, setExists] = useState(false);
+  const otherParameterFields = RA_PARAMETER_FIELDS.filter(
+    (field) => field.key !== "RAQuantity",
+  );
+
+  const loadParameters = async (nextItemId) => {
+    if (!nextItemId) {
+      setForm(createRAParameterForm());
+      setUnitName("");
+      setExists(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await axios.get(`${apiBase}/api/ra-parameters`, {
+        params: { itemId: nextItemId },
+      });
+      const data = res.data?.data || {};
+      const nextForm = createRAParameterForm();
+      RA_PARAMETER_FIELDS.forEach((field) => {
+        const value = data[field.key];
+        nextForm[field.key] =
+          value === null || value === undefined || value === ""
+            ? field.defaultValue
+            : String(value);
+      });
+      nextForm.Reference = data.Reference == null ? "" : String(data.Reference);
+      setForm(nextForm);
+      setUnitName(data.UnitName ? String(data.UnitName) : "");
+      setExists(Boolean(res.data?.exists));
+    } catch (err) {
+      setForm(createRAParameterForm());
+      setUnitName("");
+      setExists(false);
+      setMessage(
+        `Failed to load rate analysis parameters: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setMessage("");
+    if (!itemId) {
+      setOpen(false);
+      setForm(createRAParameterForm());
+      setUnitName("");
+      setExists(false);
+      return;
+    }
+    if (open) {
+      loadParameters(itemId);
+    }
+  }, [itemId]);
+
+  const openScreen = () => {
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+    setMessage("");
+    setOpen(true);
+    loadParameters(itemId);
+  };
+
+  const onFormChange = (e) => {
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setMessage("Only SuperAdmin or OrgAdmin can save rate analysis parameters.");
+      return;
+    }
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+    for (const field of RA_PARAMETER_FIELDS) {
+      const raw = form[field.key];
+      if (raw === "" || raw === null || raw === undefined) continue;
+      if (Number.isNaN(Number(raw))) {
+        alert(`${field.label} must be a number.`);
+        return;
+      }
+    }
+    if (
+      !window.confirm(
+        exists
+          ? "Update rate analysis parameters for this item?"
+          : "Save rate analysis parameters for this item?",
+      )
+    ) {
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      const payload = {
+        userId,
+        ItemId: itemId,
+        Reference: String(form.Reference || "").trim(),
+        RALogic: raLogic || undefined,
+      };
+      RA_PARAMETER_FIELDS.forEach((field) => {
+        payload[field.key] =
+          form[field.key] === "" ? field.defaultValue : form[field.key];
+      });
+      await axios.put(`${apiBase}/api/ra-parameters`, payload);
+      setMessage(
+        exists
+          ? "Rate analysis parameters updated."
+          : "Rate analysis parameters saved.",
+      );
+      await loadParameters(itemId);
+    } catch (err) {
+      setMessage(
+        `Save failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const generateRateAnalysisPdf = async () => {
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+    if (!exists) {
+      alert("Please save Rate Analysis Parameters first.");
+      return;
+    }
+    setGenerating(true);
+    setMessage("");
+    try {
+      const res = await axios.get(
+        `${apiBase}/api/generate-item-rate-analysis-report`,
+        {
+          params: { itemId, userId },
+          responseType: "blob",
+        },
+      );
+      const disposition = res.headers["content-disposition"];
+      let filename = `Item-${itemId}-RateAnalysis.pdf`;
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setMessage("Rate analysis PDF generated.");
+    } catch (err) {
+      let nextMessage = "Failed to generate the Rate Analysis PDF.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) nextMessage = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        nextMessage = err.response.data.message;
+      }
+      setMessage(nextMessage);
+      alert(nextMessage);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <>
+      <div style={{ marginBottom: open ? 12 : 24 }}>
+        <PrimaryButton type="button" onClick={openScreen}>
+          Rate Analysis Parameters
+        </PrimaryButton>
+      </div>
+      {open && (
+        <Card
+          eyebrow="RAParameter"
+          title="Enter Rate Analysis Parameters"
+          subtitle={
+            itemId
+              ? `Parameters for selected item #${itemId}. Saved against MasterItem.ItemId.`
+              : "Select an item to enter rate analysis parameters."
+          }
+        >
+          {message && (
+            <div
+              style={{
+                fontSize: 13,
+                marginBottom: 12,
+                color: message.toLowerCase().includes("fail")
+                  ? "#C6362C"
+                  : "#2A7D4F",
+              }}
+            >
+              {message}
+            </div>
+          )}
+          {loading ? (
+            <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
+              Loading…
+            </div>
+          ) : (
+            <FormShell onSubmit={onSubmit}>
+              <div style={{ display: "grid", gap: 12, maxWidth: 640 }}>
+                <label
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "200px 1fr",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      color: theme.colors.inkSoft,
+                    }}
+                  >
+                    R A Quantity
+                  </span>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                    }}
+                  >
+                    <input
+                      name="RAQuantity"
+                      type="number"
+                      step="any"
+                      value={form.RAQuantity}
+                      onChange={onFormChange}
+                      style={{ ...inputStyle, width: "180px" }}
+                    />
+                    <span
+                      style={{
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        color: theme.colors.ink,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {unitName || ""}
+                    </span>
+                  </div>
+                </label>
+                <label
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "200px 1fr",
+                    alignItems: "center",
+                    gap: 12,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      color: theme.colors.inkSoft,
+                    }}
+                  >
+                    Reference
+                  </span>
+                  <input
+                    name="Reference"
+                    type="text"
+                    value={form.Reference}
+                    onChange={onFormChange}
+                    style={{ ...inputStyle, width: "70%" }}
+                  />
+                </label>
+                {otherParameterFields.map((field) => (
+                  <label
+                    key={field.key}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "200px 1fr",
+                      alignItems: "center",
+                      gap: 12,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        color: theme.colors.inkSoft,
+                      }}
+                    >
+                      {field.label}
+                    </span>
+                    <input
+                      name={field.key}
+                      type="number"
+                      step="any"
+                      value={form[field.key]}
+                      onChange={onFormChange}
+                      style={{ ...inputStyle, width: "180px" }}
+                    />
+                  </label>
+                ))}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  marginTop: 18,
+                  flexWrap: "wrap",
+                }}
+              >
+                <PrimaryButton disabled={saving || !canEdit}>
+                  {saving
+                    ? exists
+                      ? "Updating…"
+                      : "Saving…"
+                    : exists
+                      ? "Update Parameter"
+                      : "Save Parameter"}
+                </PrimaryButton>
+                <SecondaryButton type="button" onClick={() => setOpen(false)}>
+                  Close
+                </SecondaryButton>
+                <PrimaryButton
+                  type="button"
+                  disabled={generating || !exists}
+                  onClick={generateRateAnalysisPdf}
+                  title={
+                    exists
+                      ? "Generate Rate Analysis PDF"
+                      : "Please save Rate Analysis Parameters first"
+                  }
+                >
+                  {generating ? "Generating…" : "Generate Rate Analysis"}
+                </PrimaryButton>
+              </div>
+            </FormShell>
+          )}
+        </Card>
+      )}
+    </>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HomePage
 // ─────────────────────────────────────────────────────────────────────────────
@@ -653,9 +2519,15 @@ export default function HomePage() {
   const [materialCategories, setMaterialCategories] = useState([]);
   const [materialSubCategories, setMaterialSubCategories] = useState([]);
   const [materialItemList, setMaterialItemList] = useState([]);
+  const [materialItemSearch, setMaterialItemSearch] = useState("");
   const [loadingMaterialItems, setLoadingMaterialItems] = useState(false);
+  const [materialItemsViewed, setMaterialItemsViewed] = useState(false);
+  const [materialRALogic, setMaterialRALogic] = useState("");
+  const [materialRALogicPickerOpen, setMaterialRALogicPickerOpen] =
+    useState(false);
   const [selectedMaterialItemId, setSelectedMaterialItemId] = useState(null);
   const [materialMasterList, setMaterialMasterList] = useState([]);
+  const [materialPickerSearch, setMaterialPickerSearch] = useState("");
   const [materialComponentList, setMaterialComponentList] = useState([]);
   const [loadingMaterialComponents, setLoadingMaterialComponents] =
     useState(false);
@@ -668,6 +2540,7 @@ export default function HomePage() {
   const [editingMaterialComponentId, setEditingMaterialComponentId] =
     useState(null);
   const [savingMaterialComponent, setSavingMaterialComponent] = useState(false);
+  const materialComponentSectionRef = useRef(null);
   const [message, setMessage] = useState("");
 
   const [itemRegion, setItemRegion] = useState("");
@@ -742,6 +2615,8 @@ export default function HomePage() {
   const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
   const [generateReportType, setGenerateReportType] = useState("abstract");
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
+  const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
+  const [measurementGroupsReload, setMeasurementGroupsReload] = useState(0);
   const [loadingEstimate, setLoadingEstimate] = useState(false);
   const [estimateWorkName, setEstimateWorkName] = useState("");
   const [estimateRegions, setEstimateRegions] = useState([]);
@@ -1313,6 +3188,44 @@ export default function HomePage() {
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
+    setMaterialPickerSearch("");
+  };
+
+  const resetMaterialRALogic = () => {
+    setMaterialRALogic("");
+    setMaterialRALogicPickerOpen(false);
+    setMaterialItemsViewed(false);
+  };
+
+  const componentCatalogRegionIds = getComponentCatalogRegionIds(
+    materialRegionId,
+    materialRALogic,
+  ).join(",");
+
+  const persistMaterialRALogic = async (itemId, logic) => {
+    if (!itemId || !logic) return;
+    await axios.put(`${API_BASE}/api/ra-parameters/logic`, {
+      userId: currentUser?.UserId,
+      ItemId: itemId,
+      RALogic: logic,
+    });
+  };
+
+  const applyMaterialRALogic = async (logic) => {
+    setMaterialRALogic(logic);
+    setMaterialRALogicPickerOpen(false);
+    await loadMaterialMasterList(
+      getComponentCatalogRegionIds(materialRegionId, logic),
+    );
+    if (selectedMaterialItemId) {
+      try {
+        await persistMaterialRALogic(selectedMaterialItemId, logic);
+      } catch (err) {
+        alert(
+          `Failed to save RA Logic: ${err.response?.data?.message || err.message}`,
+        );
+      }
+    }
   };
 
   const loadMaterialCategories = async (regionId) => {
@@ -1365,14 +3278,17 @@ export default function HomePage() {
     }
   };
 
-  const loadMaterialMasterList = async (regionId) => {
-    if (!regionId) {
+  const loadMaterialMasterList = async (regionIds) => {
+    const ids = Array.isArray(regionIds)
+      ? regionIds.filter(Boolean).join(",")
+      : regionIds;
+    if (!ids) {
       setMaterialMasterList([]);
       return;
     }
     try {
       const res = await axios.get(`${API_BASE}/api/master-materials`, {
-        params: { regionId },
+        params: { regionId: ids },
       });
       setMaterialMasterList(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
@@ -1396,20 +3312,29 @@ export default function HomePage() {
     setLoadingMaterialItems(true);
     resetMaterialSelection();
     try {
+      if (!isNonSsrMaterialRegion(materialRegionId)) {
+        await loadMaterialMasterList(materialRegionId);
+      }
+      const search = String(materialItemSearch || "").trim();
+      const params = {
+        regionId: materialRegionId,
+        categoryId: materialCategoryId,
+        subCategoryId: materialSubCategoryId,
+        ssrYearId: materialSsrYearId,
+      };
+      if (search) params.search = search;
+      if (currentUser?.UserId) params.userId = currentUser.UserId;
       const res = await axios.get(`${API_BASE}/api/ssr-items-load`, {
-        params: {
-          regionId: materialRegionId,
-          categoryId: materialCategoryId,
-          subCategoryId: materialSubCategoryId,
-          ssrYearId: materialSsrYearId,
-        },
+        params,
       });
       setMaterialItemList(
         Array.isArray(res.data?.data) ? res.data.data : [],
       );
+      setMaterialItemsViewed(true);
     } catch (err) {
       console.error(err);
       setMaterialItemList([]);
+      setMaterialItemsViewed(false);
       alert(
         `Failed to load items: ${err.response?.data?.message || err.message}`,
       );
@@ -1443,11 +3368,33 @@ export default function HomePage() {
   };
 
   const selectMaterialItem = (item) => {
+    if (!hasItemUnitId(item)) {
+      alert("Select an item that has a Unit.");
+      return;
+    }
+    if (isNonSsrMaterialRegion(materialRegionId) && !materialRALogic) {
+      alert("Please select the Logic for R A first.");
+      setMaterialRALogicPickerOpen(true);
+      return;
+    }
     setSelectedMaterialItemId(item.ItemId);
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
+    if (materialRALogic) {
+      persistMaterialRALogic(item.ItemId, materialRALogic).catch((err) => {
+        alert(
+          `Failed to save RA Logic: ${err.response?.data?.message || err.message}`,
+        );
+      });
+    }
     loadMaterialComponents(item.ItemId);
+    window.requestAnimationFrame(() => {
+      materialComponentSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
   };
 
   const onMaterialComponentChange = (e) => {
@@ -1514,6 +3461,7 @@ export default function HomePage() {
     setEditingMaterialComponentId(row.MaterialComponentId);
     setMaterialComponentForm({
       MaterialId: String(row.MaterialId || ""),
+      Description: row.Description == null ? "" : String(row.Description),
       MaterialComponent:
         row.MaterialComponent === null || row.MaterialComponent === undefined
           ? ""
@@ -1526,8 +3474,8 @@ export default function HomePage() {
 
   const onMaterialComponentSubmit = async (e) => {
     e.preventDefault();
-    if (!isSuperAdminUser(currentUser)) {
-      setMessage("Only SuperAdmin can manage material components.");
+    if (!isSuperAdminUser(currentUser) && !isOrgAdminUser(currentUser)) {
+      setMessage("Only SuperAdmin or OrgAdmin can manage material components.");
       return;
     }
     if (!selectedMaterialItemId) {
@@ -1550,6 +3498,15 @@ export default function HomePage() {
         );
         return;
       }
+      if (
+        String(materialComponentForm.Description || "").length >
+        MATERIAL_COMPONENT_DESC_MAX
+      ) {
+        alert(
+          `Description must be at most ${MATERIAL_COMPONENT_DESC_MAX} characters.`,
+        );
+        return;
+      }
       if (!window.confirm("Update this material component?")) return;
 
       setSavingMaterialComponent(true);
@@ -1561,6 +3518,7 @@ export default function HomePage() {
             userId: currentUser?.UserId,
             ItemId: selectedMaterialItemId,
             MaterialId: materialComponentForm.MaterialId,
+            Description: String(materialComponentForm.Description || "").trim(),
             MaterialComponent: materialComponentForm.MaterialComponent,
           },
         );
@@ -1593,6 +3551,16 @@ export default function HomePage() {
       );
       return;
     }
+    const longDescription = validRows.find(
+      (row) =>
+        String(row.Description || "").length > MATERIAL_COMPONENT_DESC_MAX,
+    );
+    if (longDescription) {
+      alert(
+        `Description must be at most ${MATERIAL_COMPONENT_DESC_MAX} characters.`,
+      );
+      return;
+    }
     if (
       !window.confirm(
         validRows.length === 1
@@ -1613,6 +3581,7 @@ export default function HomePage() {
           ItemId: selectedMaterialItemId,
           rows: validRows.map((row) => ({
             MaterialId: row.MaterialId,
+            Description: String(row.Description || "").trim(),
             MaterialComponent: row.MaterialComponent,
           })),
         },
@@ -3063,6 +5032,7 @@ export default function HomePage() {
     if (!selectedProjectId || !selectedSubWorkId) {
       setCheckedItemsList([]);
       setCheckedItemIds([]);
+      setMeasurementGroupsOpen(false);
       return;
     }
     getCheckedItemsList();
@@ -4579,7 +6549,7 @@ export default function HomePage() {
   const isOrgAdmin = isOrgAdminUser(currentUser);
   const isIndvUser = isIndvUserUser(currentUser);
   const canManageProjects = isOrgAdmin || isSuperAdmin;
-  const canManageMaterials = isSuperAdmin;
+  const canManageMaterials = isSuperAdmin || isOrgAdmin;
   const canManageItemMaster = canAccessItemMaster(currentUser);
   const canManageMeasurementGroups = canAccessMeasurementGroups(currentUser);
   const itemMasterAllowedRegionId = getItemMasterAllowedRegionId(currentUser);
@@ -4587,6 +6557,11 @@ export default function HomePage() {
     ? regions
     : regions.filter(
         (r) => Number(r.SSRRegionId) === Number(itemMasterAllowedRegionId),
+      );
+  const materialRegionOptions = isSuperAdmin
+    ? regions
+    : regions.filter(
+        (r) => Number(r.SSRRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID,
       );
   const itemMasterRoleBanner = isOrgAdmin
     ? "Organization Admins can only add, list, and edit NON SSR items entered by their organization"
@@ -4925,7 +6900,14 @@ export default function HomePage() {
               SuperAdmin
             </div>
             {superAdminMenu.map((item) =>
-              renderMenuItem(item, { forceDisabled: !isSuperAdmin }),
+              renderMenuItem(item, {
+                forceDisabled:
+                  item.id === "materials" ? !canManageMaterials : !isSuperAdmin,
+                disabledTitle:
+                  item.id === "materials"
+                    ? "Available for SuperAdmin and OrgAdmin of your organization"
+                    : "Available only for SuperAdmin",
+              }),
             )}
 
             <div
@@ -7379,8 +9361,23 @@ export default function HomePage() {
               <Card
                 eyebrow="Master · Material Components"
                 title="Material Components"
-                subtitle="Select SSR region, year, category and an item to view, add, or edit MasterMaterialComponent rows."
+                subtitle="Select SSR region, year, category and an item to view, add, or edit MasterRAComponent rows."
               >
+                {isOrgAdmin ? (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      padding: "8px 10px",
+                      borderRadius: 8,
+                      background: "#EEF4FA",
+                      color: "#35506B",
+                      fontSize: 13,
+                    }}
+                  >
+                    Organization Admins can only manage Rate Analysis for NON
+                    SSR items entered by their organization.
+                  </div>
+                ) : null}
                 <div
                   style={{
                     display: "grid",
@@ -7401,14 +9398,19 @@ export default function HomePage() {
                         setMaterialSubCategories([]);
                         setMaterialItemList([]);
                         resetMaterialSelection();
+                        resetMaterialRALogic();
                         loadMaterialSsrYears(regionId);
                         loadMaterialCategories(regionId);
-                        loadMaterialMasterList(regionId);
+                        if (!isNonSsrMaterialRegion(regionId)) {
+                          loadMaterialMasterList(regionId);
+                        } else {
+                          setMaterialMasterList([]);
+                        }
                       }}
                       style={inputStyle}
                     >
                       <option value="">Select SSR Region</option>
-                      {regions.map((r) => (
+                      {materialRegionOptions.map((r) => (
                         <option key={r.SSRRegionId} value={r.SSRRegionId}>
                           {r.SSRRegionShortName || r.SSRRegionName}
                         </option>
@@ -7423,6 +9425,8 @@ export default function HomePage() {
                         setMaterialSsrYearId(e.target.value);
                         setMaterialItemList([]);
                         resetMaterialSelection();
+                        setMaterialItemsViewed(false);
+                        setMaterialRALogicPickerOpen(false);
                       }}
                       disabled={!materialRegionId}
                       style={inputStyle}
@@ -7449,6 +9453,8 @@ export default function HomePage() {
                         setMaterialSubCategoryId("");
                         setMaterialItemList([]);
                         resetMaterialSelection();
+                        setMaterialItemsViewed(false);
+                        setMaterialRALogicPickerOpen(false);
                         loadMaterialSubCategories(categoryId);
                       }}
                       disabled={!materialRegionId}
@@ -7473,6 +9479,8 @@ export default function HomePage() {
                         setMaterialSubCategoryId(e.target.value);
                         setMaterialItemList([]);
                         resetMaterialSelection();
+                        setMaterialItemsViewed(false);
+                        setMaterialRALogicPickerOpen(false);
                       }}
                       disabled={!materialCategoryId}
                       style={inputStyle}
@@ -7497,12 +9505,103 @@ export default function HomePage() {
                     {loadingMaterialItems ? "Loading…" : "View Items"}
                   </PrimaryButton>
                 </div>
+                {isNonSsrMaterialRegion(materialRegionId) &&
+                  materialItemsViewed && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        marginTop: 14,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <SecondaryButton
+                        type="button"
+                        onClick={() => setMaterialRALogicPickerOpen(true)}
+                      >
+                        Select the Logic for R A
+                      </SecondaryButton>
+                      {materialRALogic && (
+                        <span
+                          style={{
+                            fontSize: 13,
+                            fontWeight: 600,
+                            color: theme.colors.ink,
+                          }}
+                        >
+                          Selected logic: {materialRALogic}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                {materialRALogicPickerOpen &&
+                  isNonSsrMaterialRegion(materialRegionId) && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 14,
+                        border: `1px solid ${theme.colors.line}`,
+                        borderRadius: 10,
+                        background: "#fff",
+                        maxWidth: 420,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          marginBottom: 10,
+                          color: theme.colors.ink,
+                        }}
+                      >
+                        Select the Logic for R A
+                      </div>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <PrimaryButton
+                          type="button"
+                          onClick={() => applyMaterialRALogic("PWD")}
+                        >
+                          PWD
+                        </PrimaryButton>
+                        <PrimaryButton
+                          type="button"
+                          onClick={() => applyMaterialRALogic("CPWD")}
+                        >
+                          CPWD
+                        </PrimaryButton>
+                        <SecondaryButton
+                          type="button"
+                          onClick={() => setMaterialRALogicPickerOpen(false)}
+                        >
+                          Cancel
+                        </SecondaryButton>
+                      </div>
+                    </div>
+                  )}
+                <div style={{ marginTop: 14 }}>
+                  <Field label="Search">
+                    <input
+                      type="text"
+                      value={materialItemSearch}
+                      onChange={(e) => setMaterialItemSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          loadMaterialItems();
+                        }
+                      }}
+                      placeholder="Item number or description — added to the filters above"
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
               </Card>
 
               <Card
                 eyebrow="Items"
                 title="SSR Items"
-                subtitle="Click a row to load material components for that item."
+                subtitle="Click a row that has a Unit to load material components for that item."
               >
                 <div
                   style={{
@@ -7519,16 +9618,19 @@ export default function HomePage() {
                         <th>Item Number</th>
                         <th>Description</th>
                         <th>Unit</th>
+                        <th>Completed Rate</th>
                       </tr>
                     </thead>
                     <tbody>
                       {loadingMaterialItems ? (
-                        <EmptyRow colSpan={3}>Loading…</EmptyRow>
+                        <EmptyRow colSpan={4}>Loading…</EmptyRow>
                       ) : materialItemList.length ? (
                         materialItemList.map((row) => {
+                          const canSelect = hasItemUnitId(row);
                           const selected =
+                            canSelect &&
                             Number(selectedMaterialItemId) ===
-                            Number(row.ItemId);
+                              Number(row.ItemId);
                           const desc = String(row.ItemDescription || "").trim();
                           const singleLineDesc = desc
                             .replace(/\s+/g, " ")
@@ -7537,11 +9639,19 @@ export default function HomePage() {
                             <tr
                               key={row.ItemId}
                               onClick={() => selectMaterialItem(row)}
+                              title={
+                                canSelect
+                                  ? "Select this item"
+                                  : "This item has no Unit and cannot be selected"
+                              }
                               style={{
-                                cursor: "pointer",
+                                cursor: canSelect ? "pointer" : "not-allowed",
+                                opacity: canSelect ? 1 : 0.55,
                                 background: selected
                                   ? "rgba(15, 42, 68, 0.08)"
-                                  : undefined,
+                                  : canSelect
+                                    ? undefined
+                                    : "rgba(0,0,0,0.03)",
                               }}
                             >
                               <td
@@ -7578,12 +9688,22 @@ export default function HomePage() {
                               <td style={{ verticalAlign: "top" }}>
                                 {row.UnitShortName || ""}
                               </td>
+                              <td
+                                style={{
+                                  fontFamily: theme.font.mono,
+                                  verticalAlign: "top",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {formatRupees(row.CompletedRate)}
+                              </td>
                             </tr>
                           );
                         })
                       ) : (
-                        <EmptyRow colSpan={3}>
-                          Select filters above and click View Items.
+                        <EmptyRow colSpan={4}>
+                          Select filters above, optionally enter Search, then
+                          click View Items.
                         </EmptyRow>
                       )}
                     </tbody>
@@ -7591,8 +9711,12 @@ export default function HomePage() {
                 </div>
               </Card>
 
+              <div
+                ref={materialComponentSectionRef}
+                style={{ scrollMarginTop: 16 }}
+              >
               <Card
-                eyebrow="MasterMaterialComponent"
+                eyebrow="MasterRAComponent"
                 title={
                   editingMaterialComponentId
                     ? `Edit component #${editingMaterialComponentId}`
@@ -7621,14 +9745,16 @@ export default function HomePage() {
                           <tr>
                             <th>Sr.No.</th>
                             <th>Material</th>
+                            <th>Description</th>
                             <th>Material Component</th>
-                            <th>Unit</th>
+                            <th>Local Unit</th>
+                            <th>Material Rate</th>
                             <th>Action</th>
                           </tr>
                         </thead>
                         <tbody>
                           {loadingMaterialComponents ? (
-                            <EmptyRow colSpan={5}>Loading…</EmptyRow>
+                            <EmptyRow colSpan={7}>Loading…</EmptyRow>
                           ) : materialComponentList.length ? (
                             materialComponentList.map((row, index) => (
                               <tr key={row.MaterialComponentId}>
@@ -7638,16 +9764,18 @@ export default function HomePage() {
                                   {index + 1}
                                 </td>
                                 <td>
-                                  {row.MaterialShortName ||
-                                    row.MaterialDescription ||
-                                    row.MaterialId}
+                                  {formatMaterialLabel(row) || row.MaterialId}
                                 </td>
+                                <td>{row.Description || ""}</td>
                                 <td style={{ fontFamily: theme.font.mono }}>
                                   {row.MaterialComponent}
                                 </td>
                                 <td>
                                   {row.MaterialUnitShortName ||
                                     row.MaterialUnitId}
+                                </td>
+                                <td style={{ fontFamily: theme.font.mono }}>
+                                  {formatMaterialRate(row.MaterialRate)}
                                 </td>
                                 <td>
                                   <GhostIconButton
@@ -7662,7 +9790,7 @@ export default function HomePage() {
                               </tr>
                             ))
                           ) : (
-                            <EmptyRow colSpan={5}>
+                            <EmptyRow colSpan={7}>
                               No material components for this item — add one
                               below.
                             </EmptyRow>
@@ -7675,10 +9803,26 @@ export default function HomePage() {
                       <FormShell onSubmit={onMaterialComponentSubmit}>
                         {editingMaterialComponentId ? (
                           <>
+                            <div style={{ marginBottom: 14 }}>
+                              <Field label="Search Text or Item Code">
+                                <input
+                                  type="text"
+                                  value={materialPickerSearch}
+                                  onChange={(e) =>
+                                    setMaterialPickerSearch(e.target.value)
+                                  }
+                                  placeholder="Type Item Code or text to filter Material"
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") e.preventDefault();
+                                  }}
+                                  style={inputStyle}
+                                />
+                              </Field>
+                            </div>
                             <div
                               style={{
                                 display: "grid",
-                                gridTemplateColumns: "1fr 1fr 1fr",
+                                gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
                                 gap: 14,
                               }}
                             >
@@ -7691,16 +9835,36 @@ export default function HomePage() {
                                   style={inputStyle}
                                 >
                                   <option value="">Select Material</option>
-                                  {materialMasterList.map((m) => (
+                                  {materialMasterList
+                                    .filter(
+                                      (m) =>
+                                        Number(m.MaterialId) ===
+                                          Number(
+                                            materialComponentForm.MaterialId,
+                                          ) ||
+                                        materialMatchesPickerSearch(
+                                          m,
+                                          materialPickerSearch,
+                                        ),
+                                    )
+                                    .map((m) => (
                                     <option
                                       key={m.MaterialId}
                                       value={m.MaterialId}
                                     >
-                                      {m.MaterialShortName ||
-                                        m.MaterialDescription}
+                                      {formatMaterialLabel(m)}
                                     </option>
                                   ))}
                                 </select>
+                              </Field>
+                              <Field label="Description">
+                                <input
+                                  name="Description"
+                                  value={materialComponentForm.Description}
+                                  maxLength={MATERIAL_COMPONENT_DESC_MAX}
+                                  onChange={onMaterialComponentChange}
+                                  style={inputStyle}
+                                />
                               </Field>
                               <Field label="Material Component" required>
                                 <input
@@ -7715,7 +9879,7 @@ export default function HomePage() {
                                   style={inputStyle}
                                 />
                               </Field>
-                              <Field label="Material Unit">
+                              <Field label="Local Unit">
                                 <input
                                   value={
                                     materialMasterList.find(
@@ -7726,6 +9890,27 @@ export default function HomePage() {
                                         ),
                                     )?.MaterialLocalUnitShortName || ""
                                   }
+                                  disabled
+                                  readOnly
+                                  style={{
+                                    ...inputStyle,
+                                    background: "#EEF1F4",
+                                    color: theme.colors.inkSoft,
+                                    cursor: "not-allowed",
+                                  }}
+                                />
+                              </Field>
+                              <Field label="Material Rate">
+                                <input
+                                  value={formatMaterialRate(
+                                    materialMasterList.find(
+                                      (m) =>
+                                        Number(m.MaterialId) ===
+                                        Number(
+                                          materialComponentForm.MaterialId,
+                                        ),
+                                    )?.MaterialRate,
+                                  )}
                                   disabled
                                   readOnly
                                   style={{
@@ -7771,6 +9956,22 @@ export default function HomePage() {
                             >
                               Add components (one or more)
                             </div>
+                            <div style={{ marginBottom: 12 }}>
+                              <Field label="Search Text or Item Code">
+                                <input
+                                  type="text"
+                                  value={materialPickerSearch}
+                                  onChange={(e) =>
+                                    setMaterialPickerSearch(e.target.value)
+                                  }
+                                  placeholder="Type Item Code or text to filter Material"
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") e.preventDefault();
+                                  }}
+                                  style={inputStyle}
+                                />
+                              </Field>
+                            </div>
                             <div
                               style={{
                                 display: "grid",
@@ -7778,19 +9979,25 @@ export default function HomePage() {
                               }}
                             >
                               {materialDraftRows.map((row, index) => {
-                                const unitName =
+                                const selectedMaterial =
                                   materialMasterList.find(
                                     (m) =>
                                       Number(m.MaterialId) ===
                                       Number(row.MaterialId),
-                                  )?.MaterialLocalUnitShortName || "";
+                                  );
+                                const unitName =
+                                  selectedMaterial?.MaterialLocalUnitShortName ||
+                                  "";
+                                const materialRate = formatMaterialRate(
+                                  selectedMaterial?.MaterialRate,
+                                );
                                 return (
                                   <div
                                     key={row.key}
                                     style={{
                                       display: "grid",
                                       gridTemplateColumns:
-                                        "1fr 1fr 1fr auto",
+                                        "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
                                       gap: 12,
                                       alignItems: "end",
                                       padding: 12,
@@ -7817,16 +10024,39 @@ export default function HomePage() {
                                         <option value="">
                                           Select Material
                                         </option>
-                                        {materialMasterList.map((m) => (
+                                        {materialMasterList
+                                          .filter(
+                                            (m) =>
+                                              Number(m.MaterialId) ===
+                                                Number(row.MaterialId) ||
+                                              materialMatchesPickerSearch(
+                                                m,
+                                                materialPickerSearch,
+                                              ),
+                                          )
+                                          .map((m) => (
                                           <option
                                             key={m.MaterialId}
                                             value={m.MaterialId}
                                           >
-                                            {m.MaterialShortName ||
-                                              m.MaterialDescription}
+                                            {formatMaterialLabel(m)}
                                           </option>
                                         ))}
                                       </select>
+                                    </Field>
+                                    <Field label="Description">
+                                      <input
+                                        value={row.Description}
+                                        maxLength={MATERIAL_COMPONENT_DESC_MAX}
+                                        onChange={(e) =>
+                                          onMaterialDraftChange(
+                                            row.key,
+                                            "Description",
+                                            e.target.value,
+                                          )
+                                        }
+                                        style={inputStyle}
+                                      />
                                     </Field>
                                     <Field
                                       label="Material Component"
@@ -7846,9 +10076,23 @@ export default function HomePage() {
                                         style={inputStyle}
                                       />
                                     </Field>
-                                    <Field label="Material Unit">
+                                    <Field label="Local Unit">
                                       <input
                                         value={unitName}
+                                        disabled
+                                        readOnly
+                                        placeholder="From selected material"
+                                        style={{
+                                          ...inputStyle,
+                                          background: "#EEF1F4",
+                                          color: theme.colors.inkSoft,
+                                          cursor: "not-allowed",
+                                        }}
+                                      />
+                                    </Field>
+                                    <Field label="Material Rate">
+                                      <input
+                                        value={materialRate}
                                         disabled
                                         readOnly
                                         placeholder="From selected material"
@@ -7908,6 +10152,33 @@ export default function HomePage() {
                   </>
                 )}
               </Card>
+              </div>
+              <LabourComponentsPanel
+                apiBase={API_BASE}
+                userId={currentUser?.UserId}
+                itemId={selectedMaterialItemId}
+                regionId={materialRegionId}
+                regionIds={componentCatalogRegionIds}
+                canEdit={canManageMaterials}
+                inputStyle={inputStyle}
+              />
+              <MachineryComponentsPanel
+                apiBase={API_BASE}
+                userId={currentUser?.UserId}
+                itemId={selectedMaterialItemId}
+                regionId={materialRegionId}
+                regionIds={componentCatalogRegionIds}
+                canEdit={canManageMaterials}
+                inputStyle={inputStyle}
+              />
+              <RateAnalysisParametersPanel
+                apiBase={API_BASE}
+                userId={currentUser?.UserId}
+                itemId={selectedMaterialItemId}
+                raLogic={materialRALogic}
+                canEdit={canManageMaterials}
+                inputStyle={inputStyle}
+              />
             </>
           )}
 
@@ -8226,8 +10497,61 @@ export default function HomePage() {
                     >
                       {loadingEstimate ? "Generating…" : "Generate Estimate"}
                     </Button>
+                    <span
+                      title={
+                        selectedProjectId && selectedSubWorkId
+                          ? "Add Measurement Groups"
+                          : "Please Select Work and Sub Work"
+                      }
+                      onClick={() => {
+                        if (!selectedProjectId || !selectedSubWorkId) {
+                          window.alert("Please Select Work and Sub Work");
+                        }
+                      }}
+                      style={{ display: "inline-flex" }}
+                    >
+                      <Button
+                        type="button"
+                        color="primary"
+                        variant={measurementGroupsOpen ? "soft" : "solid"}
+                        disabled={!selectedProjectId || !selectedSubWorkId}
+                        onClick={() => {
+                          if (!selectedProjectId || !selectedSubWorkId) {
+                            window.alert("Please Select Work and Sub Work");
+                            return;
+                          }
+                          if (measurementGroupsOpen) {
+                            setMeasurementGroupsReload((n) => n + 1);
+                            return;
+                          }
+                          setMeasurementGroupsOpen(true);
+                        }}
+                        sx={{
+                          fontSize: 13,
+                          textTransform: "none",
+                          pointerEvents:
+                            selectedProjectId && selectedSubWorkId
+                              ? "auto"
+                              : "none",
+                        }}
+                      >
+                        Add Measurement Groups
+                      </Button>
+                    </span>
                   </div>
                 </FormShell>
+                {measurementGroupsOpen &&
+                  selectedProjectId &&
+                  selectedSubWorkId && (
+                    <WorkMeasurementGroupsPanel
+                      apiBase={API_BASE}
+                      userId={currentUser?.UserId}
+                      workId={selectedProjectId}
+                      subWorkId={selectedSubWorkId}
+                      reloadToken={measurementGroupsReload}
+                      onClose={() => setMeasurementGroupsOpen(false)}
+                    />
+                  )}
               </Card>
 
               {estimatePanelOpen && (
@@ -8995,12 +11319,6 @@ export default function HomePage() {
                             B | H). Quantity is the product of No × L × B × H.
                           </span>
                         </div>
-                        <WorkMeasurementGroupsPanel
-                          apiBase={API_BASE}
-                          userId={currentUser?.UserId}
-                          workId={selectedProjectId}
-                          subWorkId={selectedSubWorkId}
-                        />
                         {checkedItemsList.length > 0 ? (
                           <>
                         <div
