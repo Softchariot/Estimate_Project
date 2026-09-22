@@ -103,7 +103,7 @@ const superAdminMenu = [
 const allUsersMenu = [
   {
     id: "item-master",
-    label: "Item Master",
+    label: "NON DSR Items",
     status: "active",
     icon: "📑",
   },
@@ -348,7 +348,9 @@ const initialUnitForm = {
 
 const initialItemMasterForm = {
   ItemId: "",
+  ItemCode: "",
   UserId: "",
+  UserName: "",
   RegionId: "",
   CategoryId: "",
   SubCategoryId: "",
@@ -5758,6 +5760,7 @@ export default function HomePage() {
         setItemMasterForm({
           ...initialItemMasterForm,
           UserId: user.UserId ? String(user.UserId) : "",
+          UserName: user.UserName || user.UserLoginName || "",
           RegionId: allowed ? String(allowed) : "",
         });
         loadItemMasterYears();
@@ -5774,6 +5777,95 @@ export default function HomePage() {
       router.replace("/");
     }
   }, [router]);
+
+  useEffect(() => {
+    if (!currentUser?.UserId || editingItemMasterId) return;
+    if (!canAccessItemMaster(currentUser)) return;
+    const regionId = Number(itemMasterForm.RegionId);
+    const auto =
+      isOrgAdminUser(currentUser) ||
+      isIndvUserUser(currentUser) ||
+      regionId === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+      regionId === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (!auto) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/master-items/next-number?userId=${encodeURIComponent(currentUser.UserId)}`,
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.message || "Failed to generate Item Number.");
+        }
+        if (cancelled) return;
+        setItemMasterForm((prev) => {
+          if (prev.ItemId) return prev;
+          return { ...prev, ItemNumber: data.itemNumber || "" };
+        });
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(`Item Number could not be generated: ${error.message}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.UserId, itemMasterForm.RegionId, editingItemMasterId]);
+
+  useEffect(() => {
+    if (activeMaster !== "item-master" || !currentUser?.UserId) return;
+    if (!itemMasterFilterRegionId || !itemMasterFilterYearId) {
+      setItemMasterList([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoadingItemMaster(true);
+      try {
+        const params = {
+          userId: currentUser.UserId,
+          regionId: itemMasterFilterRegionId,
+          ssrYearId: itemMasterFilterYearId,
+        };
+        if (itemMasterFilterCategoryId) {
+          params.categoryId = itemMasterFilterCategoryId;
+        }
+        if (itemMasterFilterSubCategoryId) {
+          params.subCategoryId = itemMasterFilterSubCategoryId;
+        }
+        const res = await axios.get(`${API_BASE}/api/master-items`, {
+          params,
+        });
+        if (!cancelled) {
+          setItemMasterList(
+            Array.isArray(res.data?.data) ? res.data.data : [],
+          );
+        }
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setItemMasterList([]);
+          setMessage(
+            `Item Master load failed: ${err.response?.data?.message || err.message}`,
+          );
+        }
+      } finally {
+        if (!cancelled) setLoadingItemMaster(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeMaster,
+    currentUser?.UserId,
+    itemMasterFilterRegionId,
+    itemMasterFilterYearId,
+    itemMasterFilterCategoryId,
+    itemMasterFilterSubCategoryId,
+  ]);
 
   useEffect(() => {
     if (
@@ -6274,6 +6366,7 @@ export default function HomePage() {
     setItemMasterForm({
       ...initialItemMasterForm,
       UserId: currentUser?.UserId ? String(currentUser.UserId) : "",
+      UserName: currentUser?.UserName || currentUser?.UserLoginName || "",
       RegionId: allowedRegionId ? String(allowedRegionId) : "",
     });
     setItemMasterCategories([]);
@@ -6291,6 +6384,13 @@ export default function HomePage() {
       if (name === "RegionId") {
         next.CategoryId = "";
         next.SubCategoryId = "";
+        const regionNum = Number(value);
+        const autoRegion =
+          regionNum === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+          regionNum === ITEM_MASTER_INDV_USER_REGION_ID;
+        if (!editingItemMasterId && !autoRegion) {
+          next.ItemNumber = "";
+        }
         loadItemMasterCategories(value);
         setItemMasterSubCategories([]);
       }
@@ -6322,7 +6422,9 @@ export default function HomePage() {
     setEditingItemMasterId(row.ItemId);
     setItemMasterForm({
       ItemId: String(row.ItemId),
+      ItemCode: row.ItemCode || "",
       UserId: row.UserId != null ? String(row.UserId) : "",
+      UserName: row.UserName || row.UserLoginName || "",
       RegionId: row.RegionId != null ? String(row.RegionId) : "",
       CategoryId: row.CategoryId != null ? String(row.CategoryId) : "",
       SubCategoryId:
@@ -6382,7 +6484,9 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Failed to save item.");
       setMessage(
-        isEdit ? "Item updated successfully." : "Item saved successfully.",
+        isEdit
+          ? "Item updated successfully."
+          : `Item saved successfully. Item Number ${data.data?.ItemNumber || ""}.`,
       );
       resetItemMasterEdit();
       if (itemMasterFilterRegionId && itemMasterFilterYearId) {
@@ -6577,6 +6681,10 @@ export default function HomePage() {
   const canManageProjects = isOrgAdmin || isSuperAdmin;
   const canManageMaterials = isSuperAdmin || isOrgAdmin;
   const canManageItemMaster = canAccessItemMaster(currentUser);
+  const itemNumberIsAuto =
+    !isSuperAdmin ||
+    Number(itemMasterForm.RegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+    Number(itemMasterForm.RegionId) === ITEM_MASTER_INDV_USER_REGION_ID;
   const canManageMeasurementGroups = canAccessMeasurementGroups(currentUser);
   const itemMasterAllowedRegionId = getItemMasterAllowedRegionId(currentUser);
   const itemMasterRegionOptions = isSuperAdmin
@@ -8602,7 +8710,7 @@ export default function HomePage() {
               title={
                 editingItemMasterId
                   ? `Edit item #${editingItemMasterId}`
-                  : "Item Master"
+                  : "NON DSR Items"
               }
               subtitle="Add / edit MasterItem rows. FK fields use short names from lookup tables."
             >
@@ -8644,9 +8752,18 @@ export default function HomePage() {
                       }}
                     />
                   </Field>
-                  <Field label="User Id">
+                  <Field label="Item Code">
                     <input
-                      value={itemMasterForm.UserId || ""}
+                      name="ItemCode"
+                      value={itemMasterForm.ItemCode}
+                      onChange={onItemMasterChange}
+                      maxLength={20}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="User">
+                    <input
+                      value={itemMasterForm.UserName || ""}
                       disabled
                       readOnly
                       style={{
@@ -8703,16 +8820,22 @@ export default function HomePage() {
                       name="ItemNumber"
                       value={itemMasterForm.ItemNumber}
                       onChange={onItemMasterChange}
-                      required
-                      style={inputStyle}
-                    />
-                  </Field>
-                  <Field label="Page Number">
-                    <input
-                      name="PageNumber"
-                      value={itemMasterForm.PageNumber}
-                      onChange={onItemMasterChange}
-                      style={inputStyle}
+                      required={!itemNumberIsAuto}
+                      readOnly={itemNumberIsAuto}
+                      disabled={itemNumberIsAuto}
+                      placeholder={
+                        itemNumberIsAuto ? "Auto generated" : ""
+                      }
+                      style={
+                        itemNumberIsAuto
+                          ? {
+                              ...inputStyle,
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : inputStyle
+                      }
                     />
                   </Field>
                 </div>
@@ -8917,18 +9040,7 @@ export default function HomePage() {
                   <select
                     value={itemMasterFilterYearId}
                     onChange={(e) => {
-                      const value = e.target.value;
-                      setItemMasterFilterYearId(value);
-                      if (itemMasterFilterRegionId && value) {
-                        loadItemMasterList(currentUser, {
-                          regionId: itemMasterFilterRegionId,
-                          ssrYearId: value,
-                          categoryId: itemMasterFilterCategoryId,
-                          subCategoryId: itemMasterFilterSubCategoryId,
-                        });
-                      } else {
-                        setItemMasterList([]);
-                      }
+                      setItemMasterFilterYearId(e.target.value);
                     }}
                     disabled={!itemMasterFilterRegionId}
                     style={inputStyle}
@@ -8972,14 +9084,10 @@ export default function HomePage() {
                     onChange={(e) => {
                       setItemMasterFilterSubCategoryId(e.target.value);
                     }}
-                    disabled={!itemMasterFilterCategoryId}
+                    disabled={!itemMasterFilterRegionId}
                     style={inputStyle}
                   >
-                    <option value="">
-                      {itemMasterFilterCategoryId
-                        ? "All SSR Sub Categories"
-                        : "Select SSR Category first"}
-                    </option>
+                    <option value="">All SSR Sub Categories</option>
                     {itemMasterListSubCategories.map((sc) => (
                       <option
                         key={sc.SSRSubCategoryId}
@@ -9015,8 +9123,8 @@ export default function HomePage() {
                   marginBottom: 8,
                 }}
               >
-                Select SSR Region and SSR Year, then click Refresh list.
-                Category and Sub Category are optional filters.
+                Select SSR Region and SSR Year to list items. SSR Category
+                and SSR Sub Category are optional.
               </div>
 
               <div
@@ -9039,16 +9147,24 @@ export default function HomePage() {
                       </th>
                       <th>Unit</th>
                       <th>Rate</th>
-                      <th>User</th>
-                      <th>Action</th>
+                      <th
+                        style={{
+                          position: "sticky",
+                          right: 0,
+                          background: theme.colors.navy,
+                          zIndex: 1,
+                        }}
+                      >
+                        Action
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {loadingItemMaster ? (
-                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={9}>Loading…</EmptyRow>
                     ) : !itemMasterFilterRegionId ||
                       !itemMasterFilterYearId ? (
-                      <EmptyRow colSpan={10}>
+                      <EmptyRow colSpan={9}>
                         Select SSR Region and SSR Year above, then click Refresh
                         list.
                       </EmptyRow>
@@ -9102,10 +9218,15 @@ export default function HomePage() {
                             >
                               {formatRupees(row.CompletedRate)}
                             </td>
-                            <td style={{ fontFamily: theme.font.mono }}>
-                              {row.UserId ?? "—"}
-                            </td>
-                            <td>
+                            <td
+                              style={{
+                                position: "sticky",
+                                right: 0,
+                                background: "#fff",
+                                whiteSpace: "nowrap",
+                                boxShadow: "-6px 0 8px rgba(15, 42, 68, 0.06)",
+                              }}
+                            >
                               {canEditRow ? (
                                 <GhostIconButton
                                   tone={theme.colors.accent}
@@ -9121,7 +9242,7 @@ export default function HomePage() {
                         );
                       })
                     ) : (
-                      <EmptyRow colSpan={10}>
+                      <EmptyRow colSpan={9}>
                         No items found — add one above.
                       </EmptyRow>
                     )}
