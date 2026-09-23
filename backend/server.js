@@ -929,27 +929,36 @@ app.get("/api/ssr-items-load", async (req, res) => {
   console.log("SSR Year Id: ", ssrYearId);
   console.log("Search: ", search);
 
-  if (!regionId || !categoryId) {
+  if (!regionId) {
     return res.status(400).json({
-      message: "regionId and categoryId are required.",
+      message: "regionId is required.",
     });
   }
 
   try {
-    const params = [regionId, categoryId];
+    const params = [regionId];
     let query = `
       SELECT
         i."ItemId",
         i."ItemNumber",
+        i."ItemCode",
         i."ItemDescription",
         i."CompletedRate",
         i."UnitId",
         i."SSRYearId",
+        i."CategoryId",
+        i."SubCategoryId",
         u."UnitShortName"
       FROM "MasterItem" i
       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
-      WHERE i."RegionId" = $1
-        AND i."CategoryId" = $2`;
+      LEFT JOIN "MasterSSRCategory" c ON c."SSRCategoryId" = i."CategoryId"
+      LEFT JOIN "MasterSSRSubCategory" sc ON sc."SSRSubCategoryId" = i."SubCategoryId"
+      WHERE i."RegionId" = $1`;
+
+    if (categoryId !== undefined && categoryId !== null && String(categoryId).trim() !== "") {
+      params.push(categoryId);
+      query += ` AND i."CategoryId" = $${params.length}`;
+    }
 
     if (ssrYearId !== undefined && ssrYearId !== null && String(ssrYearId).trim() !== "") {
       params.push(ssrYearId);
@@ -992,7 +1001,17 @@ app.get("/api/ssr-items-load", async (req, res) => {
       }
     }
 
-    query += ` ORDER BY i."ItemNumber" ASC`;
+    if (String(req.query.listOrder || "") === "component") {
+      query += `
+        ORDER BY c."DOrder" ASC NULLS LAST,
+                 COALESCE(NULLIF(c."SSRCategoryShortName", ''), c."SSRCategoryName") ASC NULLS LAST,
+                 sc."DOrder" ASC NULLS LAST,
+                 COALESCE(NULLIF(sc."SSRSubCategoryShortName", ''), sc."SSRSubCategoryName") ASC NULLS LAST,
+                 i."ItemCode" ASC NULLS LAST,
+                 i."ItemId" ASC`;
+    } else {
+      query += ` ORDER BY i."ItemNumber" ASC`;
+    }
 
     const result = await pool.query(query, params);
     return res.status(200).send({ data: result.rows });
@@ -3882,6 +3901,22 @@ async function ensureMasterItemUserId() {
   `);
 }
 
+/** Imported ItemId values can sit ahead of the identity sequence. */
+async function ensureMasterItemIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"MasterItem"', 'ItemId') AS seq
+  `);
+  const seq = seqRes.rows[0]?.seq;
+  if (!seq) return;
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("ItemId"), 0)::bigint AS max FROM "MasterItem"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+}
+
 function normalizeUserCategoryName(name) {
   return String(name || "")
     .trim()
@@ -3970,7 +4005,7 @@ function escapeLikePattern(value) {
   return String(value).replace(/[\\%_]/g, "\\$&");
 }
 
-/** Next NON DSR Item Number: {OrgCode}-AR-{n}, counted per organization. */
+/** Next NON DSR Item Code: {OrgCode}-AR-{n}, counted per organization. */
 async function nextOrgItemNumber(db, organizationId) {
   const orgResult = await db.query(
     `SELECT "OrgCode" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
@@ -3979,7 +4014,7 @@ async function nextOrgItemNumber(db, organizationId) {
   const orgCode = String(orgResult.rows[0]?.OrgCode || "").trim();
   if (!orgCode) {
     const error = new Error(
-      "Organization code is required to generate Item Number.",
+      "Organization code is required to generate Item Code.",
     );
     error.status = 400;
     throw error;
@@ -3991,23 +4026,30 @@ async function nextOrgItemNumber(db, organizationId) {
 
   const prefix = `${orgCode}-AR-`;
   const existing = await db.query(
-    `SELECT i."ItemNumber"
+    `SELECT i."ItemNumber", i."ItemCode"
      FROM "MasterItem" i
      INNER JOIN "MasterUser" u ON u."UserId" = i."UserId"
      WHERE u."OrganizationId" = $1
-       AND i."ItemNumber" ILIKE $2 ESCAPE '\\'`,
+       AND (
+         i."ItemNumber" ILIKE $2 ESCAPE '\\'
+         OR i."ItemCode" ILIKE $2 ESCAPE '\\'
+       )`,
     [Number(organizationId), `${escapeLikePattern(prefix)}%`],
   );
 
   let max = 0;
   const prefixLower = prefix.toLowerCase();
-  for (const row of existing.rows) {
-    const value = String(row.ItemNumber || "").trim();
-    if (!value.toLowerCase().startsWith(prefixLower)) continue;
+  const consider = (raw) => {
+    const value = String(raw || "").trim();
+    if (!value.toLowerCase().startsWith(prefixLower)) return;
     const suffix = value.slice(prefix.length);
-    if (!/^\d+$/.test(suffix)) continue;
+    if (!/^\d+$/.test(suffix)) return;
     const n = Number(suffix);
     if (n > max) max = n;
+  };
+  for (const row of existing.rows) {
+    consider(row.ItemNumber);
+    consider(row.ItemCode);
   }
   return `${prefix}${max + 1}`;
 }
@@ -4026,7 +4068,7 @@ const MASTER_ITEM_SELECT = `
          i."ItemShortDescription", i."CompletedRate", i."LabourRate",
          i."PageNumber", i."MarkForDeletion",
          i."ItemCode", i."Number", i."SubNumber", i."ItemSpecification",
-         i."EffectiveDate",
+         to_char(i."EffectiveDate", 'YYYY-MM-DD') AS "EffectiveDate",
          r."SSRRegionShortName", r."SSRRegionName",
          c."SSRCategoryShortName", c."SSRCategoryName",
          sc."SSRSubCategoryShortName", sc."SSRSubCategoryName",
@@ -4123,7 +4165,7 @@ app.get("/api/master-items", async (req, res) => {
       MASTER_ITEM_SELECT +
       filterSql +
       `
-        ORDER BY i."ItemNumber" ASC NULLS LAST, i."ItemId" ASC
+        ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemId" ASC
         LIMIT 500`;
     const result = await pool.query(sql, params);
     return res.json({
@@ -4150,15 +4192,15 @@ app.get("/api/master-items/next-number", async (req, res) => {
   const orgId = Number(auth.actor.OrganizationId);
   if (!orgId) {
     return res.status(400).json({
-      message: "Organization is required to generate Item Number.",
+      message: "Organization is required to generate Item Code.",
     });
   }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const itemNumber = await nextOrgItemNumber(client, orgId);
+    const itemCode = await nextOrgItemNumber(client, orgId);
     await client.query("ROLLBACK");
-    return res.json({ itemNumber, organizationId: orgId });
+    return res.json({ itemCode, organizationId: orgId });
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -4220,6 +4262,20 @@ function parseOptionalNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function todayIsoDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseItemEffectiveDate(value) {
+  const text = String(value || "").trim().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return todayIsoDate();
+}
+
 function parseOptionalBool(value) {
   if (value === true || value === "true" || value === 1 || value === "1") {
     return true;
@@ -4254,28 +4310,37 @@ app.post("/api/master-items", async (req, res) => {
   }
   const autoItemNumber =
     isNonDsrRegion(regionId) || auth.isOrgAdmin || auth.isIndvUser;
-  if (!autoItemNumber && (!body.ItemNumber || !String(body.ItemNumber).trim())) {
+  const typedItemNumber = String(body.ItemNumber || "").trim();
+  if (!typedItemNumber) {
     return res.status(400).json({ message: "Item Number is required." });
+  }
+  if (typedItemNumber.length > 50) {
+    return res.status(400).json({
+      message: "Item Number must be at most 50 characters.",
+    });
   }
 
   const client = await pool.connect();
   try {
     await ensureMasterItemUserId();
+    await ensureMasterItemIdSequence();
     await client.query("BEGIN");
     let itemNumber;
+    let itemCode;
     if (autoItemNumber) {
       const orgId = Number(auth.actor.OrganizationId);
       if (!orgId) {
         await client.query("ROLLBACK");
         return res.status(400).json({
-          message: "Organization is required to generate Item Number.",
+          message: "Organization is required to generate Item Code.",
         });
       }
-      itemNumber = await nextOrgItemNumber(client, orgId);
+      itemCode = await nextOrgItemNumber(client, orgId);
+      itemNumber = typedItemNumber;
     } else {
-      itemNumber = String(body.ItemNumber).trim();
+      itemNumber = typedItemNumber;
+      itemCode = String(body.ItemCode || "").trim();
     }
-    const itemCode = String(body.ItemCode || "").trim();
     if (itemCode.length > 20) {
       await client.query("ROLLBACK");
       return res.status(400).json({
@@ -4286,8 +4351,8 @@ app.post("/api/master-items", async (req, res) => {
       `INSERT INTO "MasterItem"
         ("UserId", "RegionId", "CategoryId", "SubCategoryId", "SSRYearId", "UnitId",
          "ItemNumber", "ItemCode", "ItemDescription", "ItemShortDescription",
-         "CompletedRate", "LabourRate", "PageNumber", "MarkForDeletion")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         "CompletedRate", "LabourRate", "PageNumber", "EffectiveDate", "MarkForDeletion")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING "ItemId"`,
       [
         Number(auth.actor.UserId),
@@ -4296,7 +4361,7 @@ app.post("/api/master-items", async (req, res) => {
         parseOptionalNumber(body.SubCategoryId),
         parseOptionalNumber(body.SSRYearId),
         parseOptionalNumber(body.UnitId),
-        itemNumber,
+        itemNumber || "",
         itemCode || null,
         String(body.ItemDescription).trim(),
         body.ItemShortDescription
@@ -4305,6 +4370,7 @@ app.post("/api/master-items", async (req, res) => {
         parseOptionalNumber(body.CompletedRate),
         parseOptionalNumber(body.LabourRate),
         null,
+        parseItemEffectiveDate(body.EffectiveDate),
         false,
       ],
     );
@@ -4349,7 +4415,7 @@ app.put("/api/master-items/:id", async (req, res) => {
   try {
     await ensureMasterItemUserId();
     const existing = await pool.query(
-      `SELECT "ItemId", "RegionId", "UserId", "ItemNumber"
+      `SELECT "ItemId", "RegionId", "UserId", "ItemNumber", "ItemCode"
        FROM "MasterItem" WHERE "ItemId" = $1`,
       [itemId],
     );
@@ -4386,25 +4452,42 @@ app.put("/api/master-items/:id", async (req, res) => {
     if (!body.ItemDescription || !String(body.ItemDescription).trim()) {
       return res.status(400).json({ message: "Item Description is required." });
     }
-    const keepGeneratedNumber =
+    const keepGeneratedCode =
       isNonDsrRegion(regionId) ||
       isNonDsrRegion(existing.rows[0].RegionId) ||
       auth.isOrgAdmin ||
       auth.isIndvUser;
-    const itemNumber = keepGeneratedNumber
-      ? String(existing.rows[0].ItemNumber || "").trim()
-      : String(body.ItemNumber || "").trim();
+    const existingCode = String(existing.rows[0].ItemCode || "").trim();
+    const existingNumber = String(existing.rows[0].ItemNumber || "").trim();
+    const generatedCode = /^.+-AR-\d+$/i;
+    let itemCode;
+    let itemNumber;
+    if (keepGeneratedCode) {
+      if (generatedCode.test(existingCode)) {
+        itemCode = existingCode;
+      } else if (!existingCode && generatedCode.test(existingNumber)) {
+        itemCode = existingNumber;
+      } else {
+        itemCode = existingCode;
+      }
+      itemNumber = String(body.ItemNumber || "").trim();
+    } else {
+      itemNumber = String(body.ItemNumber || "").trim();
+      itemCode = String(body.ItemCode || "").trim();
+    }
     if (!itemNumber) {
       return res.status(400).json({ message: "Item Number is required." });
     }
-
-    const itemCode = String(body.ItemCode || "").trim();
+    if (itemNumber.length > 50) {
+      return res.status(400).json({
+        message: "Item Number must be at most 50 characters.",
+      });
+    }
     if (itemCode.length > 20) {
       return res.status(400).json({
         message: "Item Code must be at most 20 characters.",
       });
     }
-
     await pool.query(
       `UPDATE "MasterItem"
        SET "RegionId" = $1,
@@ -4418,15 +4501,16 @@ app.put("/api/master-items/:id", async (req, res) => {
            "ItemShortDescription" = $9,
            "CompletedRate" = $10,
            "LabourRate" = $11,
+           "EffectiveDate" = $12,
            "MarkForDeletion" = false
-       WHERE "ItemId" = $12`,
+       WHERE "ItemId" = $13`,
       [
         regionId,
         parseOptionalNumber(body.CategoryId),
         parseOptionalNumber(body.SubCategoryId),
         parseOptionalNumber(body.SSRYearId),
         parseOptionalNumber(body.UnitId),
-        itemNumber,
+        itemNumber || "",
         itemCode || null,
         String(body.ItemDescription).trim(),
         body.ItemShortDescription
@@ -4434,6 +4518,7 @@ app.put("/api/master-items/:id", async (req, res) => {
           : null,
         parseOptionalNumber(body.CompletedRate),
         parseOptionalNumber(body.LabourRate),
+        parseItemEffectiveDate(body.EffectiveDate),
         itemId,
       ],
     );
@@ -9792,6 +9877,7 @@ app.listen(port, async () => {
     await ensureMasterMaterialComponentDescription();
     await ensureWorkStandardAdditionSchema();
     await ensureMasterItemUserId();
+    await ensureMasterItemIdSequence();
     await ensureWorkEstimateSequences();
     await ensureSignupSchema();
     await ensureUserLogTrackSchema(pool);

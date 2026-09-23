@@ -346,6 +346,14 @@ const initialUnitForm = {
   MarkForDeletion: false,
 };
 
+function todayIsoDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 const initialItemMasterForm = {
   ItemId: "",
   ItemCode: "",
@@ -362,6 +370,7 @@ const initialItemMasterForm = {
   CompletedRate: "",
   LabourRate: "",
   PageNumber: "",
+  EffectiveDate: "",
 };
 
 const MATERIAL_COMPONENT_DESC_MAX = 100;
@@ -2510,6 +2519,7 @@ export default function HomePage() {
   const [loadingItemMaster, setLoadingItemMaster] = useState(false);
   const [savingItemMaster, setSavingItemMaster] = useState(false);
   const [editingItemMasterId, setEditingItemMasterId] = useState(null);
+  const [itemCodePreviewNonce, setItemCodePreviewNonce] = useState(0);
   const [itemMasterYears, setItemMasterYears] = useState([]);
   const [itemMasterCategories, setItemMasterCategories] = useState([]);
   const [itemMasterSubCategories, setItemMasterSubCategories] = useState([]);
@@ -3285,16 +3295,30 @@ export default function HomePage() {
     }
   };
 
-  const loadMaterialSubCategories = async (categoryId) => {
-    if (!categoryId) {
+  const loadMaterialSubCategories = async (categoryId, regionId) => {
+    if (categoryId) {
+      try {
+        const res = await axios.get(
+          `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+        );
+        setMaterialSubCategories(res.data?.data || []);
+      } catch (err) {
+        console.error(err);
+        setMaterialSubCategories([]);
+      }
+      return;
+    }
+    const region = regionId || materialRegionId;
+    if (!region) {
       setMaterialSubCategories([]);
       return;
     }
     try {
-      const res = await axios.get(
-        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      const res = await axios.get(`${API_BASE}/api/ssr-sub-categories`);
+      const rows = Array.isArray(res.data) ? res.data : [];
+      setMaterialSubCategories(
+        rows.filter((row) => Number(row.SSRRegionId) === Number(region)),
       );
-      setMaterialSubCategories(res.data?.data || []);
     } catch (err) {
       console.error(err);
       setMaterialSubCategories([]);
@@ -3323,11 +3347,15 @@ export default function HomePage() {
   };
 
   const loadMaterialItems = async () => {
+    const categoryOptional =
+      Number(materialRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    if (!materialRegionId || !materialSsrYearId) {
+      alert("Please select SSR Region and SSR Year.");
+      return;
+    }
     if (
-      !materialRegionId ||
-      !materialSsrYearId ||
-      !materialCategoryId ||
-      !materialSubCategoryId
+      !categoryOptional &&
+      (!materialCategoryId || !materialSubCategoryId)
     ) {
       alert(
         "Please select SSR Region, SSR Year, SSR Category, and SSR Sub Category.",
@@ -3343,10 +3371,11 @@ export default function HomePage() {
       const search = String(materialItemSearch || "").trim();
       const params = {
         regionId: materialRegionId,
-        categoryId: materialCategoryId,
-        subCategoryId: materialSubCategoryId,
         ssrYearId: materialSsrYearId,
       };
+      if (categoryOptional) params.listOrder = "component";
+      if (materialCategoryId) params.categoryId = materialCategoryId;
+      if (materialSubCategoryId) params.subCategoryId = materialSubCategoryId;
       if (search) params.search = search;
       if (currentUser?.UserId) params.userId = currentUser.UserId;
       const res = await axios.get(`${API_BASE}/api/ssr-items-load`, {
@@ -5762,6 +5791,7 @@ export default function HomePage() {
           UserId: user.UserId ? String(user.UserId) : "",
           UserName: user.UserName || user.UserLoginName || "",
           RegionId: allowed ? String(allowed) : "",
+          EffectiveDate: todayIsoDate(),
         });
         loadItemMasterYears();
         if (allowed) {
@@ -5796,23 +5826,28 @@ export default function HomePage() {
         );
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data.message || "Failed to generate Item Number.");
+          throw new Error(data.message || "Failed to generate Item Code.");
         }
         if (cancelled) return;
         setItemMasterForm((prev) => {
           if (prev.ItemId) return prev;
-          return { ...prev, ItemNumber: data.itemNumber || "" };
+          return { ...prev, ItemCode: data.itemCode || data.itemNumber || "" };
         });
       } catch (error) {
         if (!cancelled) {
-          setMessage(`Item Number could not be generated: ${error.message}`);
+          setMessage(`Item Code could not be generated: ${error.message}`);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [currentUser?.UserId, itemMasterForm.RegionId, editingItemMasterId]);
+  }, [
+    currentUser?.UserId,
+    itemMasterForm.RegionId,
+    editingItemMasterId,
+    itemCodePreviewNonce,
+  ]);
 
   useEffect(() => {
     if (activeMaster !== "item-master" || !currentUser?.UserId) return;
@@ -6368,12 +6403,14 @@ export default function HomePage() {
       UserId: currentUser?.UserId ? String(currentUser.UserId) : "",
       UserName: currentUser?.UserName || currentUser?.UserLoginName || "",
       RegionId: allowedRegionId ? String(allowedRegionId) : "",
+      EffectiveDate: todayIsoDate(),
     });
     setItemMasterCategories([]);
     setItemMasterSubCategories([]);
     if (allowedRegionId) {
       loadItemMasterCategories(allowedRegionId);
     }
+    setItemCodePreviewNonce((n) => n + 1);
   };
 
   const onItemMasterChange = (e) => {
@@ -6389,7 +6426,7 @@ export default function HomePage() {
           regionNum === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
           regionNum === ITEM_MASTER_INDV_USER_REGION_ID;
         if (!editingItemMasterId && !autoRegion) {
-          next.ItemNumber = "";
+          next.ItemCode = "";
         }
         loadItemMasterCategories(value);
         setItemMasterSubCategories([]);
@@ -6420,9 +6457,13 @@ export default function HomePage() {
       return;
     }
     setEditingItemMasterId(row.ItemId);
+    const storedNumber = row.ItemNumber || "";
+    const storedCode = row.ItemCode || "";
+    const generatedInNumber =
+      !storedCode && /^.+-AR-\d+$/i.test(storedNumber);
     setItemMasterForm({
       ItemId: String(row.ItemId),
-      ItemCode: row.ItemCode || "",
+      ItemCode: generatedInNumber ? storedNumber : storedCode,
       UserId: row.UserId != null ? String(row.UserId) : "",
       UserName: row.UserName || row.UserLoginName || "",
       RegionId: row.RegionId != null ? String(row.RegionId) : "",
@@ -6431,7 +6472,7 @@ export default function HomePage() {
         row.SubCategoryId != null ? String(row.SubCategoryId) : "",
       SSRYearId: row.SSRYearId != null ? String(row.SSRYearId) : "",
       UnitId: row.UnitId != null ? String(row.UnitId) : "",
-      ItemNumber: row.ItemNumber || "",
+      ItemNumber: generatedInNumber ? "" : storedNumber,
       ItemDescription: row.ItemDescription || "",
       ItemShortDescription: row.ItemShortDescription || "",
       CompletedRate:
@@ -6443,6 +6484,7 @@ export default function HomePage() {
           ? ""
           : String(row.LabourRate),
       PageNumber: row.PageNumber != null ? String(row.PageNumber) : "",
+      EffectiveDate: String(row.EffectiveDate || "").slice(0, 10) || todayIsoDate(),
     });
     if (row.RegionId) await loadItemMasterCategories(row.RegionId);
     if (row.CategoryId) await loadItemMasterSubCategories(row.CategoryId);
@@ -6455,9 +6497,16 @@ export default function HomePage() {
       return;
     }
     const isEdit = Boolean(editingItemMasterId);
+    const enteredItemNumber = String(itemMasterForm.ItemNumber || "").trim();
+    if (!enteredItemNumber) {
+      alert("Please enter Item Number.");
+      setMessage("Please enter Item Number.");
+      return;
+    }
+    const enteredItemCode = String(itemMasterForm.ItemCode || "").trim();
     if (
       !window.confirm(
-        `Please review the details.\nDo you want to ${isEdit ? "update this item" : "save this new item"}?`,
+        `Please review the details.\nItem Code: ${enteredItemCode || "(auto)"}\nItem Number: ${enteredItemNumber}\nDo you want to ${isEdit ? "update this item" : "save this new item"}?`,
       )
     ) {
       setMessage("Save canceled. You can continue editing the form.");
@@ -6483,10 +6532,13 @@ export default function HomePage() {
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Failed to save item.");
+      const savedId = data.data?.ItemId || "";
+      const savedCode = data.data?.ItemCode || "";
+      const savedNumber = data.data?.ItemNumber || "";
       setMessage(
         isEdit
-          ? "Item updated successfully."
-          : `Item saved successfully. Item Number ${data.data?.ItemNumber || ""}.`,
+          ? `Item updated successfully. Item Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`
+          : `Item saved successfully. Item Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`,
       );
       resetItemMasterEdit();
       if (itemMasterFilterRegionId && itemMasterFilterYearId) {
@@ -8735,8 +8787,9 @@ export default function HomePage() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
-                    gap: 14,
+                    gridTemplateColumns:
+                      "minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr))",
+                    gap: 8,
                   }}
                 >
                   <Field label="Item Id">
@@ -8758,7 +8811,19 @@ export default function HomePage() {
                       value={itemMasterForm.ItemCode}
                       onChange={onItemMasterChange}
                       maxLength={20}
-                      style={inputStyle}
+                      readOnly={itemNumberIsAuto}
+                      disabled={itemNumberIsAuto}
+                      placeholder={itemNumberIsAuto ? "Auto generated" : ""}
+                      style={
+                        itemNumberIsAuto
+                          ? {
+                              ...inputStyle,
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : inputStyle
+                      }
                     />
                   </Field>
                   <Field label="User">
@@ -8820,22 +8885,8 @@ export default function HomePage() {
                       name="ItemNumber"
                       value={itemMasterForm.ItemNumber}
                       onChange={onItemMasterChange}
-                      required={!itemNumberIsAuto}
-                      readOnly={itemNumberIsAuto}
-                      disabled={itemNumberIsAuto}
-                      placeholder={
-                        itemNumberIsAuto ? "Auto generated" : ""
-                      }
-                      style={
-                        itemNumberIsAuto
-                          ? {
-                              ...inputStyle,
-                              background: "#EEF1F4",
-                              color: theme.colors.inkSoft,
-                              cursor: "not-allowed",
-                            }
-                          : inputStyle
-                      }
+                      maxLength={50}
+                      style={inputStyle}
                     />
                   </Field>
                 </div>
@@ -8843,11 +8894,20 @@ export default function HomePage() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "2fr 3fr",
+                    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
                     gap: 14,
                     marginTop: 14,
                   }}
                 >
+                  <Field label="Effective Date">
+                    <input
+                      type="date"
+                      name="EffectiveDate"
+                      value={itemMasterForm.EffectiveDate}
+                      onChange={onItemMasterChange}
+                      style={inputStyle}
+                    />
+                  </Field>
                   <Field label="Category">
                     <select
                       name="CategoryId"
@@ -9141,6 +9201,7 @@ export default function HomePage() {
                       <th>Region</th>
                       <th>Category</th>
                       <th>Sub Category</th>
+                      <th>Item Code</th>
                       <th>Number</th>
                       <th style={{ minWidth: 360, width: "40%" }}>
                         Description
@@ -9161,10 +9222,10 @@ export default function HomePage() {
                   </thead>
                   <tbody>
                     {loadingItemMaster ? (
-                      <EmptyRow colSpan={9}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
                     ) : !itemMasterFilterRegionId ||
                       !itemMasterFilterYearId ? (
-                      <EmptyRow colSpan={9}>
+                      <EmptyRow colSpan={10}>
                         Select SSR Region and SSR Year above, then click Refresh
                         list.
                       </EmptyRow>
@@ -9200,6 +9261,9 @@ export default function HomePage() {
                               {row.SSRSubCategoryShortName ||
                                 row.SSRSubCategoryName ||
                                 "—"}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.ItemCode || ""}
                             </td>
                             <td style={{ fontFamily: theme.font.mono }}>
                               {row.ItemNumber}
@@ -9242,7 +9306,7 @@ export default function HomePage() {
                         );
                       })
                     ) : (
-                      <EmptyRow colSpan={9}>
+                      <EmptyRow colSpan={10}>
                         No items found — add one above.
                       </EmptyRow>
                     )}
@@ -9503,7 +9567,11 @@ export default function HomePage() {
               <Card
                 eyebrow="Master · Material Components"
                 title="Material Components"
-                subtitle="Select SSR region, year, category and an item to view, add, or edit MasterRAComponent rows."
+                subtitle={
+                  Number(materialRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID
+                    ? "Select SSR region and year. Category and sub category are optional."
+                    : "Select SSR region, year, category, sub category, and an item."
+                }
               >
                 <div
                   style={{
@@ -9528,6 +9596,9 @@ export default function HomePage() {
                         resetMaterialRALogic();
                         loadMaterialSsrYears(regionId);
                         loadMaterialCategories(regionId);
+                        if (Number(regionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID) {
+                          loadMaterialSubCategories("", regionId);
+                        }
                         if (!isNonSsrMaterialRegion(regionId)) {
                           loadMaterialMasterList(regionId);
                         } else {
@@ -9571,7 +9642,12 @@ export default function HomePage() {
                     </select>
                   </Field>
 
-                  <Field label="SSR Category" required>
+                  <Field
+                    label="SSR Category"
+                    required={
+                      Number(materialRegionId) !== ITEM_MASTER_ORG_ADMIN_REGION_ID
+                    }
+                  >
                     <select
                       value={materialCategoryId}
                       onChange={(e) => {
@@ -9582,12 +9658,28 @@ export default function HomePage() {
                         resetMaterialSelection();
                         setMaterialItemsViewed(false);
                         setMaterialRALogicPickerOpen(false);
-                        loadMaterialSubCategories(categoryId);
+                        if (
+                          categoryId ||
+                          Number(materialRegionId) ===
+                            ITEM_MASTER_ORG_ADMIN_REGION_ID
+                        ) {
+                          loadMaterialSubCategories(
+                            categoryId,
+                            materialRegionId,
+                          );
+                        } else {
+                          setMaterialSubCategories([]);
+                        }
                       }}
                       disabled={!materialRegionId}
                       style={inputStyle}
                     >
-                      <option value="">Select SSR Category</option>
+                      <option value="">
+                        {Number(materialRegionId) ===
+                        ITEM_MASTER_ORG_ADMIN_REGION_ID
+                          ? "All SSR Categories"
+                          : "Select SSR Category"}
+                      </option>
                       {materialCategories.map((c) => (
                         <option
                           key={c.SSRCategoryId}
@@ -9599,7 +9691,12 @@ export default function HomePage() {
                     </select>
                   </Field>
 
-                  <Field label="SSR Sub Category" required>
+                  <Field
+                    label="SSR Sub Category"
+                    required={
+                      Number(materialRegionId) !== ITEM_MASTER_ORG_ADMIN_REGION_ID
+                    }
+                  >
                     <select
                       value={materialSubCategoryId}
                       onChange={(e) => {
@@ -9609,10 +9706,20 @@ export default function HomePage() {
                         setMaterialItemsViewed(false);
                         setMaterialRALogicPickerOpen(false);
                       }}
-                      disabled={!materialCategoryId}
+                      disabled={
+                        !materialRegionId ||
+                        (Number(materialRegionId) !==
+                          ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                          !materialCategoryId)
+                      }
                       style={inputStyle}
                     >
-                      <option value="">Select SSR Sub Category</option>
+                      <option value="">
+                        {Number(materialRegionId) ===
+                        ITEM_MASTER_ORG_ADMIN_REGION_ID
+                          ? "All SSR Sub Categories"
+                          : "Select SSR Sub Category"}
+                      </option>
                       {materialSubCategories.map((s) => (
                         <option
                           key={s.SSRSubCategoryId}
