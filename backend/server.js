@@ -517,6 +517,33 @@ async function ensureWorkMeasurementNullableQuantity() {
   console.log("WorkMeasurement nullable Quantity/dims ensured.");
 }
 
+function parseMeasurementGroupId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** WorkMeasurement.GroupId links a row to WorkMeasurementGroup.GroupId. */
+async function ensureWorkMeasurementGroupId() {
+  await pool.query(`
+    ALTER TABLE "WorkMeasurement"
+      ADD COLUMN IF NOT EXISTS "GroupId" integer
+  `);
+  try {
+    await pool.query(`
+      ALTER TABLE "WorkMeasurement"
+        ADD CONSTRAINT "FK_WorkMeasurement_Group"
+        FOREIGN KEY ("GroupId")
+        REFERENCES public."MasterMeasurementGroup" ("GroupId")
+    `);
+  } catch (error) {
+    if (error.code !== "42710") {
+      console.warn("WorkMeasurement GroupId FK:", error.message);
+    }
+  }
+  console.log("WorkMeasurement GroupId ensured.");
+}
+
 async function renumberWorkMeasurementSequences(workAbstractId, client = pool) {
   await client.query(
     `
@@ -2980,6 +3007,7 @@ app.post("/api/insert-work-measurements", async (req, res) => {
     length,
     breadth,
     height,
+    groupId,
   } = req.body;
 
   const normalizeDimText = (value) => {
@@ -3029,9 +3057,9 @@ app.post("/api/insert-work-measurements", async (req, res) => {
 
       const result = await client.query(
         `INSERT INTO "WorkMeasurement"
-          ("WorkAbstractId", "Description", "Quantity", "Number", "Length", "Breadth", "Height", "Sequence") 
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) 
-         RETURNING "MeasurementId", "Sequence";`,
+          ("WorkAbstractId", "Description", "Quantity", "Number", "Length", "Breadth", "Height", "Sequence", "GroupId")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING "MeasurementId", "Sequence", "GroupId";`,
         [
           workAbstractId,
           description ?? "",
@@ -3041,6 +3069,7 @@ app.post("/api/insert-work-measurements", async (req, res) => {
           brdT,
           hgtT,
           sequence,
+          parseMeasurementGroupId(groupId),
         ],
       );
       await client.query("COMMIT");
@@ -3085,7 +3114,7 @@ app.get("/api/measurements", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT "MeasurementId", "Description", "Number", "Length", "Breadth", "Height", "Quantity", "Sequence"
+      `SELECT "MeasurementId", "Description", "Number", "Length", "Breadth", "Height", "Quantity", "Sequence", "GroupId"
        FROM "WorkMeasurement"
        WHERE "WorkAbstractId" = $1
        ORDER BY "Sequence" ASC, "MeasurementId" ASC`,
@@ -3101,7 +3130,7 @@ app.get("/api/measurements", async (req, res) => {
 // PUT route for editing existing rows
 app.put("/api/update-work-measurements/:id", async (req, res) => {
   const { id } = req.params;
-  const { description, expression, number, length, breadth, height, quantity } =
+  const { description, expression, number, length, breadth, height, quantity, groupId } =
     req.body;
 
   const normalizeDimText = (value) => {
@@ -3126,8 +3155,8 @@ app.put("/api/update-work-measurements/:id", async (req, res) => {
 
     const result = await pool.query(
       `UPDATE "WorkMeasurement" 
-       SET "Description"=$1, "Number"=$2, "Length"=$3, "Breadth"=$4, "Height"=$5, "Quantity"=$6 
-       WHERE "MeasurementId"=$7
+       SET "Description"=$1, "Number"=$2, "Length"=$3, "Breadth"=$4, "Height"=$5, "Quantity"=$6, "GroupId"=$7
+       WHERE "MeasurementId"=$8
        RETURNING "MeasurementId";`,
       [
         description,
@@ -3136,6 +3165,7 @@ app.put("/api/update-work-measurements/:id", async (req, res) => {
         brdT,
         hgtT,
         qtyVal,
+        parseMeasurementGroupId(groupId),
         id,
       ],
     );
@@ -9871,6 +9901,7 @@ app.listen(port, async () => {
     await ensureWorkAbstractSequence();
     await ensureWorkMeasurementSequence();
     await ensureWorkMeasurementNullableQuantity();
+    await ensureWorkMeasurementGroupId();
     await ensureMaterialComponentIdSequence();
     await ensureRAComponentIdSequence();
     await ensureRAComponentYearIdNullable();

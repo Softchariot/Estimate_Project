@@ -183,7 +183,8 @@ export default function WorkMeasurementGroupsPanel({
           sequence: idx + 1,
         })),
       });
-      setMessage(res.data?.message || "Measurement groups saved.");
+      setMessage("Measurement Groups saved successfully.");
+      window.alert("Measurement Groups saved successfully.");
       await loadAll();
     } catch (err) {
       setError(

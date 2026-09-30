@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import axios from "axios";
 
 /** Strip leading Excel "=" and trim. Empty → "". */
@@ -176,6 +176,7 @@ const measurementRowBase = {
   id: null,
   localId: "",
   sequence: null,
+  groupId: null,
   desc: "",
   num: "",
   len: "",
@@ -964,6 +965,8 @@ function mapDbRows(dbRows) {
       id: r.MeasurementId,
       localId: uid(),
       sequence: r.Sequence != null ? Number(r.Sequence) : idx + 1,
+      groupId:
+        r.GroupId != null && r.GroupId !== "" ? Number(r.GroupId) : null,
       desc: r.Description ?? "",
       num: r.Number != null ? String(r.Number) : "",
       len: r.Length != null ? String(r.Length) : "",
@@ -985,10 +988,63 @@ function mapDbRows(dbRows) {
   });
 }
 
+function measurementGroupKey(groupId) {
+  if (groupId === null || groupId === undefined || groupId === "") return null;
+  const n = Number(groupId);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function blankMeasurementRow(groupId) {
+  return {
+    ...measurementRowBase,
+    localId: uid(),
+    groupId: measurementGroupKey(groupId),
+  };
+}
+
+function measurementRowHasText(row) {
+  return [row?.desc, row?.num, row?.len, row?.brd, row?.hgt].some((value) =>
+    String(value || "").trim(),
+  );
+}
+
+/** Ungrouped rows first (no heading), then one section per work measurement group. */
+function buildMeasurementRows(dbRows, groups) {
+  const mapped = mapDbRows(dbRows);
+  const orderedGroups = [...(groups || [])]
+    .map((group) => ({
+      groupId: measurementGroupKey(group.groupId),
+      groupName: group.groupName || "",
+      sequence: Number(group.sequence ?? 999999),
+    }))
+    .filter((group) => group.groupId);
+  orderedGroups.sort((a, b) => {
+    if (a.sequence !== b.sequence) return a.sequence - b.sequence;
+    return a.groupId - b.groupId;
+  });
+  const assigned = new Set(orderedGroups.map((group) => group.groupId));
+  const ungrouped = mapped.filter(
+    (row) => measurementGroupKey(row.groupId) === null,
+  );
+  const orphans = mapped.filter((row) => {
+    const key = measurementGroupKey(row.groupId);
+    return key !== null && !assigned.has(key);
+  });
+  const rows = [...ungrouped, ...orphans, blankMeasurementRow(null)];
+  for (const group of orderedGroups) {
+    const mine = mapped.filter(
+      (row) => measurementGroupKey(row.groupId) === group.groupId,
+    );
+    rows.push(...mine, blankMeasurementRow(group.groupId));
+  }
+  return rows;
+}
+
 function MeasurementPanel({
   item,
   projectId,
   subWorkId,
+  userId,
   API_BASE,
   onCommentSaved,
   onMeasurementsSaved,
@@ -1007,33 +1063,66 @@ function MeasurementPanel({
   const [commentOpen, setCommentOpen] = useState(false);
   const [commentText, setCommentText] = useState("");
   const [savingComment, setSavingComment] = useState(false);
+  const [measurementGroups, setMeasurementGroups] = useState([]);
+  const measurementGroupsRef = useRef([]);
+
+  const loadWorkMeasurementGroups = async () => {
+    if (!projectId || !subWorkId || !userId) return [];
+    const res = await axios.get(`${apiBase}/api/work-measurement-groups`, {
+      params: {
+        userId,
+        workId: projectId,
+        subWorkId,
+      },
+    });
+    const list = Array.isArray(res.data?.data) ? res.data.data : [];
+    return list.map((group) => ({
+      groupId: Number(group.GroupId),
+      groupName: group.GroupName || "",
+      sequence: group.Sequence != null ? Number(group.Sequence) : 999999,
+    }));
+  };
 
   const reloadRows = async () => {
     const res = await axios.get(`${apiBase}/api/measurements`, {
       params: { workAbstractId: item.WorkAbstractId },
     });
     const dbRows = Array.isArray(res.data?.data) ? res.data.data : [];
-    setRows([...mapDbRows(dbRows), { ...measurementRowBase, localId: uid() }]);
+    setRows(buildMeasurementRows(dbRows, measurementGroupsRef.current));
   };
 
   useEffect(() => {
     if (!item?.WorkAbstractId) {
-      setRows([{ ...measurementRowBase, localId: uid() }]);
+      measurementGroupsRef.current = [];
+      setMeasurementGroups([]);
+      setRows([blankMeasurementRow(null)]);
       return;
     }
-    axios
-      .get(`${apiBase}/api/measurements`, {
+    let cancelled = false;
+    Promise.all([
+      axios.get(`${apiBase}/api/measurements`, {
         params: { workAbstractId: item.WorkAbstractId },
-      })
-      .then((res) => {
-        const dbRows = Array.isArray(res.data?.data) ? res.data.data : [];
-        setRows([...mapDbRows(dbRows), { ...measurementRowBase, localId: uid() }]);
+      }),
+      loadWorkMeasurementGroups().catch((err) => {
+        console.error("Failed to load measurement groups:", err);
+        return [];
+      }),
+    ])
+      .then(([measRes, groups]) => {
+        if (cancelled) return;
+        measurementGroupsRef.current = groups;
+        setMeasurementGroups(groups);
+        const dbRows = Array.isArray(measRes.data?.data) ? measRes.data.data : [];
+        setRows(buildMeasurementRows(dbRows, groups));
       })
       .catch((err) => {
         console.error("Failed to load measurements:", err);
-        setRows([{ ...measurementRowBase, localId: uid() }]);
+        if (!cancelled) setRows([blankMeasurementRow(null)]);
       });
-  }, [item?.WorkAbstractId, apiBase]);
+    return () => {
+      cancelled = true;
+    };
+  }, [item?.WorkAbstractId, apiBase, projectId, subWorkId, userId]);
 
   const updateField = (localId, field, value) => {
     setRows((prev) => {
@@ -1055,15 +1144,18 @@ function MeasurementPanel({
         return next;
       });
 
-      const lastRow = updated[updated.length - 1];
-      const lastRowHasContent =
-        lastRow.desc.trim() ||
-        lastRow.num.trim() ||
-        lastRow.len.trim() ||
-        lastRow.brd.trim() ||
-        lastRow.hgt.trim();
-      if (lastRow.localId === localId && lastRowHasContent) {
-        return [...updated, { ...measurementRowBase, localId: uid() }];
+      const edited = updated.find((r) => r.localId === localId);
+      const key = measurementGroupKey(edited?.groupId);
+      const groupRows = updated.filter(
+        (r) => measurementGroupKey(r.groupId) === key,
+      );
+      const lastRow = groupRows[groupRows.length - 1];
+      const lastRowHasContent = lastRow && measurementRowHasText(lastRow);
+      if (lastRow && lastRow.localId === localId && lastRowHasContent) {
+        const insertAt = updated.findIndex((r) => r.localId === localId) + 1;
+        const next = [...updated];
+        next.splice(insertAt, 0, blankMeasurementRow(key));
+        return next;
       }
       return updated;
     });
@@ -1080,17 +1172,16 @@ function MeasurementPanel({
         orderedIds: saved.map((r) => r.id),
       });
       const blank = nextRows.filter((r) => r.id === null);
-      const reSeq = saved.map((r, idx) => ({
-        ...r,
-        sequence: idx + 1,
-        dirty: r.dirty,
-      }));
-      setRows([
-        ...reSeq,
-        ...(blank.length
-          ? blank
-          : [{ ...measurementRowBase, localId: uid() }]),
-      ]);
+      setRows(
+        nextRows.map((row) => {
+          if (row.id === null) return row;
+          const idx = saved.findIndex((item) => item.id === row.id);
+          return idx >= 0 ? { ...row, sequence: idx + 1 } : row;
+        }),
+      );
+      if (!blank.length) {
+        setRows((prev) => [...prev, blankMeasurementRow(null)]);
+      }
     } catch (err) {
       setError(
         `Reorder failed: ${err.response?.data?.message || err.message}`,
@@ -1108,23 +1199,18 @@ function MeasurementPanel({
   const moveRow = (fromLocalId, toLocalId) => {
     if (!fromLocalId || !toLocalId || fromLocalId === toLocalId) return;
     setRows((prev) => {
-      const blankRows = prev.filter((r) => r.id === null);
-      const savedRows = prev.filter((r) => r.id !== null);
-      const fromIdx = savedRows.findIndex((r) => r.localId === fromLocalId);
-      const toIdx = savedRows.findIndex((r) => r.localId === toLocalId);
-      if (fromIdx < 0 || toIdx < 0) return prev;
-
-      const nextSaved = [...savedRows];
-      const [moved] = nextSaved.splice(fromIdx, 1);
-      nextSaved.splice(toIdx, 0, moved);
-      const next = [
-        ...nextSaved,
-        ...(blankRows.length
-          ? blankRows
-          : [{ ...measurementRowBase, localId: uid() }]),
-      ];
-
-      // Persist after state update
+      const from = prev.find((r) => r.localId === fromLocalId);
+      const to = prev.find((r) => r.localId === toLocalId);
+      if (!from || !to || from.id === null || to.id === null) return prev;
+      if (measurementGroupKey(from.groupId) !== measurementGroupKey(to.groupId)) {
+        return prev;
+      }
+      const next = [...prev];
+      const fromIdx = next.findIndex((r) => r.localId === fromLocalId);
+      const [moved] = next.splice(fromIdx, 1);
+      const insertAt = next.findIndex((r) => r.localId === toLocalId);
+      if (insertAt < 0) return prev;
+      next.splice(insertAt, 0, moved);
       queueMicrotask(() => persistOrder(next));
       return next;
     });
@@ -1135,10 +1221,16 @@ function MeasurementPanel({
     if (!row) return;
     if (row.id === null) {
       setRows((prev) => {
+        const key = measurementGroupKey(row.groupId);
         const next = prev.filter((r) => r.localId !== localId);
-        return next.length
-          ? next
-          : [{ ...measurementRowBase, localId: uid() }];
+        const stillInGroup = next.some(
+          (r) => measurementGroupKey(r.groupId) === key,
+        );
+        if (stillInGroup) return next.length ? next : [blankMeasurementRow(null)];
+        const at = prev.findIndex((r) => r.localId === localId);
+        const restored = [...prev];
+        restored.splice(at, 1, blankMeasurementRow(key));
+        return restored;
       });
       return;
     }
@@ -1154,7 +1246,7 @@ function MeasurementPanel({
     }
   };
 
-  const applyExcelPaste = (text, html, spreadsheetXml) => {
+  const applyExcelPaste = (text, html, spreadsheetXml, groupId) => {
     const {
       rows: pasted,
       formulasInClipboard,
@@ -1198,10 +1290,36 @@ function MeasurementPanel({
         sample: String(html || "").slice(0, 600),
       });
     }
+    const pasteGroupId = measurementGroupKey(groupId);
     setRows((prev) => {
-      const existing = (prev || []).filter(rowHasContent);
-      const blank = { ...measurementRowBase, localId: uid() };
-      return [...existing, ...pasted, blank];
+      const tagged = pasted.map((row) => ({
+        ...row,
+        groupId: pasteGroupId,
+      }));
+      const before = [];
+      const inGroup = [];
+      const after = [];
+      let seenGroup = false;
+      for (const row of prev || []) {
+        const inThisGroup =
+          measurementGroupKey(row.groupId) === pasteGroupId;
+        if (inThisGroup) {
+          seenGroup = true;
+          inGroup.push(row);
+        } else if (!seenGroup) {
+          before.push(row);
+        } else {
+          after.push(row);
+        }
+      }
+      const existing = inGroup.filter(measurementRowHasText);
+      return [
+        ...before,
+        ...existing,
+        ...tagged,
+        blankMeasurementRow(pasteGroupId),
+        ...after,
+      ];
     });
     return true;
   };
@@ -1242,7 +1360,15 @@ function MeasurementPanel({
       /<Cell\b/i.test(spreadsheetXml);
     if (!isMulti) return;
     e.preventDefault();
-    applyExcelPaste(text, html, spreadsheetXml);
+    const holder = e.target?.closest?.("[data-meas-local]");
+    const localId = holder?.getAttribute("data-meas-local");
+    const targetRow = (rows || []).find((row) => row.localId === localId);
+    applyExcelPaste(
+      text,
+      html,
+      spreadsheetXml,
+      targetRow ? targetRow.groupId : null,
+    );
   };
 
   // Any typed content (used for auto-adding the next blank row)
@@ -1317,6 +1443,7 @@ function MeasurementPanel({
         breadth: dimsEmpty ? null : normalizeFormulaText(row.brd) || null,
         height: dimsEmpty ? null : normalizeFormulaText(row.hgt) || null,
         quantity: dimsEmpty ? null : row.qty,
+        groupId: measurementGroupKey(row.groupId),
       };
       try {
         if (row.id === null) {
@@ -1592,9 +1719,35 @@ function MeasurementPanel({
             .slice(0, idx + 1)
             .filter(rowHasContent).length;
           const displaySeq = rowHasContent(r) ? contentIndex : "";
+          const groupKey = measurementGroupKey(r.groupId);
+          const prevKey =
+            idx === 0 ? undefined : measurementGroupKey(rows[idx - 1].groupId);
+          const showHeading = groupKey !== null && groupKey !== prevKey;
+          const groupName =
+            measurementGroups.find(
+              (group) => measurementGroupKey(group.groupId) === groupKey,
+            )?.groupName || "";
           return (
+            <Fragment key={r.localId}>
+              {showHeading && (
+                <div
+                  style={{
+                    margin: "12px 0 6px",
+                    padding: "6px 10px",
+                    minWidth: 780,
+                    background: "#e8f1fb",
+                    borderLeft: "3px solid #185FA5",
+                    borderRadius: "0 6px 6px 0",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: "#185FA5",
+                  }}
+                >
+                  {groupName}
+                </div>
+              )}
             <div
-              key={r.localId}
+              data-meas-local={r.localId}
               onDragOver={(e) => {
                 if (!isSaved || !dragLocalId) return;
                 e.preventDefault();
@@ -1699,6 +1852,7 @@ function MeasurementPanel({
                 🗑
               </button>
             </div>
+            </Fragment>
           );
         })}
         </div>

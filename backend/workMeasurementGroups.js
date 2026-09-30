@@ -332,7 +332,7 @@ function registerWorkMeasurementGroupRoutes(app, pool) {
         }
         await client.query("COMMIT");
         return res.json({
-          message: "Measurement groups saved.",
+          message: "Measurement Groups saved successfully.",
           data: inserted,
         });
       } catch (error) {

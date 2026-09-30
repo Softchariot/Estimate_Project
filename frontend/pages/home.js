@@ -10440,6 +10440,7 @@ export default function HomePage() {
                           const workId = e.target.value;
                           setSelectedProjectId(workId);
                           setSelectedSubWorkId(0);
+                          setMeasurementGroupsOpen(false);
                           setSubWorks([]);
                           setCheckedItemsList([]);
                           setCheckedItemIds([]);
@@ -10473,7 +10474,9 @@ export default function HomePage() {
                         name="SubWork"
                         value={selectedSubWorkId || ""}
                         onChange={(e) => {
-                          setSelectedSubWorkId(e.target.value);
+                          const subWorkId = e.target.value;
+                          setSelectedSubWorkId(subWorkId);
+                          if (!subWorkId) setMeasurementGroupsOpen(false);
                           setCheckedItemsList([]);
                           setCheckedItemIds([]);
                           setItemRegion("");
@@ -10731,47 +10734,32 @@ export default function HomePage() {
                     >
                       {loadingEstimate ? "Generating…" : "Generate Estimate"}
                     </Button>
-                    <span
-                      title={
-                        selectedProjectId && selectedSubWorkId
-                          ? "Add Measurement Groups"
-                          : "Please Select Work and Sub Work"
-                      }
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant={measurementGroupsOpen ? "soft" : "solid"}
+                      disabled={Number(selectedSubWorkId) <= 0}
                       onClick={() => {
-                        if (!selectedProjectId || !selectedSubWorkId) {
-                          window.alert("Please Select Work and Sub Work");
+                        if (Number(selectedSubWorkId) <= 0) return;
+                        window.alert("User Can Add New Measurement Groups here");
+                        if (measurementGroupsOpen) {
+                          setMeasurementGroupsReload((n) => n + 1);
+                          return;
                         }
+                        setMeasurementGroupsOpen(true);
                       }}
-                      style={{ display: "inline-flex" }}
+                      title={
+                        Number(selectedSubWorkId) > 0
+                          ? "Add Measurement Groups"
+                          : "Select Sub Work first"
+                      }
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
                     >
-                      <Button
-                        type="button"
-                        color="primary"
-                        variant={measurementGroupsOpen ? "soft" : "solid"}
-                        disabled={!selectedProjectId || !selectedSubWorkId}
-                        onClick={() => {
-                          if (!selectedProjectId || !selectedSubWorkId) {
-                            window.alert("Please Select Work and Sub Work");
-                            return;
-                          }
-                          if (measurementGroupsOpen) {
-                            setMeasurementGroupsReload((n) => n + 1);
-                            return;
-                          }
-                          setMeasurementGroupsOpen(true);
-                        }}
-                        sx={{
-                          fontSize: 13,
-                          textTransform: "none",
-                          pointerEvents:
-                            selectedProjectId && selectedSubWorkId
-                              ? "auto"
-                              : "none",
-                        }}
-                      >
-                        Add Measurement Groups
-                      </Button>
-                    </span>
+                      Add Measurement Groups
+                    </Button>
                   </div>
                 </FormShell>
                 {measurementGroupsOpen &&
@@ -11708,6 +11696,7 @@ export default function HomePage() {
                                         item={item}
                                         projectId={selectedProjectId}
                                         subWorkId={selectedSubWorkId}
+                                        userId={currentUser?.UserId}
                                         API_BASE={API_BASE}
                                         onMeasurementsSaved={() =>
                                           collapseCheckedItemMeasurements(
