@@ -1488,6 +1488,19 @@ function MeasurementPanel({
     return sum + (res.val ?? 0);
   }, 0);
 
+  const quantitySumForGroup = (groupId) =>
+    (rows ?? []).reduce((sum, row) => {
+      if (measurementGroupKey(row.groupId) !== measurementGroupKey(groupId)) {
+        return sum;
+      }
+      if (!rowHasMeasurementData(row)) return sum;
+      return sum + (computeQty(row).val ?? 0);
+    }, 0);
+
+  const hasGroupedRows = (rows ?? []).some(
+    (row) => measurementGroupKey(row.groupId) !== null,
+  );
+
   const s = {
     cell: {
       background: "#f4f8ff",
@@ -1727,6 +1740,18 @@ function MeasurementPanel({
             measurementGroups.find(
               (group) => measurementGroupKey(group.groupId) === groupKey,
             )?.groupName || "";
+          const nextKey =
+            idx === rows.length - 1
+              ? undefined
+              : measurementGroupKey(rows[idx + 1].groupId);
+          const atGroupEnd = groupKey !== nextKey;
+          const groupTotal = atGroupEnd ? quantitySumForGroup(groupKey) : 0;
+          const showGroupTotal =
+            atGroupEnd &&
+            groupTotal !== 0 &&
+            (groupKey !== null || hasGroupedRows);
+          const groupTotalName =
+            groupKey === null ? "Without group" : groupName;
           return (
             <Fragment key={r.localId}>
               {showHeading && (
@@ -1852,6 +1877,34 @@ function MeasurementPanel({
                 🗑
               </button>
             </div>
+            {showGroupTotal && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  margin: "2px 0 8px",
+                  minWidth: 780,
+                }}
+              >
+                <div
+                  style={{
+                    padding: "6px 14px",
+                    background: "#f4f8ff",
+                    borderRadius: 8,
+                    border: "1px solid #c5d5ee",
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                    fontSize: 13,
+                  }}
+                >
+                  <span style={{ color: "#185FA5" }}>{groupTotalName}</span>
+                  <span style={{ fontWeight: 700, fontSize: 15, color: "#185FA5" }}>
+                    {groupTotal.toFixed(3)}
+                  </span>
+                </div>
+              </div>
+            )}
             </Fragment>
           );
         })}

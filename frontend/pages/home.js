@@ -5248,6 +5248,35 @@ export default function HomePage() {
     setGenerateReportModalOpen(false);
   };
 
+  const resetEstimationScreen = () => {
+    setSelectedProjectId(0);
+    setSelectedSubWorkId(0);
+    setSubWorks([]);
+    setCheckedItemsList([]);
+    setCheckedItemIds([]);
+    setCheckedForMeasurement(new Set());
+    setSelectedItems([]);
+    setUpdateSelectedItems([]);
+    setSelectedWorkId(0);
+    setItemRegion("");
+    setItemSsrYearId("");
+    setItemCategoryId("");
+    setSubCategoryItemId("");
+    setSsrYears([]);
+    setItemCategories([]);
+    setSubCategories([]);
+    setItemList([]);
+    setEstimationTab(0);
+    setMeasurementGroupsOpen(false);
+    setCheckedListDragId(null);
+    clearEstimationOutputs();
+  };
+
+  useEffect(() => {
+    if (activeMaster === "items") return;
+    resetEstimationScreen();
+  }, [activeMaster]);
+
   const handleGenerateEstimate = async (options = {}) => {
     const { resetFlow = true } = options;
     if (!selectedProjectId) {
@@ -11274,7 +11303,7 @@ export default function HomePage() {
 
                   <Card
                     eyebrow="Estimate · Work Material"
-                    title="Populate Work Material & Rates"
+                    title="Generate Rate Analysis"
                     subtitle="Deletes existing WorkMaterial for this Work, rebuilds from MasterMaterialComponent + WorkLead, and updates WorkAbstract IsRA / RateString / FinalRate."
                   >
                     <PrimaryButton
@@ -11296,7 +11325,7 @@ export default function HomePage() {
                     >
                       {savingWorkMaterials
                         ? "Updating…"
-                        : "Populate / Update Work Material"}
+                        : "Calculate Rate Analysis"}
                     </PrimaryButton>
                     {(!estimateAdditionsSaved || !estimateLeadsSaved) && (
                       <div

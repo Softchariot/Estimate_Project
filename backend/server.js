@@ -312,6 +312,14 @@ async function ensureWorkAbstractSchema() {
       ADD COLUMN IF NOT EXISTS "Comment" character varying
   `);
   await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "GroupId" integer
+  `);
+  await pool.query(`
+    ALTER TABLE "WorkAbstract"
+      ADD COLUMN IF NOT EXISTS "Quantity" double precision
+  `);
+  await pool.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -1055,7 +1063,7 @@ app.get("/api/work-abstract-get", async (req, res) => {
   console.log("Get Checked Items Called");
   try {
     const result = await pool.query(
-      `SELECT "ItemId" FROM "WorkAbstract"
+      `SELECT DISTINCT "ItemId" FROM "WorkAbstract"
        WHERE "WorkId" = $1 AND "SubWorkId" = $2
        ORDER BY "ItemId";`,
       [workId, subWorkId],
@@ -2331,18 +2339,31 @@ app.get("/api/get-items-checked-list", async (req, res) => {
       await renumberWorkAbstractSequences(resolvedWorkId, resolvedSubWorkId);
     }
 
+    // One list row per item. Group rows stay in WorkAbstract for rate analysis.
     const result = await pool.query(
-      `SELECT w."WorkAbstractId", w."ItemId", w."Sequence", w."Comment",
+      `SELECT picked."WorkAbstractId", picked."ItemId", picked."Sequence", picked."Comment",
               i."ItemNumber", i."ItemDescription",
               i."CompletedRate", u."UnitShortName"
-       FROM "WorkAbstract" w
-       JOIN "MasterItem" i ON i."ItemId" = w."ItemId"
+       FROM (
+         SELECT DISTINCT ON (w."ItemId")
+                w."WorkAbstractId", w."ItemId", w."Sequence", w."Comment"
+         FROM "WorkAbstract" w
+         WHERE w."WorkId" = $1 AND w."SubWorkId" = $2
+         ORDER BY w."ItemId",
+                  CASE WHEN w."GroupId" IS NULL THEN 0 ELSE 1 END,
+                  COALESCE(w."Sequence", 999999),
+                  w."WorkAbstractId"
+       ) picked
+       JOIN "MasterItem" i ON i."ItemId" = picked."ItemId"
        LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
-       WHERE w."WorkId" = $1 AND w."SubWorkId" = $2
-       ORDER BY COALESCE(w."Sequence", 999999) ASC, w."WorkAbstractId" ASC`,
+       ORDER BY COALESCE(picked."Sequence", 999999) ASC, picked."WorkAbstractId" ASC`,
       [resolvedWorkId, resolvedSubWorkId],
     );
-    return res.status(200).send({ data: result.rows });
+    const data = result.rows.map((row, index) => ({
+      ...row,
+      Sequence: index + 1,
+    }));
+    return res.status(200).send({ data });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: err.message });
@@ -2410,16 +2431,34 @@ app.put("/api/work-abstract/reorder", async (req, res) => {
     await client.query("BEGIN");
 
     const existing = await client.query(
-      `SELECT "WorkAbstractId" FROM "WorkAbstract"
-       WHERE "WorkId" = $1 AND "SubWorkId" = $2`,
+      `SELECT "WorkAbstractId", "ItemId", "GroupId", "Sequence"
+       FROM "WorkAbstract"
+       WHERE "WorkId" = $1 AND "SubWorkId" = $2
+       ORDER BY COALESCE("Sequence", 999999), "WorkAbstractId"`,
       [resolvedWorkId, resolvedSubWorkId],
     );
-    const existingIds = new Set(
-      existing.rows.map((r) => Number(r.WorkAbstractId)),
-    );
+    const byItem = new Map();
+    for (const row of existing.rows) {
+      const itemId = Number(row.ItemId);
+      if (!byItem.has(itemId)) byItem.set(itemId, []);
+      byItem.get(itemId).push(row);
+    }
+    const canonicalOf = new Map();
+    for (const rows of byItem.values()) {
+      rows.sort((a, b) => {
+        const aNull = a.GroupId == null ? 0 : 1;
+        const bNull = b.GroupId == null ? 0 : 1;
+        if (aNull !== bNull) return aNull - bNull;
+        return (
+          (Number(a.Sequence) || 0) - (Number(b.Sequence) || 0) ||
+          Number(a.WorkAbstractId) - Number(b.WorkAbstractId)
+        );
+      });
+      canonicalOf.set(Number(rows[0].WorkAbstractId), rows);
+    }
     if (
-      ids.length !== existingIds.size ||
-      ids.some((id) => !existingIds.has(id))
+      ids.length !== canonicalOf.size ||
+      ids.some((id) => !canonicalOf.has(id))
     ) {
       await client.query("ROLLBACK");
       return res.status(400).json({
@@ -2435,13 +2474,17 @@ app.put("/api/work-abstract/reorder", async (req, res) => {
       [resolvedWorkId, resolvedSubWorkId],
     );
 
-    for (let i = 0; i < ids.length; i += 1) {
-      await client.query(
-        `UPDATE "WorkAbstract"
-         SET "Sequence" = $1
-         WHERE "WorkAbstractId" = $2 AND "WorkId" = $3 AND "SubWorkId" = $4`,
-        [i + 1, ids[i], resolvedWorkId, resolvedSubWorkId],
-      );
+    let sequence = 1;
+    for (const id of ids) {
+      for (const row of canonicalOf.get(id)) {
+        await client.query(
+          `UPDATE "WorkAbstract"
+           SET "Sequence" = $1
+           WHERE "WorkAbstractId" = $2 AND "WorkId" = $3 AND "SubWorkId" = $4`,
+          [sequence, Number(row.WorkAbstractId), resolvedWorkId, resolvedSubWorkId],
+        );
+        sequence += 1;
+      }
     }
 
     await client.query("COMMIT");
@@ -4599,7 +4642,12 @@ app.delete("/api/delete-selected-items", async (req, res) => {
        FROM "WorkAbstract"
        WHERE "WorkId" = $1
          AND "SubWorkId" = $2
-         AND "WorkAbstractId" = ANY($3::int[])`,
+         AND "ItemId" IN (
+           SELECT "ItemId" FROM "WorkAbstract"
+           WHERE "WorkId" = $1
+             AND "SubWorkId" = $2
+             AND "WorkAbstractId" = ANY($3::int[])
+         )`,
       [workId, subWorkId, workAbstractIds],
     );
 
@@ -4655,8 +4703,8 @@ app.delete("/api/delete-selected-items", async (req, res) => {
     await client.query("COMMIT");
 
     return res.status(200).json({
-      message: `Deleted ${abstractIds.length} checked item(s) successfully.`,
-      deletedAbstracts: abstractIds.length,
+      message: `Deleted ${itemIds.length} checked item(s) successfully.`,
+      deletedAbstracts: itemIds.length,
       materialsDeleted,
     });
   } catch (err) {
@@ -4735,6 +4783,8 @@ app.get("/api/generate-report", async (req, res) => {
           wa."FinalRate",
           wa."RateString",
           wa."IsRA",
+          wa."GroupId",
+          mg."GroupName",
           i."ItemId",
           i."ItemNumber",
           i."ItemDescription",
@@ -4743,21 +4793,38 @@ app.get("/api/generate-report", async (req, res) => {
           u."UnitShortName",
           r."SSRRegionShortName",
           y."Year" AS "SSRYear",
-          COALESCE(SUM(wm."Quantity"), 0) AS "Quantity"
+          COALESCE((
+            SELECT SUM(wm."Quantity")
+            FROM "WorkMeasurement" wm
+            INNER JOIN "WorkAbstract" owner
+              ON owner."WorkAbstractId" = wm."WorkAbstractId"
+            WHERE owner."WorkId" = wa."WorkId"
+              AND owner."SubWorkId" = wa."SubWorkId"
+              AND owner."ItemId" = wa."ItemId"
+              AND (
+                wm."GroupId" IS NOT DISTINCT FROM wa."GroupId"
+                OR (
+                  wa."GroupId" IS NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM "WorkAbstract" sib
+                    WHERE sib."WorkId" = wa."WorkId"
+                      AND sib."SubWorkId" = wa."SubWorkId"
+                      AND sib."ItemId" = wa."ItemId"
+                      AND sib."GroupId" IS NOT NULL
+                  )
+                )
+              )
+          ), 0) AS "Quantity"
         FROM "WorkAbstract" wa
         INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
         INNER JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
         LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
         LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
         LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
-        LEFT JOIN "WorkMeasurement" wm ON wm."WorkAbstractId" = wa."WorkAbstractId"
+        LEFT JOIN "MasterMeasurementGroup" mg ON mg."GroupId" = wa."GroupId"
         WHERE wa."WorkId" = $1
         ${subWorkFilter}
-        GROUP BY
-          sw."SubWorkId", sw."SubWorkName",
-          wa."WorkAbstractId", wa."Sequence", wa."FinalRate", wa."RateString", wa."IsRA",
-          i."ItemId", i."ItemNumber", i."ItemDescription", i."RegionId", i."CategoryId",
-          u."UnitShortName", r."SSRRegionShortName", y."Year"
         ORDER BY
           COALESCE(sw."Sequence", 999999) ASC,
           sw."SubWorkName" ASC,
@@ -4851,6 +4918,9 @@ app.get("/api/generate-report", async (req, res) => {
 
       group.items.push({
         isParentHeading: false,
+        ItemId: row.ItemId,
+        GroupId: row.GroupId == null ? null : Number(row.GroupId),
+        GroupName: row.GroupName || "",
         ItemNumber: row.ItemNumber,
         DisplayItemNo: formatSsrItemNo(
           row.ItemNumber,
@@ -4953,22 +5023,53 @@ app.get("/api/generate-report", async (req, res) => {
 
       let subWorkTotal = 0;
       let serialNo = 0;
+      let groupLetter = 0;
+      let serialItemId = null;
+      const groupSuffix = (n) => {
+        let value = n;
+        let suffix = "";
+        while (value > 0) {
+          value -= 1;
+          suffix = String.fromCharCode(97 + (value % 26)) + suffix;
+          value = Math.floor(value / 26);
+        }
+        return suffix;
+      };
 
       group.items.forEach((item) => {
         const isParent = Boolean(item.isParentHeading);
+        const isGroupLine = !isParent && item.GroupId != null;
         const quantity = isParent ? 0 : Number(item.Quantity || 0);
         const rate = isParent ? 0 : Number(item.FinalRate || 0);
         const amount = Math.round(quantity * rate);
         if (!isParent) {
           subWorkTotal += amount;
-          serialNo += 1;
+          if (!isGroupLine) {
+            serialNo += 1;
+            groupLetter = 0;
+            serialItemId = item.ItemId;
+          } else if (item.ItemId !== serialItemId) {
+            serialNo += 1;
+            groupLetter = 1;
+            serialItemId = item.ItemId;
+          } else {
+            groupLetter += 1;
+          }
         }
 
-        const serialText = isParent ? "" : String(serialNo);
-        const ssrItemNoText =
-          item.DisplayItemNo || item.ItemNumber || "";
+        const groupLabel = isGroupLine
+          ? `${serialNo}-${groupSuffix(groupLetter)}`
+          : "";
+        const serialText = isParent || isGroupLine ? "" : String(serialNo);
+        const ssrItemNoText = isGroupLine
+          ? ""
+          : item.DisplayItemNo || item.ItemNumber || "";
         const rateString = String(item.RateString || "").trim();
-        const baseDesc = String(item.ItemDescription || "").trim();
+        const baseDesc = isGroupLine
+          ? [groupLabel, String(item.GroupName || "Measurement Group").trim()]
+              .filter(Boolean)
+              .join("  ")
+          : String(item.ItemDescription || "").trim();
         const descText = isParent
           ? baseDesc
           : [baseDesc, rateString].filter(Boolean).join("\n");
@@ -5086,6 +5187,14 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
     const abstracts = await pool.query(
       `SELECT wa."WorkAbstractId", wa."WorkId", wa."SubWorkId", wa."ItemId",
               wa."Sequence", wa."IsRA", wa."RateString", wa."FinalRate",
+              wa."GroupId",
+              (SELECT wmg."Percentage"
+               FROM "WorkMeasurementGroup" wmg
+               WHERE wmg."WorkId" = wa."WorkId"
+                 AND wmg."SubWorkId" IS NOT DISTINCT FROM wa."SubWorkId"
+                 AND wmg."GroupId" = wa."GroupId"
+               ORDER BY wmg."WorkGroupId"
+               LIMIT 1) AS "GroupPercentage",
               i."ItemNumber", i."ItemDescription", i."PageNumber",
               i."CompletedRate", i."RegionId", i."SSRYearId",
               u."UnitShortName",
@@ -5198,7 +5307,13 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
     for (const abstract of abstracts.rows) {
       raNo += 1;
       const itemId = Number(abstract.ItemId);
-      const basicRate = Number(abstract.CompletedRate) || 0;
+      const catalogRate = Number(abstract.CompletedRate) || 0;
+      const groupPercentage =
+        abstract.GroupId == null ? 0 : Number(abstract.GroupPercentage) || 0;
+      const basicRate =
+        abstract.GroupId == null
+          ? catalogRate
+          : catalogRate * (1 + groupPercentage / 100);
       const unit = abstract.UnitShortName || "";
       const itemNumber = abstract.ItemNumber || "";
       const pageNumber =
@@ -7228,7 +7343,8 @@ app.post("/api/populate-work-materials", async (req, res) => {
 
     const abstracts = await client.query(
       `SELECT wa."WorkAbstractId", wa."WorkId", wa."SubWorkId", wa."ItemId",
-              wa."Sequence", i."RegionId", i."CompletedRate"
+              wa."Sequence", wa."ProjectId", wa."GroupId",
+              i."RegionId", i."CompletedRate"
        FROM "WorkAbstract" wa
        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
        WHERE wa."WorkId" = $1
@@ -7236,6 +7352,81 @@ app.post("/api/populate-work-materials", async (req, res) => {
                 wa."WorkAbstractId" ASC`,
       [resolvedWorkId],
     );
+
+    const groupsResult = await client.query(
+      `SELECT "SubWorkId", "GroupId", "Sequence", "WorkGroupId", "Percentage"
+       FROM "WorkMeasurementGroup"
+       WHERE "WorkId" = $1
+       ORDER BY "SubWorkId" ASC, COALESCE("Sequence", 999999) ASC, "WorkGroupId" ASC`,
+      [resolvedWorkId],
+    );
+    const groupsBySubWork = new Map();
+    for (const group of groupsResult.rows) {
+      const key = Number(group.SubWorkId);
+      if (!groupsBySubWork.has(key)) groupsBySubWork.set(key, []);
+      groupsBySubWork.get(key).push(group);
+    }
+
+    const qtyResult = await client.query(
+      `SELECT wa."SubWorkId", wa."ItemId", wm."GroupId",
+              COALESCE(SUM(wm."Quantity"), 0) AS "Quantity",
+              COUNT(*)::int AS "MeasurementCount"
+       FROM "WorkMeasurement" wm
+       INNER JOIN "WorkAbstract" wa ON wa."WorkAbstractId" = wm."WorkAbstractId"
+       WHERE wa."WorkId" = $1
+       GROUP BY wa."SubWorkId", wa."ItemId", wm."GroupId"`,
+      [resolvedWorkId],
+    );
+    const qtyMap = new Map();
+    for (const row of qtyResult.rows) {
+      const groupKey = row.GroupId == null ? "null" : String(row.GroupId);
+      qtyMap.set(`${row.SubWorkId}:${row.ItemId}:${groupKey}`, {
+        quantity: Number(row.Quantity) || 0,
+        count: Number(row.MeasurementCount) || 0,
+      });
+    }
+    const quantityEntry = (subWorkId, itemId, groupId) => {
+      const groupKey = groupId == null ? "null" : String(groupId);
+      return qtyMap.get(`${subWorkId}:${itemId}:${groupKey}`) || null;
+    };
+    const quantityFor = (subWorkId, itemId, groupId) =>
+      quantityEntry(subWorkId, itemId, groupId)?.quantity || 0;
+    const totalQuantityFor = (subWorkId, itemId) => {
+      const prefix = `${subWorkId}:${itemId}:`;
+      let sum = 0;
+      for (const [key, value] of qtyMap) {
+        if (key.startsWith(prefix)) sum += value.quantity;
+      }
+      return sum;
+    };
+
+    const siblingsByItem = new Map();
+    for (const row of abstracts.rows) {
+      const key = `${row.SubWorkId}:${row.ItemId}`;
+      if (!siblingsByItem.has(key)) siblingsByItem.set(key, []);
+      siblingsByItem.get(key).push(row);
+    }
+    const uniqueItems = [];
+    for (const rows of siblingsByItem.values()) {
+      const canonical =
+        rows.find((row) => row.GroupId == null) ||
+        [...rows].sort(
+          (a, b) => Number(a.WorkAbstractId) - Number(b.WorkAbstractId),
+        )[0];
+      uniqueItems.push({ canonical, rows });
+    }
+    uniqueItems.sort((a, b) => {
+      const sub =
+        Number(a.canonical.SubWorkId) - Number(b.canonical.SubWorkId);
+      if (sub) return sub;
+      const seq =
+        Number(a.canonical.Sequence ?? 999999) -
+        Number(b.canonical.Sequence ?? 999999);
+      if (seq) return seq;
+      return (
+        Number(a.canonical.WorkAbstractId) - Number(b.canonical.WorkAbstractId)
+      );
+    });
 
     let rateAnalysisNo = 0;
     let materialsInserted = 0;
@@ -7247,7 +7438,11 @@ app.post("/api/populate-work-materials", async (req, res) => {
       return String(Number(n.toFixed(4)));
     };
 
-    for (const abstract of abstracts.rows) {
+    const sequencePlan = [];
+
+    for (let itemIndex = 0; itemIndex < uniqueItems.length; itemIndex += 1) {
+      const abstract = uniqueItems[itemIndex].canonical;
+      const siblingRows = uniqueItems[itemIndex].rows;
       const itemId = Number(abstract.ItemId);
       const subWorkId = Number(abstract.SubWorkId) || null;
       const regionId = Number(abstract.RegionId);
@@ -7280,71 +7475,12 @@ app.post("/api/populate-work-materials", async (req, res) => {
       const withCondition = (code, text) => `${code}: ${text}`;
 
       let isRA = false;
-      let rateString = "";
-      let finalRate = completedRate;
+      let sumAmount = 0;
 
-      if (!components.rows.length) {
-        isRA = false;
-
-        // No material components — region-specific FinalRate
-        if (regionId === 1) {
-          // Percentage / LabourCess as percent points → divide by 100
-          if (!applyLabourCess) {
-            // C1: Labour Cess No
-            // FinalRate = CompletedRate + CompletedRate × (Percentage/100)
-            finalRate =
-              completedRate + completedRate * (percentage / 100);
-            rateString = withCondition(
-              "C1",
-              `Final Rate = (${formatNum(completedRate)} + (${formatNum(completedRate)} * ${formatNum(percentage)}/100))`,
-            );
-          } else {
-            // C2: Labour Cess Yes
-            // FinalRate = CompletedRate
-            //   + (CompletedRate − CompletedRate×(LabourCess/100)) × (Percentage/100)
-            const rateAfterCess =
-              completedRate - completedRate * (labourCess / 100);
-            finalRate = completedRate + rateAfterCess * (percentage / 100);
-            rateString = withCondition(
-              "C2",
-              `Final Rate = (${formatNum(completedRate)} + ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`,
-            );
-          }
-        } else if (regionId === 2) {
-          // Do NOT divide Percentage / LabourCess by 100 (use values as stored)
-          if (!applyLabourCess) {
-            // C3: Labour Cess No
-            // FinalRate = CompletedRate × Percentage
-            finalRate = completedRate * percentage;
-            rateString = withCondition(
-              "C3",
-              `Final Rate = (${formatNum(completedRate)} * ${formatNum(percentage)})`,
-            );
-          } else {
-            // C4: Labour Cess Yes
-            // FinalRate = (CompletedRate − CompletedRate×(LabourCess/100)) × Percentage
-            finalRate =
-              (completedRate - completedRate * (labourCess / 100)) *
-              percentage;
-            rateString = withCondition(
-              "C4",
-              `Final Rate = ((${formatNum(completedRate)} - (${formatNum(completedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)})`,
-            );
-          }
-        } else {
-          // C5: any other region
-          finalRate = completedRate;
-          rateString = withCondition(
-            "C5",
-            `Final Rate = (${formatNum(completedRate)})`,
-          );
-        }
-      } else {
+      if (components.rows.length) {
         isRA = true;
         rateAnalysisNo += 1;
-        let rateCondition = "C6";
 
-        let sumAmount = 0;
         let materialSequence = 0;
         for (const comp of components.rows) {
           materialSequence += 1;
@@ -7389,43 +7525,82 @@ app.post("/api/populate-work-materials", async (req, res) => {
           );
           materialsInserted += 1;
         }
+      }
 
+      const rateFor = (baseCompletedRate) => {
+        let finalRate = baseCompletedRate;
+        let rateString = "";
+        if (!isRA) {
+          if (regionId === 1) {
+            if (!applyLabourCess) {
+              finalRate =
+                baseCompletedRate + baseCompletedRate * (percentage / 100);
+              rateString = withCondition(
+                "C1",
+                `Final Rate = (${formatNum(baseCompletedRate)} + (${formatNum(baseCompletedRate)} * ${formatNum(percentage)}/100))`,
+              );
+            } else {
+              const rateAfterCess =
+                baseCompletedRate - baseCompletedRate * (labourCess / 100);
+              finalRate =
+                baseCompletedRate + rateAfterCess * (percentage / 100);
+              rateString = withCondition(
+                "C2",
+                `Final Rate = (${formatNum(baseCompletedRate)} + ((${formatNum(baseCompletedRate)} - (${formatNum(baseCompletedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`,
+              );
+            }
+          } else if (regionId === 2) {
+            if (!applyLabourCess) {
+              finalRate = baseCompletedRate * percentage;
+              rateString = withCondition(
+                "C3",
+                `Final Rate = (${formatNum(baseCompletedRate)} * ${formatNum(percentage)})`,
+              );
+            } else {
+              finalRate =
+                (baseCompletedRate - baseCompletedRate * (labourCess / 100)) *
+                percentage;
+              rateString = withCondition(
+                "C4",
+                `Final Rate = ((${formatNum(baseCompletedRate)} - (${formatNum(baseCompletedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)})`,
+              );
+            }
+          } else {
+            finalRate = baseCompletedRate;
+            rateString = withCondition(
+              "C5",
+              `Final Rate = (${formatNum(baseCompletedRate)})`,
+            );
+          }
+          return { finalRate, rateString };
+        }
+
+        let rateCondition = "C6";
         if (!applyLabourCess) {
-          // ── ApplyLabourCess = NO (match Rate Analysis Report) ──
-          // SubTotal = CompletedRate + sumAmount
           if (applyForLead) {
-            // C6: Including Lead Charges: % on SubTotal
-            // FinalRate = (CompletedRate + sumAmount) * (1 + Percentage/100)
             rateCondition = "C6";
             finalRate =
-              (completedRate + sumAmount) * (1 + percentage / 100);
+              (baseCompletedRate + sumAmount) * (1 + percentage / 100);
           } else {
-            // C7: Excluding Lead Charges: % on Basic Rate only
-            // FinalRate = CompletedRate + sumAmount + CompletedRate*(Percentage/100)
             rateCondition = "C7";
             finalRate =
-              completedRate +
+              baseCompletedRate +
               sumAmount +
-              completedRate * (percentage / 100);
+              baseCompletedRate * (percentage / 100);
           }
         } else {
-          // ── ApplyLabourCess = YES (match Rate Analysis Report) ──
-          // percentBase = CompletedRate - CompletedRate*(LabourCess/100)
-          // SubTotal = CompletedRate + sumAmount (unchanged)
           const rateAfterCess =
-            completedRate - completedRate * (labourCess / 100);
+            baseCompletedRate - baseCompletedRate * (labourCess / 100);
           if (applyForLead) {
-            // C8: Including: % on (rateAfterCess + sumAmount)
             rateCondition = "C8";
             finalRate =
-              completedRate +
+              baseCompletedRate +
               sumAmount +
               (rateAfterCess + sumAmount) * (percentage / 100);
           } else {
-            // C9: Excluding: % on rateAfterCess only
             rateCondition = "C9";
             finalRate =
-              completedRate +
+              baseCompletedRate +
               sumAmount +
               rateAfterCess * (percentage / 100);
           }
@@ -7434,17 +7609,163 @@ app.post("/api/populate-work-materials", async (req, res) => {
           rateCondition,
           `Rate Analysis No ${rateAnalysisNo}`,
         );
+        return { finalRate, rateString };
+      };
+
+      const workGroups =
+        groupsBySubWork.get(Number(abstract.SubWorkId)) || [];
+      const measuredGroupIds = new Set();
+      const prefix = `${abstract.SubWorkId}:${itemId}:`;
+      for (const [key, value] of qtyMap) {
+        if (!key.startsWith(prefix) || !value.count) continue;
+        const groupKey = key.slice(prefix.length);
+        if (groupKey === "null") continue;
+        measuredGroupIds.add(Number(groupKey));
+      }
+      const groupsForItem = [];
+      const seenGroups = new Set();
+      for (const group of workGroups) {
+        const groupId = Number(group.GroupId);
+        if (!measuredGroupIds.has(groupId) || seenGroups.has(groupId)) continue;
+        groupsForItem.push(groupId);
+        seenGroups.add(groupId);
+      }
+      for (const groupId of measuredGroupIds) {
+        if (seenGroups.has(groupId)) continue;
+        groupsForItem.push(groupId);
+        seenGroups.add(groupId);
+      }
+      const entries = !groupsForItem.length
+        ? [
+            {
+              groupId: null,
+              quantity: totalQuantityFor(abstract.SubWorkId, itemId),
+            },
+          ]
+        : [
+            {
+              groupId: null,
+              quantity: quantityFor(abstract.SubWorkId, itemId, null),
+            },
+            ...groupsForItem.map((groupId) => ({
+              groupId,
+              quantity: quantityFor(abstract.SubWorkId, itemId, groupId),
+            })),
+          ];
+
+      const keptIds = new Set();
+      for (let groupIndex = 0; groupIndex < entries.length; groupIndex += 1) {
+        const entry = entries[groupIndex];
+        const match = siblingRows.find((row) =>
+          entry.groupId == null
+            ? row.GroupId == null
+            : Number(row.GroupId) === entry.groupId,
+        );
+        let workAbstractId;
+        const groupPercentage =
+          entry.groupId == null
+            ? 0
+            : (() => {
+                const found = workGroups.find(
+                  (group) => Number(group.GroupId) === entry.groupId,
+                );
+                const pct = found ? Number(found.Percentage) : 0;
+                return Number.isFinite(pct) ? pct : 0;
+              })();
+        const baseCompletedRate =
+          entry.groupId == null
+            ? completedRate
+            : completedRate * (1 + groupPercentage / 100);
+        const rated = rateFor(baseCompletedRate);
+        const entryRateString =
+          entry.groupId == null || !groupPercentage
+            ? rated.rateString
+            : `${rated.rateString} (Completed Rate + ${formatNum(groupPercentage)}%)`;
+        if (match) {
+          workAbstractId = Number(match.WorkAbstractId);
+          await client.query(
+            `UPDATE "WorkAbstract"
+             SET "IsRA" = $1,
+                 "RateString" = $2,
+                 "FinalRate" = $3,
+                 "GroupId" = $4,
+                 "Quantity" = $5
+             WHERE "WorkAbstractId" = $6`,
+            [
+              isRA,
+              entryRateString,
+              rated.finalRate,
+              entry.groupId,
+              entry.quantity,
+              workAbstractId,
+            ],
+          );
+        } else {
+          const inserted = await client.query(
+            `INSERT INTO "WorkAbstract"
+              ("ProjectId", "WorkId", "SubWorkId", "ItemId", "Sequence",
+               "IsRA", "RateString", "FinalRate", "GroupId", "Quantity")
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING "WorkAbstractId"`,
+            [
+              abstract.ProjectId ?? null,
+              resolvedWorkId,
+              subWorkId,
+              itemId,
+              Number(abstract.Sequence) || 0,
+              isRA,
+              entryRateString,
+              rated.finalRate,
+              entry.groupId,
+              entry.quantity,
+            ],
+          );
+          workAbstractId = Number(inserted.rows[0].WorkAbstractId);
+        }
+        keptIds.add(workAbstractId);
+        sequencePlan.push({
+          workAbstractId,
+          subWorkId: Number(abstract.SubWorkId),
+          itemIndex,
+          groupIndex,
+        });
+        abstractsUpdated += 1;
       }
 
-      await client.query(
-        `UPDATE "WorkAbstract"
-         SET "IsRA" = $1,
-             "RateString" = $2,
-             "FinalRate" = $3
-         WHERE "WorkAbstractId" = $4`,
-        [isRA, rateString, finalRate, Number(abstract.WorkAbstractId)],
+      const canonicalId = sequencePlan.find(
+        (row) => row.itemIndex === itemIndex && row.groupIndex === 0,
+      ).workAbstractId;
+      for (const row of siblingRows) {
+        const rowId = Number(row.WorkAbstractId);
+        if (keptIds.has(rowId)) continue;
+        await client.query(
+          `UPDATE "WorkMeasurement"
+           SET "WorkAbstractId" = $1
+           WHERE "WorkAbstractId" = $2`,
+          [canonicalId, rowId],
+        );
+        await client.query(
+          `DELETE FROM "WorkAbstract" WHERE "WorkAbstractId" = $1`,
+          [rowId],
+        );
+      }
+    }
+
+    const bySubWork = new Map();
+    for (const row of sequencePlan) {
+      if (!bySubWork.has(row.subWorkId)) bySubWork.set(row.subWorkId, []);
+      bySubWork.get(row.subWorkId).push(row);
+    }
+    for (const rows of bySubWork.values()) {
+      rows.sort(
+        (a, b) => a.itemIndex - b.itemIndex || a.groupIndex - b.groupIndex,
       );
-      abstractsUpdated += 1;
+      for (let i = 0; i < rows.length; i += 1) {
+        await client.query(
+          `UPDATE "WorkAbstract" SET "Sequence" = $1 WHERE "WorkAbstractId" = $2`,
+          [i + 1, rows[i].workAbstractId],
+        );
+      }
     }
 
     await client.query("COMMIT");
