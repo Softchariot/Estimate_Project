@@ -429,6 +429,7 @@ async function ensureMasterMaterialComponentDescription() {
 const RA_COMPONENT_TYPE_MATERIAL = "Ma";
 const RA_COMPONENT_TYPE_LABOUR = "La";
 const RA_COMPONENT_TYPE_MACHINERY = "Mc";
+const RA_COMPONENT_TYPE_ITEM = "It";
 const RA_COMPONENT_DESC_MAX = 100;
 
 async function ensureRAComponentYearIdNullable() {
@@ -436,6 +437,19 @@ async function ensureRAComponentYearIdNullable() {
     ALTER TABLE public."MasterRAComponent"
       ALTER COLUMN "YearId" DROP NOT NULL
   `);
+}
+
+async function ensureRAComponentTypeItem() {
+  await pool.query(`
+    ALTER TABLE public."MasterRAComponent"
+      DROP CONSTRAINT IF EXISTS "MasterRAComponent_ComponentType_check"
+  `);
+  await pool.query(`
+    ALTER TABLE public."MasterRAComponent"
+      ADD CONSTRAINT "MasterRAComponent_ComponentType_check"
+      CHECK ("ComponentType" IN ('Ma', 'La', 'Mc', 'Le', 'Ot', 'It'))
+  `);
+  console.log("MasterRAComponent ComponentType It ensured.");
 }
 
 async function ensureRAComponentIdSequence() {
@@ -8251,6 +8265,294 @@ app.put("/api/material-components/:id", async (req, res) => {
   }
 });
 
+/** MasterItem uses RegionId; material/labour/machinery catalogs use SSRRegionId. */
+async function itemCatalogOwnerFilterSql(userId, alias, params) {
+  if (!userId) return "";
+  const auth = await requireItemMasterAccess(userId);
+  if (auth.error || !auth.isOrgAdmin) return "";
+  const orgId = Number(auth.actor.OrganizationId);
+  if (!Number.isFinite(orgId) || orgId <= 0) return "";
+  params.push(orgId);
+  const orgParam = params.length;
+  params.push(Number(auth.actor.UserId));
+  const userParam = params.length;
+  return `
+    AND (
+      ${alias}."RegionId" NOT IN (${ITEM_MASTER_ORG_ADMIN_REGION_ID}, ${ITEM_MASTER_INDV_USER_REGION_ID})
+      OR (
+        ${alias}."RegionId" = ${ITEM_MASTER_ORG_ADMIN_REGION_ID}
+        AND ${alias}."UserId" IN (
+          SELECT mu."UserId" FROM "MasterUser" mu WHERE mu."OrganizationId" = $${orgParam}
+        )
+      )
+      OR (
+        ${alias}."RegionId" = ${ITEM_MASTER_INDV_USER_REGION_ID}
+        AND ${alias}."UserId" = $${userParam}
+      )
+    )`;
+}
+
+app.get("/api/ra-component-items", async (req, res) => {
+  const regionIds = parseRegionIds(req.query);
+  if (!regionIds.length) {
+    return res.status(400).json({
+      message: "SSR Region is required to list items.",
+    });
+  }
+  try {
+    const params = [regionIds];
+    const ownerSql = await itemCatalogOwnerFilterSql(req.query.userId, "i", params);
+    const result = await pool.query(
+      `SELECT i."ItemId", i."RegionId", i."ItemCode", i."ItemNumber",
+              i."ItemDescription", i."ItemShortDescription",
+              i."CompletedRate", i."UnitId",
+              u."UnitShortName"
+       FROM "MasterItem" i
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       WHERE i."RegionId" = ANY($1::int[])
+         AND COALESCE(i."MarkForDeletion", false) = false
+       ${ownerSql}
+       ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemNumber" ASC, i."ItemId" ASC`,
+      params,
+    );
+    return res.json(result.rows);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/item-components", async (req, res) => {
+  const { itemId } = req.query;
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId is required." });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT ra."RAComponentId" AS "ItemComponentId",
+              ra."ItemId",
+              ra."ComponentId" AS "ComponentItemId",
+              src."ItemCode",
+              src."ItemNumber",
+              src."ItemDescription",
+              src."CompletedRate",
+              ra."Description",
+              ra."Component" AS "ItemComponent",
+              ra."UnitId",
+              u."UnitShortName"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterItem" src ON src."ItemId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = ra."UnitId"
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_ITEM],
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/item-components/batch", async (req, res) => {
+  const { userId, ItemId, rows } = req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ message: "rows array is required." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureRAComponentIdSequence();
+    await client.query("BEGIN");
+
+    const inserted = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const { ComponentItemId, ItemComponent, Description } = row;
+      const descriptionText = String(Description || "").trim();
+      if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+        throw Object.assign(
+          new Error(
+            `Row ${i + 1}: Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+          ),
+          { status: 400 },
+        );
+      }
+      if (!ComponentItemId) {
+        throw Object.assign(new Error(`Row ${i + 1}: Item is required.`), {
+          status: 400,
+        });
+      }
+      if (Number(ComponentItemId) === Number(ItemId)) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: an item cannot be a component of itself.`),
+          { status: 400 },
+        );
+      }
+      if (
+        ItemComponent === "" ||
+        ItemComponent === null ||
+        ItemComponent === undefined ||
+        Number.isNaN(Number(ItemComponent))
+      ) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: Item Component is required.`),
+          { status: 400 },
+        );
+      }
+
+      const itemResult = await client.query(
+        `SELECT "UnitId" FROM "MasterItem" WHERE "ItemId" = $1`,
+        [Number(ComponentItemId)],
+      );
+      const unitId = itemResult.rows[0]?.UnitId;
+      if (!unitId) {
+        throw Object.assign(
+          new Error(`Row ${i + 1}: selected item has no Unit.`),
+          { status: 400 },
+        );
+      }
+
+      const result = await client.query(
+        `INSERT INTO "MasterRAComponent"
+         ("ItemId", "ComponentType", "ComponentId", "UnitId",
+          "Component", "Description")
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING "RAComponentId" AS "ItemComponentId",
+                   "ItemId",
+                   "ComponentId" AS "ComponentItemId",
+                   "Component" AS "ItemComponent",
+                   "UnitId",
+                   "Description"`,
+        [
+          Number(ItemId),
+          RA_COMPONENT_TYPE_ITEM,
+          Number(ComponentItemId),
+          Number(unitId),
+          Number(ItemComponent),
+          descriptionText || null,
+        ],
+      );
+      inserted.push(result.rows[0]);
+    }
+
+    await client.query("COMMIT");
+    return res.status(201).json({ data: inserted, count: inserted.length });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/api/item-components/:id", async (req, res) => {
+  const { id } = req.params;
+  const { userId, ItemId, ComponentItemId, ItemComponent, Description } =
+    req.body || {};
+
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!ComponentItemId) {
+    return res.status(400).json({ message: "Item is required." });
+  }
+  if (Number(ComponentItemId) === Number(ItemId)) {
+    return res.status(400).json({
+      message: "An item cannot be a component of itself.",
+    });
+  }
+  if (
+    ItemComponent === "" ||
+    ItemComponent === null ||
+    ItemComponent === undefined ||
+    Number.isNaN(Number(ItemComponent))
+  ) {
+    return res.status(400).json({ message: "Item Component is required." });
+  }
+
+  const descriptionText = String(Description || "").trim();
+  if (descriptionText.length > RA_COMPONENT_DESC_MAX) {
+    return res.status(400).json({
+      message: `Description must be at most ${RA_COMPONENT_DESC_MAX} characters.`,
+    });
+  }
+
+  try {
+    await ensureRAComponentIdSequence();
+    const itemResult = await pool.query(
+      `SELECT "UnitId" FROM "MasterItem" WHERE "ItemId" = $1`,
+      [Number(ComponentItemId)],
+    );
+    const unitId = itemResult.rows[0]?.UnitId;
+    if (!unitId) {
+      return res.status(400).json({
+        message: "Selected item has no Unit. Cannot update component.",
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE "MasterRAComponent"
+       SET "ItemId" = $1,
+           "ComponentType" = $2,
+           "ComponentId" = $3,
+           "Component" = $4,
+           "UnitId" = $5,
+           "Description" = $6
+       WHERE "RAComponentId" = $7
+         AND "ComponentType" = $2
+       RETURNING "RAComponentId" AS "ItemComponentId",
+                 "ItemId",
+                 "ComponentId" AS "ComponentItemId",
+                 "Component" AS "ItemComponent",
+                 "UnitId",
+                 "Description"`,
+      [
+        Number(ItemId),
+        RA_COMPONENT_TYPE_ITEM,
+        Number(ComponentItemId),
+        Number(ItemComponent),
+        Number(unitId),
+        descriptionText || null,
+        Number(id),
+      ],
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ message: "Item component not found." });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(error.status || 500)
+      .json({ message: error.message });
+  }
+});
+
 app.get("/api/master-labours", async (req, res) => {
   const regionIds = parseRegionIds(req.query);
   if (!regionIds.length) {
@@ -9161,6 +9463,11 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       });
     }
     const params = mapRAParameterRow(paramResult.rows[0]);
+    const cpwdAnalysis =
+      Number(item.RegionId) === 2 ||
+      String(paramResult.rows[0].RALogic || "")
+        .trim()
+        .toUpperCase() === "CPWD";
 
     const materials = await pool.query(
       `SELECT m."ItemCode",
@@ -9210,6 +9517,28 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
          AND ra."ComponentType" = $2
        ORDER BY ra."RAComponentId" ASC`,
       [Number(itemId), RA_COMPONENT_TYPE_MACHINERY],
+    );
+    const itemComponents = await pool.query(
+      `SELECT COALESCE(
+                NULLIF(BTRIM(src."ItemNumber"), ''),
+                NULLIF(BTRIM(src."ItemCode"), '')
+              ) AS "ItemCode",
+              src."ItemNumber",
+              src."RegionId",
+              src."CategoryId",
+              NULLIF(BTRIM(src."ItemDescription"), '') AS "ComponentName",
+              NULLIF(BTRIM(ra."Description"), '') AS "Description",
+              u."UnitShortName",
+              ra."Component" AS "Quantity",
+              src."CompletedRate" AS "Rate"
+       FROM "MasterRAComponent" ra
+       INNER JOIN "MasterItem" src ON src."ItemId" = ra."ComponentId"
+       LEFT JOIN "MasterUnit" u
+         ON u."UnitId" = COALESCE(ra."UnitId", src."UnitId")
+       WHERE ra."ItemId" = $1
+         AND ra."ComponentType" = $2
+       ORDER BY ra."RAComponentId" ASC`,
+      [Number(itemId), RA_COMPONENT_TYPE_ITEM],
     );
 
     const unitLabel = item.UnitName || item.UnitShortName || "";
@@ -9350,7 +9679,7 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       doc.y = y + 14;
     };
 
-    const drawSection = (title, rows) => {
+    const drawSection = (title, rows, totalLabel) => {
       ensureSpace(22);
       doc.font("Helvetica-Bold").fontSize(10);
       doc.text(title, left, doc.y, { width });
@@ -9365,7 +9694,88 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
         }
       }
       drawLine();
-      drawLabelAmount(`Total ${title.charAt(0)}`, total, true);
+      drawLabelAmount(totalLabel || `Total ${title.charAt(0)}`, total, true);
+      drawLine();
+      return roundMoney(total);
+    };
+
+    const ancestorItemNumbers = (value) => {
+      const segments = String(value || "")
+        .trim()
+        .split(".")
+        .filter(Boolean);
+      const ancestors = [];
+      for (let i = segments.length - 1; i >= 2; i -= 1) {
+        ancestors.push(segments.slice(0, i).join("."));
+      }
+      return ancestors.reverse();
+    };
+
+    const drawParentItemRow = (code, description) => {
+      const text = String(description || "").trim();
+      doc.font("Helvetica-Bold").fontSize(9);
+      const descHeight = Math.max(
+        12,
+        doc.heightOfString(text || " ", { width: colDescW }),
+      );
+      ensureSpace(descHeight + 8);
+      const y = doc.y;
+      doc.text(String(code || ""), colCode, y, { width: colCodeW });
+      doc.text(text, colDesc, y, { width: colDescW });
+      doc.y = y + descHeight + 4;
+    };
+
+    const drawItemComponentSection = async () => {
+      const rows = itemComponents.rows;
+      const neededParents = new Set();
+      for (const row of rows) {
+        for (const ancestor of ancestorItemNumbers(row.ItemNumber || row.ItemCode)) {
+          neededParents.add(ancestor);
+        }
+      }
+      const parentByKey = new Map();
+      if (neededParents.size) {
+        const parentResult = await pool.query(
+          `SELECT "ItemNumber", "ItemDescription", "RegionId", "CategoryId"
+           FROM "MasterItem"
+           WHERE "ItemNumber" = ANY($1::text[])`,
+          [Array.from(neededParents)],
+        );
+        for (const parent of parentResult.rows) {
+          const scoped = `${parent.RegionId}|${parent.CategoryId}|${parent.ItemNumber}`;
+          if (!parentByKey.has(scoped)) {
+            parentByKey.set(scoped, parent.ItemDescription || "");
+          }
+          if (!parentByKey.has(parent.ItemNumber)) {
+            parentByKey.set(parent.ItemNumber, parent.ItemDescription || "");
+          }
+        }
+      }
+      const parentDescription = (row, ancestorNumber) => {
+        const scoped = parentByKey.get(
+          `${row.RegionId}|${row.CategoryId}|${ancestorNumber}`,
+        );
+        if (scoped !== undefined) return scoped;
+        return parentByKey.get(ancestorNumber) || "";
+      };
+
+      ensureSpace(22);
+      doc.font("Helvetica-Bold").fontSize(10);
+      doc.text("ITEM COMPONENT", left, doc.y, { width });
+      doc.moveDown(0.2);
+      let total = 0;
+      const printedParents = new Set();
+      for (const row of rows) {
+        const itemNo = String(row.ItemNumber || row.ItemCode || "").trim();
+        for (const ancestor of ancestorItemNumbers(itemNo)) {
+          if (printedParents.has(ancestor)) continue;
+          printedParents.add(ancestor);
+          drawParentItemRow(ancestor, parentDescription(row, ancestor));
+        }
+        total += drawComponentRow(row);
+      }
+      drawLine();
+      drawLabelAmount("Total Item", total, true);
       drawLine();
       return roundMoney(total);
     };
@@ -9414,11 +9824,17 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     doc.moveDown(0.45);
     drawTableHeader();
 
+    const hasItemComponents = itemComponents.rows.length > 0;
+    const totalItem = hasItemComponents ? await drawItemComponentSection() : 0;
     const totalA = drawSection("A: MATERIAL", materials.rows);
     const totalB = drawSection("B: LABOUR", labours.rows);
     const totalC = drawSection("C: MACHINERY", machineries.rows);
-    let running = roundMoney(totalA + totalB + totalC);
-    drawLabelAmount("Total A+B+C", running, true);
+    let running = roundMoney(totalItem + totalA + totalB + totalC);
+    drawLabelAmount(
+      hasItemComponents ? "Total Item+A+B+C" : "Total A+B+C",
+      running,
+      true,
+    );
     drawLine();
 
     const optionalAdds = [
@@ -9429,14 +9845,16 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       { key: "Formwork", label: "Formwork" },
       { key: "LabourAmenities", label: "Labour Amenities" },
     ];
-    for (const add of optionalAdds) {
-      const pct = Number(params[add.key]) || 0;
-      if (!pct) continue;
-      const extra = roundMoney(running * (pct / 100));
-      drawLabelAmount(`Add ${formatQty(pct)}% ${add.label}`, extra);
-      running = roundMoney(running + extra);
-      drawLabelAmount("Total", running, true);
-      drawLine();
+    if (!cpwdAnalysis) {
+      for (const add of optionalAdds) {
+        const pct = Number(params[add.key]) || 0;
+        if (!pct) continue;
+        const extra = roundMoney(running * (pct / 100));
+        drawLabelAmount(`Add ${formatQty(pct)}% ${add.label}`, extra);
+        running = roundMoney(running + extra);
+        drawLabelAmount("Total", running, true);
+        drawLine();
+      }
     }
 
     const wcPct = Number(params.WCharges) || 0;
@@ -10226,6 +10644,7 @@ app.listen(port, async () => {
     await ensureMaterialComponentIdSequence();
     await ensureRAComponentIdSequence();
     await ensureRAComponentYearIdNullable();
+    await ensureRAComponentTypeItem();
     await ensureMasterMaterialComponentDescription();
     await ensureWorkStandardAdditionSchema();
     await ensureMasterItemUserId();

@@ -82,7 +82,7 @@ const superAdminMenu = [
   { id: "units", label: "Units", status: "active", icon: "📏" },
   {
     id: "materials",
-    label: "Material Components",
+    label: "R.A. Component",
     status: "active",
     icon: "🧱",
   },
@@ -423,6 +423,180 @@ function formatMaterialRate(value) {
   return formatRupees(value);
 }
 
+function fullDescriptionText(value) {
+  return String(value || "").trim();
+}
+
+function catalogTipPosition(event) {
+  const x = Math.min(event.clientX + 14, window.innerWidth - 460);
+  const y = Math.min(event.clientY + 18, window.innerHeight - 220);
+  return { x: Math.max(8, x), y: Math.max(8, y) };
+}
+
+function FullDescriptionTip({ tip }) {
+  if (!tip?.text) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: tip.x,
+        top: tip.y,
+        zIndex: 80,
+        maxWidth: 440,
+        maxHeight: 200,
+        overflow: "auto",
+        background: "#fff",
+        color: theme.colors.ink,
+        border: "1px solid #CFE1FA",
+        boxShadow: "0 8px 24px rgba(15, 42, 68, 0.16)",
+        borderRadius: 8,
+        padding: "8px 10px",
+        fontSize: 13,
+        lineHeight: 1.4,
+        whiteSpace: "pre-wrap",
+        pointerEvents: "none",
+      }}
+    >
+      {tip.text}
+    </div>
+  );
+}
+
+function CatalogOptionList({
+  value,
+  placeholder,
+  options,
+  onSelect,
+  inputStyle,
+  onHover,
+  onLeave,
+  search,
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const searchText = String(search || "").trim();
+  const listOpen = open || searchText.length > 0;
+  const selected = options.find((option) => String(option.id) === String(value));
+
+  useEffect(() => {
+    if (!listOpen) return undefined;
+    const onPointerDown = (event) => {
+      if (!rootRef.current?.contains(event.target)) {
+        setOpen(false);
+        onLeave?.();
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [listOpen, onLeave]);
+
+  return (
+    <div
+      ref={rootRef}
+      style={{ position: "relative", minWidth: 0, maxWidth: "100%", width: "100%" }}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          setOpen((current) => !current);
+          if (open) onLeave?.();
+        }}
+        title={selected?.label || ""}
+        style={{
+          ...inputStyle,
+          display: "block",
+          width: "100%",
+          maxWidth: "100%",
+          minWidth: 0,
+          boxSizing: "border-box",
+          textAlign: "left",
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {selected?.label || placeholder}
+      </button>
+      {listOpen && (
+        <div
+          onMouseLeave={onLeave}
+          style={{
+            ...inputStyle,
+            position: "absolute",
+            zIndex: 20,
+            left: 0,
+            right: 0,
+            width: "100%",
+            maxWidth: "100%",
+            boxSizing: "border-box",
+            marginTop: 4,
+            padding: 0,
+            maxHeight: 168,
+            overflowY: "auto",
+            background: "#fff",
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              onSelect("");
+              setOpen(false);
+              onLeave?.();
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              textAlign: "left",
+              border: "none",
+              borderBottom: "1px solid #E6EAF0",
+              background: "transparent",
+              padding: "6px 8px",
+              cursor: "pointer",
+              color: theme.colors.inkSoft,
+              font: "inherit",
+            }}
+          >
+            {placeholder}
+          </button>
+          {options.map((option) => {
+            const isSelected = String(value) === String(option.id);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => {
+                  onSelect(String(option.id));
+                  setOpen(false);
+                  onLeave?.();
+                }}
+                onMouseEnter={(event) => onHover(event, option.description)}
+                onMouseMove={(event) => onHover(event, option.description)}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  border: "none",
+                  background: isSelected ? "rgba(15, 42, 68, 0.08)" : "#fff",
+                  padding: "6px 8px",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontWeight: isSelected ? 600 : 400,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function materialMatchesPickerSearch(material, search) {
   const query = String(search || "").trim().toLowerCase();
   if (!query) return true;
@@ -529,6 +703,8 @@ function Field({ label, required, children, span }) {
       style={{
         display: "grid",
         gap: 6,
+        minWidth: 0,
+        maxWidth: "100%",
         gridColumn: span ? "1 / -1" : undefined,
       }}
     >
@@ -688,6 +864,706 @@ function createLabourDraftRow() {
     LabourComponent: "",
     UnitId: "",
   };
+}
+
+const ITEM_COMPONENT_DESC_MAX = 100;
+
+function formatItemComponentLabel(item) {
+  if (!item) return "";
+  const code = String(item.ItemCode || item.ItemNumber || "").trim();
+  const description = String(item.ItemDescription || "").trim();
+  if (code && description) return `${code} ${description}`;
+  return code || description || String(item.ItemId || "");
+}
+
+function itemComponentMatchesSearch(item, search) {
+  const query = String(search || "").trim().toLowerCase();
+  if (!query) return true;
+  const code = String(item?.ItemCode || "").toLowerCase();
+  if (code.includes(query)) return true;
+  const number = String(item?.ItemNumber || "").toLowerCase();
+  if (number.includes(query)) return true;
+  return String(item?.ItemDescription || "").toLowerCase().includes(query);
+}
+
+function createItemComponentDraftRow() {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    ComponentItemId: "",
+    Description: "",
+    ItemComponent: "",
+    UnitId: "",
+  };
+}
+
+function ItemComponentsPanel({
+  apiBase,
+  userId,
+  itemId,
+  regionId,
+  regionIds,
+  canEdit,
+  inputStyle,
+}) {
+  const [itemMasterList, setItemMasterList] = useState([]);
+  const [pickerSearch, setPickerSearch] = useState("");
+  const [itemHoverTip, setItemHoverTip] = useState(null);
+  const [componentList, setComponentList] = useState([]);
+  const [loadingComponents, setLoadingComponents] = useState(false);
+  const [draftRows, setDraftRows] = useState([createItemComponentDraftRow()]);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({
+    ComponentItemId: "",
+    Description: "",
+    ItemComponent: "",
+    UnitId: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [panelMessage, setPanelMessage] = useState("");
+
+  const readonlyInputStyle = {
+    ...inputStyle,
+    background: "#EEF1F4",
+    color: theme.colors.inkSoft,
+    cursor: "not-allowed",
+  };
+
+  const selectableItems = itemMasterList.filter(
+    (row) => Number(row.ItemId) !== Number(itemId),
+  );
+
+  useEffect(() => {
+    const catalogRegionId =
+      regionIds !== undefined && regionIds !== null ? regionIds : regionId;
+    if (!catalogRegionId) {
+      setItemMasterList([]);
+      return undefined;
+    }
+    let cancelled = false;
+    axios
+      .get(`${apiBase}/api/ra-component-items`, {
+        params: {
+          regionId: catalogRegionId,
+          ...(userId ? { userId } : {}),
+        },
+      })
+      .then((res) => {
+        if (!cancelled) {
+          setItemMasterList(Array.isArray(res.data) ? res.data : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setItemMasterList([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, regionId, regionIds, userId]);
+
+  const loadComponents = async (nextItemId) => {
+    if (!nextItemId) {
+      setComponentList([]);
+      return;
+    }
+    setLoadingComponents(true);
+    try {
+      const res = await axios.get(`${apiBase}/api/item-components`, {
+        params: { itemId: nextItemId },
+      });
+      setComponentList(Array.isArray(res.data?.data) ? res.data.data : []);
+    } catch (err) {
+      setComponentList([]);
+      setPanelMessage(
+        `Failed to load item components: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoadingComponents(false);
+    }
+  };
+
+  useEffect(() => {
+    setPickerSearch("");
+    setEditingId(null);
+    setForm({
+      ComponentItemId: "",
+      Description: "",
+      ItemComponent: "",
+      UnitId: "",
+    });
+    setDraftRows([createItemComponentDraftRow()]);
+    setPanelMessage("");
+    loadComponents(itemId);
+  }, [itemId]);
+
+  const onFormChange = (e) => {
+    const { name, value } = e.target;
+    setForm((prev) => {
+      if (name === "ComponentItemId") {
+        const selected = selectableItems.find(
+          (row) => Number(row.ItemId) === Number(value),
+        );
+        return {
+          ...prev,
+          ComponentItemId: value,
+          UnitId: selected?.UnitId ? String(selected.UnitId) : "",
+        };
+      }
+      return { ...prev, [name]: value };
+    });
+  };
+
+  const onDraftChange = (rowKey, name, value) => {
+    setDraftRows((prev) =>
+      prev.map((row) => {
+        if (row.key !== rowKey) return row;
+        if (name === "ComponentItemId") {
+          const selected = selectableItems.find(
+            (item) => Number(item.ItemId) === Number(value),
+          );
+          return {
+            ...row,
+            ComponentItemId: value,
+            UnitId: selected?.UnitId ? String(selected.UnitId) : "",
+          };
+        }
+        return { ...row, [name]: value };
+      }),
+    );
+  };
+
+  const resetEdit = () => {
+    setEditingId(null);
+    setForm({
+      ComponentItemId: "",
+      Description: "",
+      ItemComponent: "",
+      UnitId: "",
+    });
+    setDraftRows([createItemComponentDraftRow()]);
+  };
+
+  const startEdit = (row) => {
+    const selected = selectableItems.find(
+      (item) => Number(item.ItemId) === Number(row.ComponentItemId),
+    );
+    setEditingId(row.ItemComponentId);
+    setForm({
+      ComponentItemId: String(row.ComponentItemId || ""),
+      Description: row.Description == null ? "" : String(row.Description),
+      ItemComponent:
+        row.ItemComponent === null || row.ItemComponent === undefined
+          ? ""
+          : String(row.ItemComponent),
+      UnitId: selected?.UnitId
+        ? String(selected.UnitId)
+        : String(row.UnitId || ""),
+    });
+  };
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    if (!canEdit) {
+      setPanelMessage("Only SuperAdmin or OrgAdmin can manage item components.");
+      return;
+    }
+    if (!itemId) {
+      alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (editingId) {
+      if (!form.ComponentItemId || form.ItemComponent === "") {
+        alert("Item and Item Component are required.");
+        return;
+      }
+      if (!form.UnitId) {
+        alert("Selected item has no Unit. Choose another item.");
+        return;
+      }
+      if (String(form.Description || "").length > ITEM_COMPONENT_DESC_MAX) {
+        alert(
+          `Description must be at most ${ITEM_COMPONENT_DESC_MAX} characters.`,
+        );
+        return;
+      }
+      if (!window.confirm("Update this item component?")) return;
+
+      setSaving(true);
+      setPanelMessage("");
+      try {
+        await axios.put(`${apiBase}/api/item-components/${editingId}`, {
+          userId,
+          ItemId: itemId,
+          ComponentItemId: form.ComponentItemId,
+          Description: String(form.Description || "").trim(),
+          ItemComponent: form.ItemComponent,
+        });
+        setPanelMessage("Item component updated.");
+        resetEdit();
+        await loadComponents(itemId);
+      } catch (err) {
+        setPanelMessage(
+          `Item component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    const validRows = draftRows.filter(
+      (row) => row.ComponentItemId && row.ItemComponent !== "",
+    );
+    if (!validRows.length) {
+      alert("Add at least one item with a component value.");
+      return;
+    }
+    if (validRows.find((row) => !row.UnitId)) {
+      alert("One or more selected items have no Unit. Choose another item.");
+      return;
+    }
+    if (
+      validRows.find(
+        (row) => String(row.Description || "").length > ITEM_COMPONENT_DESC_MAX,
+      )
+    ) {
+      alert(
+        `Description must be at most ${ITEM_COMPONENT_DESC_MAX} characters.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(
+        validRows.length === 1
+          ? "Save this item component?"
+          : `Save ${validRows.length} item components?`,
+      )
+    ) {
+      return;
+    }
+
+    setSaving(true);
+    setPanelMessage("");
+    try {
+      const res = await axios.post(`${apiBase}/api/item-components/batch`, {
+        userId,
+        ItemId: itemId,
+        rows: validRows.map((row) => ({
+          ComponentItemId: row.ComponentItemId,
+          Description: String(row.Description || "").trim(),
+          ItemComponent: row.ItemComponent,
+        })),
+      });
+      const count = res.data?.count || validRows.length;
+      setPanelMessage(
+        count === 1
+          ? "Item component saved."
+          : `${count} item components saved.`,
+      );
+      setDraftRows([createItemComponentDraftRow()]);
+      await loadComponents(itemId);
+    } catch (err) {
+      setPanelMessage(
+        `Item component save failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card
+      eyebrow="MasterRAComponent"
+      title={
+        editingId
+          ? `Edit item component #${editingId}`
+          : itemId
+            ? `Item Component for item #${itemId}`
+            : "Item Component"
+      }
+      subtitle="Add or edit item component rows for the selected item. Selection is from Master Item."
+    >
+      {!itemId ? (
+        <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
+          Select an item from the list to manage its item components.
+        </div>
+      ) : (
+        <>
+          {panelMessage && (
+            <div
+              style={{
+                fontSize: 13,
+                marginBottom: 12,
+                color: panelMessage.toLowerCase().includes("fail")
+                  ? "#C6362C"
+                  : "#2A7D4F",
+              }}
+            >
+              {panelMessage}
+            </div>
+          )}
+          <div
+            style={{
+              overflowX: "auto",
+              border: `1px solid ${theme.colors.line}`,
+              borderRadius: 10,
+            }}
+          >
+            <table className="wrms-table">
+              <thead>
+                <tr>
+                  <th>Sr.No.</th>
+                  <th>Item</th>
+                  <th>Description</th>
+                  <th>Item Component</th>
+                  <th>Unit</th>
+                  <th>Completed Rate</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingComponents ? (
+                  <EmptyRow colSpan={7}>Loading…</EmptyRow>
+                ) : componentList.length ? (
+                  componentList.map((row, index) => (
+                    <tr key={row.ItemComponentId}>
+                      <td style={{ fontFamily: theme.font.mono }}>{index + 1}</td>
+                      <td>{formatItemComponentLabel(row) || row.ComponentItemId}</td>
+                      <td>{row.Description || ""}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {row.ItemComponent}
+                      </td>
+                      <td>{row.UnitShortName || row.UnitId}</td>
+                      <td style={{ fontFamily: theme.font.mono }}>
+                        {formatRupees(row.CompletedRate)}
+                      </td>
+                      <td>
+                        <GhostIconButton
+                          tone={theme.colors.accent}
+                          onClick={() => startEdit(row)}
+                        >
+                          ✎ Edit
+                        </GhostIconButton>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <EmptyRow colSpan={7}>
+                    No item components for this item — add one below.
+                  </EmptyRow>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <FormShell onSubmit={onSubmit}>
+              {editingId ? (
+                <>
+                  <div style={{ marginBottom: 14 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={pickerSearch}
+                        onChange={(e) => setPickerSearch(e.target.value)}
+                        placeholder="Type Item Code or text to filter Item"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr)",
+                      gap: 14,
+                    }}
+                  >
+                    <Field label="Item" required>
+                      <CatalogOptionList
+                        value={form.ComponentItemId}
+                        placeholder="Select Item"
+                        search={pickerSearch}
+                        inputStyle={inputStyle}
+                        onLeave={() => setItemHoverTip(null)}
+                        onHover={(event, description) => {
+                          const text = fullDescriptionText(description);
+                          setItemHoverTip(
+                            text
+                              ? { text, ...catalogTipPosition(event) }
+                              : null,
+                          );
+                        }}
+                        onSelect={(componentItemId) =>
+                          onFormChange({
+                            target: {
+                              name: "ComponentItemId",
+                              value: componentItemId,
+                            },
+                          })
+                        }
+                        options={selectableItems
+                          .filter(
+                            (row) =>
+                              Number(row.ItemId) ===
+                                Number(form.ComponentItemId) ||
+                              itemComponentMatchesSearch(row, pickerSearch),
+                          )
+                          .map((row) => ({
+                            id: row.ItemId,
+                            label: formatItemComponentLabel(row),
+                            description: row.ItemDescription,
+                          }))}
+                      />
+                    </Field>
+                    <Field label="Description">
+                      <input
+                        name="Description"
+                        value={form.Description}
+                        maxLength={ITEM_COMPONENT_DESC_MAX}
+                        onChange={onFormChange}
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Item Component" required>
+                      <input
+                        name="ItemComponent"
+                        type="number"
+                        step="any"
+                        value={form.ItemComponent}
+                        onChange={onFormChange}
+                        required
+                        style={inputStyle}
+                      />
+                    </Field>
+                    <Field label="Unit">
+                      <input
+                        value={
+                          selectableItems.find(
+                            (row) =>
+                              Number(row.ItemId) === Number(form.ComponentItemId),
+                          )?.UnitShortName || ""
+                        }
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                    <Field label="Completed Rate">
+                      <input
+                        value={formatRupees(
+                          selectableItems.find(
+                            (row) =>
+                              Number(row.ItemId) === Number(form.ComponentItemId),
+                          )?.CompletedRate,
+                        )}
+                        disabled
+                        readOnly
+                        style={readonlyInputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                    <PrimaryButton disabled={saving}>
+                      {saving ? "Saving…" : "Update component"}
+                    </PrimaryButton>
+                    <SecondaryButton type="button" onClick={resetEdit}>
+                      Cancel edit
+                    </SecondaryButton>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      marginBottom: 10,
+                      color: theme.colors.ink,
+                    }}
+                  >
+                    Add components (one or more)
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={pickerSearch}
+                        onChange={(e) => setPickerSearch(e.target.value)}
+                        placeholder="Type Item Code or text to filter Item"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {draftRows.map((row, index) => {
+                      const selected = selectableItems.find(
+                        (item) =>
+                          Number(item.ItemId) === Number(row.ComponentItemId),
+                      );
+                      return (
+                        <div
+                          key={row.key}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns:
+                              "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr) auto",
+                            gap: 12,
+                            alignItems: "end",
+                            padding: 12,
+                            border: `1px solid ${theme.colors.line}`,
+                            borderRadius: 8,
+                            background: "#fff",
+                          }}
+                        >
+                          <Field label={`Item ${index + 1}`} required>
+                            <CatalogOptionList
+                              value={row.ComponentItemId}
+                              placeholder="Select Item"
+                              search={pickerSearch}
+                              inputStyle={inputStyle}
+                              onLeave={() => setItemHoverTip(null)}
+                              onHover={(event, description) => {
+                                const text = fullDescriptionText(description);
+                                setItemHoverTip(
+                                  text
+                                    ? { text, ...catalogTipPosition(event) }
+                                    : null,
+                                );
+                              }}
+                              onSelect={(componentItemId) =>
+                                onDraftChange(
+                                  row.key,
+                                  "ComponentItemId",
+                                  componentItemId,
+                                )
+                              }
+                              options={selectableItems
+                                .filter(
+                                  (item) =>
+                                    Number(item.ItemId) ===
+                                      Number(row.ComponentItemId) ||
+                                    itemComponentMatchesSearch(
+                                      item,
+                                      pickerSearch,
+                                    ),
+                                )
+                                .map((item) => ({
+                                  id: item.ItemId,
+                                  label: formatItemComponentLabel(item),
+                                  description: item.ItemDescription,
+                                }))}
+                            />
+                          </Field>
+                          <Field label="Description">
+                            <input
+                              value={row.Description}
+                              maxLength={ITEM_COMPONENT_DESC_MAX}
+                              onChange={(e) =>
+                                onDraftChange(
+                                  row.key,
+                                  "Description",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Item Component" required>
+                            <input
+                              type="number"
+                              step="any"
+                              value={row.ItemComponent}
+                              onChange={(e) =>
+                                onDraftChange(
+                                  row.key,
+                                  "ItemComponent",
+                                  e.target.value,
+                                )
+                              }
+                              style={inputStyle}
+                            />
+                          </Field>
+                          <Field label="Unit">
+                            <input
+                              value={selected?.UnitShortName || ""}
+                              disabled
+                              readOnly
+                              placeholder="From selected item"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <Field label="Completed Rate">
+                            <input
+                              value={formatRupees(selected?.CompletedRate)}
+                              disabled
+                              readOnly
+                              placeholder="From selected item"
+                              style={readonlyInputStyle}
+                            />
+                          </Field>
+                          <SecondaryButton
+                            type="button"
+                            onClick={() =>
+                              setDraftRows((prev) => {
+                                if (prev.length <= 1) {
+                                  return [createItemComponentDraftRow()];
+                                }
+                                return prev.filter((item) => item.key !== row.key);
+                              })
+                            }
+                            style={{ marginBottom: 2 }}
+                          >
+                            Remove
+                          </SecondaryButton>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      marginTop: 18,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <SecondaryButton
+                      type="button"
+                      onClick={() =>
+                        setDraftRows((prev) => [
+                          ...prev,
+                          createItemComponentDraftRow(),
+                        ])
+                      }
+                    >
+                      + Add another item
+                    </SecondaryButton>
+                    <PrimaryButton disabled={saving}>
+                      {saving
+                        ? "Saving…"
+                        : draftRows.filter(
+                              (row) =>
+                                row.ComponentItemId && row.ItemComponent !== "",
+                            ).length > 1
+                          ? "Save all components"
+                          : "Save component"}
+                    </PrimaryButton>
+                  </div>
+                </>
+              )}
+            </FormShell>
+          </div>
+        </>
+      )}
+      <FullDescriptionTip tip={itemHoverTip} />
+    </Card>
+  );
 }
 
 function LabourComponentsPanel({
@@ -1081,7 +1957,7 @@ function LabourComponentsPanel({
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
+                      gridTemplateColumns: "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr)",
                       gap: 14,
                     }}
                   >
@@ -1209,7 +2085,7 @@ function LabourComponentsPanel({
                           style={{
                             display: "grid",
                             gridTemplateColumns:
-                              "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
+                              "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr) auto",
                             gap: 12,
                             alignItems: "end",
                             padding: 12,
@@ -1793,7 +2669,7 @@ function MachineryComponentsPanel({
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
+                      gridTemplateColumns: "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr)",
                       gap: 14,
                     }}
                   >
@@ -1932,7 +2808,7 @@ function MachineryComponentsPanel({
                           style={{
                             display: "grid",
                             gridTemplateColumns:
-                              "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
+                              "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr) auto",
                             gap: 12,
                             alignItems: "end",
                             padding: 12,
@@ -2098,6 +2974,20 @@ const RA_PARAMETER_FIELDS = [
   { key: "GSTCharges", label: "GST Charges", defaultValue: "18" },
 ];
 
+const RA_PARAMETERS_DISABLED_FOR_CPWD = new Set([
+  "Scaffolding",
+  "Sundries",
+  "WaterCharges",
+  "QCCharges",
+  "Formwork",
+  "LabourAmenities",
+]);
+
+function isCpwdRateAnalysisLogic(regionId, raLogic) {
+  if (Number(regionId) === 2) return true;
+  return String(raLogic || "").trim().toUpperCase() === "CPWD";
+}
+
 function createRAParameterForm() {
   const form = {};
   RA_PARAMETER_FIELDS.forEach((field) => {
@@ -2111,6 +3001,7 @@ function RateAnalysisParametersPanel({
   apiBase,
   userId,
   itemId,
+  regionId,
   raLogic,
   canEdit,
   inputStyle,
@@ -2126,6 +3017,7 @@ function RateAnalysisParametersPanel({
   const otherParameterFields = RA_PARAMETER_FIELDS.filter(
     (field) => field.key !== "RAQuantity",
   );
+  const cpwdLogic = isCpwdRateAnalysisLogic(regionId, raLogic);
 
   const loadParameters = async (nextItemId) => {
     if (!nextItemId) {
@@ -2230,6 +3122,10 @@ function RateAnalysisParametersPanel({
         RALogic: raLogic || undefined,
       };
       RA_PARAMETER_FIELDS.forEach((field) => {
+        if (cpwdLogic && RA_PARAMETERS_DISABLED_FOR_CPWD.has(field.key)) {
+          payload[field.key] = "0";
+          return;
+        }
         payload[field.key] =
           form[field.key] === "" ? field.defaultValue : form[field.key];
       });
@@ -2410,7 +3306,11 @@ function RateAnalysisParametersPanel({
                     style={{ ...inputStyle, width: "70%" }}
                   />
                 </label>
-                {otherParameterFields.map((field) => (
+                {otherParameterFields.map((field) => {
+                  const locked =
+                    cpwdLogic &&
+                    RA_PARAMETERS_DISABLED_FOR_CPWD.has(field.key);
+                  return (
                   <label
                     key={field.key}
                     style={{
@@ -2418,6 +3318,7 @@ function RateAnalysisParametersPanel({
                       gridTemplateColumns: "200px 1fr",
                       alignItems: "center",
                       gap: 12,
+                      opacity: locked ? 0.55 : 1,
                     }}
                   >
                     <span
@@ -2433,12 +3334,24 @@ function RateAnalysisParametersPanel({
                       name={field.key}
                       type="number"
                       step="any"
-                      value={form[field.key]}
+                      value={locked ? "0" : form[field.key]}
                       onChange={onFormChange}
-                      style={{ ...inputStyle, width: "180px" }}
+                      disabled={locked}
+                      style={{
+                        ...inputStyle,
+                        width: "180px",
+                        ...(locked
+                          ? {
+                              background: "#f4f1ea",
+                              color: "#8a8478",
+                              cursor: "not-allowed",
+                            }
+                          : {}),
+                      }}
                     />
                   </label>
-                ))}
+                  );
+                })}
               </div>
               <div
                 style={{
@@ -2543,6 +3456,7 @@ export default function HomePage() {
   const [materialItemList, setMaterialItemList] = useState([]);
   const [materialItemSearch, setMaterialItemSearch] = useState("");
   const [loadingMaterialItems, setLoadingMaterialItems] = useState(false);
+  const [catalogHoverTip, setCatalogHoverTip] = useState(null);
   const [materialItemsViewed, setMaterialItemsViewed] = useState(false);
   const [materialRALogic, setMaterialRALogic] = useState("");
   const [materialRALogicPickerOpen, setMaterialRALogicPickerOpen] =
@@ -5275,6 +6189,36 @@ export default function HomePage() {
   useEffect(() => {
     if (activeMaster === "items") return;
     resetEstimationScreen();
+  }, [activeMaster]);
+
+  const resetRAComponentScreen = () => {
+    setMaterialRegionId("");
+    setMaterialSsrYearId("");
+    setMaterialSsrYears([]);
+    setMaterialCategoryId("");
+    setMaterialSubCategoryId("");
+    setMaterialCategories([]);
+    setMaterialSubCategories([]);
+    setMaterialItemList([]);
+    setMaterialItemSearch("");
+    setLoadingMaterialItems(false);
+    setMaterialItemsViewed(false);
+    setMaterialRALogic("");
+    setMaterialRALogicPickerOpen(false);
+    setSelectedMaterialItemId(null);
+    setMaterialMasterList([]);
+    setMaterialPickerSearch("");
+    setMaterialComponentList([]);
+    setLoadingMaterialComponents(false);
+    setMaterialComponentForm(initialMaterialComponentForm);
+    setMaterialDraftRows([createMaterialDraftRow()]);
+    setEditingMaterialComponentId(null);
+    setSavingMaterialComponent(false);
+  };
+
+  useEffect(() => {
+    if (activeMaster === "materials") return;
+    resetRAComponentScreen();
   }, [activeMaster]);
 
   const handleGenerateEstimate = async (options = {}) => {
@@ -9594,8 +10538,8 @@ export default function HomePage() {
           {activeMaster === "materials" && canManageMaterials && (
             <>
               <Card
-                eyebrow="Master · Material Components"
-                title="Material Components"
+                eyebrow="Master · R.A. Component"
+                title="R.A. Component"
                 subtitle={
                   Number(materialRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID
                     ? "Select SSR region and year. Category and sub category are optional."
@@ -9902,11 +10846,27 @@ export default function HomePage() {
                             <tr
                               key={row.ItemId}
                               onClick={() => selectMaterialItem(row)}
-                              title={
-                                canSelect
-                                  ? "Select this item"
-                                  : "This item has no Unit and cannot be selected"
-                              }
+                              onMouseEnter={(event) => {
+                                const text = fullDescriptionText(
+                                  row.ItemDescription,
+                                );
+                                setCatalogHoverTip(
+                                  text
+                                    ? { text, ...catalogTipPosition(event) }
+                                    : null,
+                                );
+                              }}
+                              onMouseMove={(event) => {
+                                const text = fullDescriptionText(
+                                  row.ItemDescription,
+                                );
+                                if (!text) return;
+                                setCatalogHoverTip({
+                                  text,
+                                  ...catalogTipPosition(event),
+                                });
+                              }}
+                              onMouseLeave={() => setCatalogHoverTip(null)}
                               style={{
                                 cursor: canSelect ? "pointer" : "not-allowed",
                                 opacity: canSelect ? 1 : 0.55,
@@ -9927,7 +10887,6 @@ export default function HomePage() {
                                 {row.ItemNumber}
                               </td>
                               <td
-                                title={singleLineDesc}
                                 style={
                                   selected
                                     ? {
@@ -9971,6 +10930,7 @@ export default function HomePage() {
                       )}
                     </tbody>
                   </table>
+                  <FullDescriptionTip tip={catalogHoverTip} />
                 </div>
               </Card>
 
@@ -9978,6 +10938,15 @@ export default function HomePage() {
                 ref={materialComponentSectionRef}
                 style={{ scrollMarginTop: 16 }}
               >
+              <ItemComponentsPanel
+                apiBase={API_BASE}
+                userId={currentUser?.UserId}
+                itemId={selectedMaterialItemId}
+                regionId={materialRegionId}
+                regionIds={componentCatalogRegionIds}
+                canEdit={canManageMaterials}
+                inputStyle={inputStyle}
+              />
               <Card
                 eyebrow="MasterRAComponent"
                 title={
@@ -10085,20 +11054,34 @@ export default function HomePage() {
                             <div
                               style={{
                                 display: "grid",
-                                gridTemplateColumns: "2fr 2fr 0.9fr 0.9fr 0.9fr",
+                                gridTemplateColumns: "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr)",
                                 gap: 14,
                               }}
                             >
                               <Field label="Material" required>
-                                <select
-                                  name="MaterialId"
+                                <CatalogOptionList
                                   value={materialComponentForm.MaterialId}
-                                  onChange={onMaterialComponentChange}
-                                  required
-                                  style={inputStyle}
-                                >
-                                  <option value="">Select Material</option>
-                                  {materialMasterList
+                                  placeholder="Select Material"
+                                  search={materialPickerSearch}
+                                  inputStyle={inputStyle}
+                                  onLeave={() => setCatalogHoverTip(null)}
+                                  onHover={(event, description) => {
+                                    const text = fullDescriptionText(description);
+                                    setCatalogHoverTip(
+                                      text
+                                        ? { text, ...catalogTipPosition(event) }
+                                        : null,
+                                    );
+                                  }}
+                                  onSelect={(materialId) =>
+                                    onMaterialComponentChange({
+                                      target: {
+                                        name: "MaterialId",
+                                        value: materialId,
+                                      },
+                                    })
+                                  }
+                                  options={materialMasterList
                                     .filter(
                                       (m) =>
                                         Number(m.MaterialId) ===
@@ -10110,15 +11093,12 @@ export default function HomePage() {
                                           materialPickerSearch,
                                         ),
                                     )
-                                    .map((m) => (
-                                    <option
-                                      key={m.MaterialId}
-                                      value={m.MaterialId}
-                                    >
-                                      {formatMaterialLabel(m)}
-                                    </option>
-                                  ))}
-                                </select>
+                                    .map((m) => ({
+                                      id: m.MaterialId,
+                                      label: formatMaterialLabel(m),
+                                      description: m.MaterialDescription,
+                                    }))}
+                                />
                               </Field>
                               <Field label="Description">
                                 <input
@@ -10260,7 +11240,7 @@ export default function HomePage() {
                                     style={{
                                       display: "grid",
                                       gridTemplateColumns:
-                                        "2fr 2fr 0.9fr 0.9fr 0.9fr auto",
+                                        "minmax(0, 2fr) minmax(0, 2fr) minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 0.9fr) auto",
                                       gap: 12,
                                       alignItems: "end",
                                       padding: 12,
@@ -10273,21 +11253,32 @@ export default function HomePage() {
                                       label={`Material ${index + 1}`}
                                       required
                                     >
-                                      <select
+                                      <CatalogOptionList
                                         value={row.MaterialId}
-                                        onChange={(e) =>
+                                        placeholder="Select Material"
+                                        search={materialPickerSearch}
+                                        inputStyle={inputStyle}
+                                        onLeave={() => setCatalogHoverTip(null)}
+                                        onHover={(event, description) => {
+                                          const text =
+                                            fullDescriptionText(description);
+                                          setCatalogHoverTip(
+                                            text
+                                              ? {
+                                                  text,
+                                                  ...catalogTipPosition(event),
+                                                }
+                                              : null,
+                                          );
+                                        }}
+                                        onSelect={(materialId) =>
                                           onMaterialDraftChange(
                                             row.key,
                                             "MaterialId",
-                                            e.target.value,
+                                            materialId,
                                           )
                                         }
-                                        style={inputStyle}
-                                      >
-                                        <option value="">
-                                          Select Material
-                                        </option>
-                                        {materialMasterList
+                                        options={materialMasterList
                                           .filter(
                                             (m) =>
                                               Number(m.MaterialId) ===
@@ -10297,15 +11288,12 @@ export default function HomePage() {
                                                 materialPickerSearch,
                                               ),
                                           )
-                                          .map((m) => (
-                                          <option
-                                            key={m.MaterialId}
-                                            value={m.MaterialId}
-                                          >
-                                            {formatMaterialLabel(m)}
-                                          </option>
-                                        ))}
-                                      </select>
+                                          .map((m) => ({
+                                            id: m.MaterialId,
+                                            label: formatMaterialLabel(m),
+                                            description: m.MaterialDescription,
+                                          }))}
+                                      />
                                     </Field>
                                     <Field label="Description">
                                       <input
@@ -10438,6 +11426,7 @@ export default function HomePage() {
                 apiBase={API_BASE}
                 userId={currentUser?.UserId}
                 itemId={selectedMaterialItemId}
+                regionId={materialRegionId}
                 raLogic={materialRALogic}
                 canEdit={canManageMaterials}
                 inputStyle={inputStyle}
