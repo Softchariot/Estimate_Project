@@ -305,6 +305,10 @@ async function ensureWorkAbstractSchema() {
   `);
   await pool.query(`
     ALTER TABLE "WorkAbstract"
+      ALTER COLUMN "RateString" TYPE text
+  `);
+  await pool.query(`
+    ALTER TABLE "WorkAbstract"
       ADD COLUMN IF NOT EXISTS "FinalRate" numeric
   `);
   await pool.query(`
@@ -4987,6 +4991,73 @@ app.get("/api/generate-report", async (req, res) => {
     const rateWidth = colX.amount - colX.rate - 6;
     const amountWidth = 555 - colX.amount;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
+    const c2ValueWidth = 96;
+
+    const c2RateLines = (rateString) =>
+      String(rateString || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    const c2ValueText = (rawValue) => {
+      const text = String(rawValue || "").trim();
+      const negative = text.startsWith("(-)");
+      const number = text.replace(/^\(-\)\s*/, "");
+      const amount = `₹  ${number}`;
+      return negative ? `(-) ${amount}` : amount;
+    };
+
+    const measureC2RateBlock = (rateString, width) => {
+      const labelWidth = Math.max(40, width - c2ValueWidth - 6);
+      let height = 0;
+      for (const line of c2RateLines(rateString)) {
+        const eq = line.lastIndexOf(" = ");
+        if (eq === -1) {
+          doc.font("Helvetica-Bold").fontSize(9);
+          height += doc.heightOfString(line, { width });
+          continue;
+        }
+        const label = line.slice(0, eq).trim();
+        doc.font("Helvetica").fontSize(9);
+        height += Math.max(
+          11,
+          doc.heightOfString(label, { width: labelWidth }),
+        );
+      }
+      return height;
+    };
+
+    const drawC2RateBlock = (rateString, x, y, width) => {
+      const labelWidth = Math.max(40, width - c2ValueWidth - 6);
+      let cursor = y;
+      for (const line of c2RateLines(rateString)) {
+        const eq = line.lastIndexOf(" = ");
+        if (eq === -1) {
+          doc.font("Helvetica-Bold").fontSize(9);
+          const lineHeight = doc.heightOfString(line, { width });
+          doc.text(line, x, cursor, { width });
+          cursor += lineHeight;
+          continue;
+        }
+        const label = line.slice(0, eq).trim();
+        const valueText = c2ValueText(line.slice(eq + 3));
+        doc.font("Helvetica").fontSize(9);
+        const labelHeight = Math.max(
+          11,
+          doc.heightOfString(label, { width: labelWidth }),
+        );
+        doc.text(label, x, cursor, { width: labelWidth });
+        doc.font(rupeeFonts.regular).fontSize(9);
+        doc.text(valueText, x + width - c2ValueWidth, cursor, {
+          width: c2ValueWidth,
+          align: "right",
+          lineBreak: false,
+        });
+        cursor += labelHeight;
+      }
+      doc.y = cursor;
+      return cursor;
+    };
 
     const drawHeader = () => {
       doc.font("Helvetica-Bold").fontSize(14);
@@ -5079,6 +5150,8 @@ app.get("/api/generate-report", async (req, res) => {
           ? ""
           : item.DisplayItemNo || item.ItemNumber || "";
         const rateString = String(item.RateString || "").trim();
+        const c2Aligned =
+          !isParent && rateString.startsWith("C2: Final Rate Calculation");
         const baseDesc = isGroupLine
           ? [groupLabel, String(item.GroupName || "Measurement Group").trim()]
               .filter(Boolean)
@@ -5086,16 +5159,22 @@ app.get("/api/generate-report", async (req, res) => {
           : String(item.ItemDescription || "").trim();
         const descText = isParent
           ? baseDesc
-          : [baseDesc, rateString].filter(Boolean).join("\n");
+          : c2Aligned
+            ? baseDesc
+            : [baseDesc, rateString].filter(Boolean).join("\n");
 
         doc.font(isParent ? "Helvetica-Bold" : "Helvetica").fontSize(9);
         const ssrItemNoHeight = doc.heightOfString(ssrItemNoText, {
           width: ssrItemNoWidth,
         });
-        const descHeight = doc.heightOfString(descText, {
+        const descBodyHeight = doc.heightOfString(descText || " ", {
           width: descWidth,
           align: "justify",
         });
+        const c2BlockHeight = c2Aligned
+          ? measureC2RateBlock(rateString, descWidth) + 2
+          : 0;
+        const descHeight = descBodyHeight + c2BlockHeight;
         const rowHeight = Math.max(ssrItemNoHeight, descHeight) + 6;
 
         if (doc.y + rowHeight > pageBottom - 40) {
@@ -5117,6 +5196,16 @@ app.get("/api/generate-report", async (req, res) => {
           width: descWidth,
           align: "justify",
         });
+        if (c2Aligned) {
+          const blockTop =
+            rowTop +
+            doc.heightOfString(descText || " ", {
+              width: descWidth,
+              align: "justify",
+            }) +
+            2;
+          drawC2RateBlock(rateString, colX.desc, blockTop, descWidth);
+        }
 
         if (!isParent) {
           doc.font("Helvetica").fontSize(9);
@@ -5337,6 +5426,13 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
       const description = abstract.ItemDescription || "";
       const regionId = Number(abstract.RegionId);
       const addition = additionByRegion.get(regionId) || null;
+      const applyLabourCess = addition?.ApplyLabourCess === true;
+      const labourCessPct = applyLabourCess
+        ? Number(addition.LabourCess) || 0
+        : 0;
+      const labourCessAmount = applyLabourCess
+        ? Number((basicRate * (labourCessPct / 100)).toFixed(2))
+        : 0;
 
       const materials = await pool.query(
         `SELECT wm."Sequence", wm."Component", wm."LeadDistanceKm", wm."Lead",
@@ -5377,6 +5473,22 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
       });
       doc.y = Math.max(doc.y, metaY + 12);
       doc.moveDown(0.45);
+
+      if (applyLabourCess) {
+        const cessLabel = `Deduct Labour Cess at ${money2(labourCessPct)}% from Basic Rate`;
+        doc.font("Helvetica").fontSize(9);
+        const labelWidth = width * 0.65;
+        const labelHeight = doc.heightOfString(cessLabel, { width: labelWidth });
+        ensureSpace(labelHeight + 8);
+        const cessY = doc.y;
+        doc.text(cessLabel, left, cessY, { width: labelWidth });
+        doc.text(rs(labourCessAmount), left + labelWidth, cessY, {
+          width: width * 0.35,
+          align: "right",
+        });
+        doc.y = cessY + Math.max(labelHeight, 12);
+        doc.moveDown(0.35);
+      }
 
       // Column headers for lead charges
       const colMat = left;
@@ -5454,9 +5566,6 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
           additionAmount = percentBase * (percentage / 100);
           additionLabel = `${addition.Description || "Standard Addition"} @ ${money2(percentage)}% Excluding Lead Charges`;
         }
-        if (applyLabourCess) {
-          additionLabel += ` And Including Applying Labour Cess at ${money2(labourCess)}%`;
-        }
       }
 
       const totalAmount = subTotal + additionAmount;
@@ -5468,10 +5577,15 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
       {
         const y = doc.y;
         doc.text("Sub Total", left, y, { width: width * 0.65 });
-        doc.text(rs(subTotal), left + width * 0.65, y, {
-          width: width * 0.35,
-          align: "right",
-        });
+        doc.text(
+          rs(applyLabourCess ? subTotal - labourCessAmount : subTotal),
+          left + width * 0.65,
+          y,
+          {
+            width: width * 0.35,
+            align: "right",
+          },
+        );
         doc.y = y + 12;
       }
       doc.moveDown(0.2);
@@ -5496,6 +5610,25 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
           });
           doc.y = y + Math.max(labelHeight, 12);
         }
+        doc.moveDown(0.2);
+        drawRule();
+      }
+
+      if (applyLabourCess) {
+        const addCessLabel = `Add Labour Cess at ${money2(labourCessPct)}% on Basic Rate`;
+        doc.font("Helvetica").fontSize(9);
+        const labelWidth = width * 0.65;
+        const labelHeight = doc.heightOfString(addCessLabel, {
+          width: labelWidth,
+        });
+        ensureSpace(labelHeight + 16);
+        const cessY = doc.y;
+        doc.text(addCessLabel, left, cessY, { width: labelWidth });
+        doc.text(rs(labourCessAmount), left + labelWidth, cessY, {
+          width: width * 0.35,
+          align: "right",
+        });
+        doc.y = cessY + Math.max(labelHeight, 12);
         doc.moveDown(0.2);
         drawRule();
       }
@@ -7307,7 +7440,7 @@ app.post("/api/populate-work-materials", async (req, res) => {
     }
 
     const additionsResult = await client.query(
-      `SELECT "WorkStandardAdditionId", "SSRRegionId", "Percentage",
+      `SELECT "WorkStandardAdditionId", "SSRRegionId", "Description", "Percentage",
               "ApplyForLead", "ApplyLabourCess", "LabourCess"
        FROM "WorkStandardAddition"
        WHERE "MasterWorkId" = $1`,
@@ -7318,6 +7451,7 @@ app.post("/api/populate-work-materials", async (req, res) => {
         Number(row.SSRRegionId),
         {
           WorkStandardAdditionId: Number(row.WorkStandardAdditionId),
+          Description: row.Description || "",
           Percentage: Number(row.Percentage) || 0,
           ApplyForLead: row.ApplyForLead !== false,
           ApplyLabourCess: row.ApplyLabourCess === true,
@@ -7558,10 +7692,32 @@ app.post("/api/populate-work-materials", async (req, res) => {
                 baseCompletedRate - baseCompletedRate * (labourCess / 100);
               finalRate =
                 baseCompletedRate + rateAfterCess * (percentage / 100);
-              rateString = withCondition(
-                "C2",
-                `Final Rate = (${formatNum(baseCompletedRate)} + ((${formatNum(baseCompletedRate)} - (${formatNum(baseCompletedRate)} * ${formatNum(labourCess)}/100)) * ${formatNum(percentage)}/100))`,
+              const money2 = (n) =>
+                Number(n || 0).toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                });
+              const cessAmount = Number(
+                (baseCompletedRate * (labourCess / 100)).toFixed(2),
               );
+              const subTotalAfterCess = Number(
+                (baseCompletedRate - cessAmount).toFixed(2),
+              );
+              const additionAmount = Number(
+                (subTotalAfterCess * (percentage / 100)).toFixed(2),
+              );
+              const additionName =
+                String(addition.Description || "").trim() ||
+                "Standard Addition";
+              rateString = [
+                "C2: Final Rate Calculation",
+                `Basic Rate = ${money2(baseCompletedRate)}`,
+                `Deduct Labour Cess @ ${formatNum(labourCess)}% = (-) ${money2(cessAmount)}`,
+                `Sub Total = ${money2(subTotalAfterCess)}`,
+                `Add ${additionName} @${money2(percentage)}% = ${money2(additionAmount)}`,
+                `Add Back Labour Cess @ ${formatNum(labourCess)}% = ${money2(cessAmount)}`,
+                `Final Rate = ${money2(finalRate)}`,
+              ].join("\n");
             }
           } else if (regionId === 2) {
             if (!applyLabourCess) {

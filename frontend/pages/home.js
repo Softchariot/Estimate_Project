@@ -470,25 +470,44 @@ function CatalogOptionList({
   inputStyle,
   onHover,
   onLeave,
+  onOpenChange,
   search,
 }) {
   const [open, setOpen] = useState(false);
+  const [settledSearch, setSettledSearch] = useState("");
   const rootRef = useRef(null);
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
   const searchText = String(search || "").trim();
-  const listOpen = open || searchText.length > 0;
+  const listOpen =
+    open || (searchText.length > 0 && searchText !== settledSearch);
   const selected = options.find((option) => String(option.id) === String(value));
+
+  useEffect(() => {
+    onOpenChangeRef.current?.(listOpen);
+    return () => {
+      if (listOpen) onOpenChangeRef.current?.(false);
+    };
+  }, [listOpen]);
+
+  const closeList = () => {
+    setOpen(false);
+    setSettledSearch(searchText);
+    onLeave?.();
+  };
 
   useEffect(() => {
     if (!listOpen) return undefined;
     const onPointerDown = (event) => {
       if (!rootRef.current?.contains(event.target)) {
         setOpen(false);
+        setSettledSearch(searchText);
         onLeave?.();
       }
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [listOpen, onLeave]);
+  }, [listOpen, searchText, onLeave]);
 
   return (
     <div
@@ -498,8 +517,8 @@ function CatalogOptionList({
       <button
         type="button"
         onClick={() => {
-          setOpen((current) => !current);
-          if (open) onLeave?.();
+          if (listOpen) closeList();
+          else setOpen(true);
         }}
         title={selected?.label || ""}
         style={{
@@ -541,8 +560,7 @@ function CatalogOptionList({
             type="button"
             onClick={() => {
               onSelect("");
-              setOpen(false);
-              onLeave?.();
+              closeList();
             }}
             style={{
               display: "block",
@@ -559,27 +577,35 @@ function CatalogOptionList({
           >
             {placeholder}
           </button>
-          {options.map((option) => {
+            {options.map((option) => {
             const isSelected = String(value) === String(option.id);
+            const blocked = option.disabled === true;
             return (
               <button
                 key={option.id}
                 type="button"
+                disabled={blocked}
+                title={blocked ? "No unit — cannot select" : option.label}
                 onClick={() => {
+                  if (blocked) return;
                   onSelect(String(option.id));
-                  setOpen(false);
-                  onLeave?.();
+                  closeList();
                 }}
-                onMouseEnter={(event) => onHover(event, option.description)}
-                onMouseMove={(event) => onHover(event, option.description)}
+                onMouseEnter={(event) => onHover?.(event, option)}
+                onMouseMove={(event) => onHover?.(event, option)}
                 style={{
                   display: "block",
                   width: "100%",
                   textAlign: "left",
                   border: "none",
-                  background: isSelected ? "rgba(15, 42, 68, 0.08)" : "#fff",
+                  background: blocked
+                    ? "#f6f4ef"
+                    : isSelected
+                      ? "rgba(15, 42, 68, 0.08)"
+                      : "#fff",
                   padding: "6px 8px",
-                  cursor: "pointer",
+                  cursor: blocked ? "not-allowed" : "pointer",
+                  color: blocked ? "#8a8478" : theme.colors.ink,
                   font: "inherit",
                   fontWeight: isSelected ? 600 : 400,
                   whiteSpace: "nowrap",
@@ -904,6 +930,7 @@ function ItemComponentsPanel({
   regionIds,
   canEdit,
   inputStyle,
+  onPickerOpenChange,
 }) {
   const [itemMasterList, setItemMasterList] = useState([]);
   const [pickerSearch, setPickerSearch] = useState("");
@@ -920,6 +947,37 @@ function ItemComponentsPanel({
   });
   const [saving, setSaving] = useState(false);
   const [panelMessage, setPanelMessage] = useState("");
+  const [openPickerIds, setOpenPickerIds] = useState(() => new Set());
+  const [hoverPreview, setHoverPreview] = useState(null);
+  const pickerLocked = openPickerIds.size > 0;
+  const onPickerOpenChangeRef = useRef(onPickerOpenChange);
+  onPickerOpenChangeRef.current = onPickerOpenChange;
+
+  const setPickerOpen = (id, isOpen) => {
+    setOpenPickerIds((prev) => {
+      if (isOpen === prev.has(id)) return prev;
+      const next = new Set(prev);
+      if (isOpen) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    onPickerOpenChangeRef.current?.(pickerLocked);
+  }, [pickerLocked]);
+
+  const lockedInputStyle = {
+    ...inputStyle,
+    background: "#f4f1ea",
+    color: "#8a8478",
+    cursor: "not-allowed",
+  };
+  const activeUnitStyle = {
+    ...inputStyle,
+    background: "#fff",
+    color: theme.colors.ink,
+  };
 
   const readonlyInputStyle = {
     ...inputStyle,
@@ -1207,6 +1265,7 @@ function ItemComponentsPanel({
               overflowX: "auto",
               border: `1px solid ${theme.colors.line}`,
               borderRadius: 10,
+              ...(pickerLocked ? { pointerEvents: "none", opacity: 0.55 } : {}),
             }}
           >
             <table className="wrms-table">
@@ -1287,14 +1346,22 @@ function ItemComponentsPanel({
                         placeholder="Select Item"
                         search={pickerSearch}
                         inputStyle={inputStyle}
-                        onLeave={() => setItemHoverTip(null)}
-                        onHover={(event, description) => {
-                          const text = fullDescriptionText(description);
+                        onOpenChange={(isOpen) => setPickerOpen("edit", isOpen)}
+                        onLeave={() => {
+                          setItemHoverTip(null);
+                          setHoverPreview(null);
+                        }}
+                        onHover={(event, option) => {
+                          const text = fullDescriptionText(option?.description);
                           setItemHoverTip(
                             text
                               ? { text, ...catalogTipPosition(event) }
                               : null,
                           );
+                          setHoverPreview({
+                            id: "edit",
+                            unit: String(option?.unit || ""),
+                          });
                         }}
                         onSelect={(componentItemId) =>
                           onFormChange({
@@ -1315,6 +1382,8 @@ function ItemComponentsPanel({
                             id: row.ItemId,
                             label: formatItemComponentLabel(row),
                             description: row.ItemDescription,
+                            unit: row.UnitShortName || "",
+                            disabled: !String(row.UnitShortName || "").trim(),
                           }))}
                       />
                     </Field>
@@ -1324,7 +1393,8 @@ function ItemComponentsPanel({
                         value={form.Description}
                         maxLength={ITEM_COMPONENT_DESC_MAX}
                         onChange={onFormChange}
-                        style={inputStyle}
+                        disabled={pickerLocked}
+                        style={pickerLocked ? lockedInputStyle : inputStyle}
                       />
                     </Field>
                     <Field label="Item Component" required>
@@ -1335,20 +1405,28 @@ function ItemComponentsPanel({
                         value={form.ItemComponent}
                         onChange={onFormChange}
                         required
-                        style={inputStyle}
+                        disabled={pickerLocked}
+                        style={pickerLocked ? lockedInputStyle : inputStyle}
                       />
                     </Field>
                     <Field label="Unit">
                       <input
                         value={
-                          selectableItems.find(
-                            (row) =>
-                              Number(row.ItemId) === Number(form.ComponentItemId),
-                          )?.UnitShortName || ""
+                          openPickerIds.has("edit") && hoverPreview?.id === "edit"
+                            ? hoverPreview.unit
+                            : selectableItems.find(
+                                (row) =>
+                                  Number(row.ItemId) ===
+                                  Number(form.ComponentItemId),
+                              )?.UnitShortName || ""
                         }
-                        disabled
                         readOnly
-                        style={readonlyInputStyle}
+                        disabled={!openPickerIds.has("edit")}
+                        style={
+                          openPickerIds.has("edit")
+                            ? activeUnitStyle
+                            : readonlyInputStyle
+                        }
                       />
                     </Field>
                     <Field label="Completed Rate">
@@ -1361,15 +1439,21 @@ function ItemComponentsPanel({
                         )}
                         disabled
                         readOnly
-                        style={readonlyInputStyle}
+                        style={
+                          pickerLocked ? lockedInputStyle : readonlyInputStyle
+                        }
                       />
                     </Field>
                   </div>
                   <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-                    <PrimaryButton disabled={saving}>
+                    <PrimaryButton disabled={saving || pickerLocked}>
                       {saving ? "Saving…" : "Update component"}
                     </PrimaryButton>
-                    <SecondaryButton type="button" onClick={resetEdit}>
+                    <SecondaryButton
+                      type="button"
+                      onClick={resetEdit}
+                      disabled={pickerLocked}
+                    >
                       Cancel edit
                     </SecondaryButton>
                   </div>
@@ -1427,14 +1511,26 @@ function ItemComponentsPanel({
                               placeholder="Select Item"
                               search={pickerSearch}
                               inputStyle={inputStyle}
-                              onLeave={() => setItemHoverTip(null)}
-                              onHover={(event, description) => {
-                                const text = fullDescriptionText(description);
+                              onOpenChange={(isOpen) =>
+                                setPickerOpen(row.key, isOpen)
+                              }
+                              onLeave={() => {
+                                setItemHoverTip(null);
+                                setHoverPreview(null);
+                              }}
+                              onHover={(event, option) => {
+                                const text = fullDescriptionText(
+                                  option?.description,
+                                );
                                 setItemHoverTip(
                                   text
                                     ? { text, ...catalogTipPosition(event) }
                                     : null,
                                 );
+                                setHoverPreview({
+                                  id: row.key,
+                                  unit: String(option?.unit || ""),
+                                });
                               }}
                               onSelect={(componentItemId) =>
                                 onDraftChange(
@@ -1457,6 +1553,10 @@ function ItemComponentsPanel({
                                   id: item.ItemId,
                                   label: formatItemComponentLabel(item),
                                   description: item.ItemDescription,
+                                  unit: item.UnitShortName || "",
+                                  disabled: !String(
+                                    item.UnitShortName || "",
+                                  ).trim(),
                                 }))}
                             />
                           </Field>
@@ -1471,7 +1571,8 @@ function ItemComponentsPanel({
                                   e.target.value,
                                 )
                               }
-                              style={inputStyle}
+                              disabled={pickerLocked}
+                              style={pickerLocked ? lockedInputStyle : inputStyle}
                             />
                           </Field>
                           <Field label="Item Component" required>
@@ -1486,16 +1587,26 @@ function ItemComponentsPanel({
                                   e.target.value,
                                 )
                               }
-                              style={inputStyle}
+                              disabled={pickerLocked}
+                              style={pickerLocked ? lockedInputStyle : inputStyle}
                             />
                           </Field>
                           <Field label="Unit">
                             <input
-                              value={selected?.UnitShortName || ""}
-                              disabled
+                              value={
+                                openPickerIds.has(row.key) &&
+                                hoverPreview?.id === row.key
+                                  ? hoverPreview.unit
+                                  : selected?.UnitShortName || ""
+                              }
                               readOnly
+                              disabled={!openPickerIds.has(row.key)}
                               placeholder="From selected item"
-                              style={readonlyInputStyle}
+                              style={
+                                openPickerIds.has(row.key)
+                                  ? activeUnitStyle
+                                  : readonlyInputStyle
+                              }
                             />
                           </Field>
                           <Field label="Completed Rate">
@@ -1504,11 +1615,14 @@ function ItemComponentsPanel({
                               disabled
                               readOnly
                               placeholder="From selected item"
-                              style={readonlyInputStyle}
+                              style={
+                                pickerLocked ? lockedInputStyle : readonlyInputStyle
+                              }
                             />
                           </Field>
                           <SecondaryButton
                             type="button"
+                            disabled={pickerLocked}
                             onClick={() =>
                               setDraftRows((prev) => {
                                 if (prev.length <= 1) {
@@ -1535,6 +1649,7 @@ function ItemComponentsPanel({
                   >
                     <SecondaryButton
                       type="button"
+                      disabled={pickerLocked}
                       onClick={() =>
                         setDraftRows((prev) => [
                           ...prev,
@@ -1544,7 +1659,7 @@ function ItemComponentsPanel({
                     >
                       + Add another item
                     </SecondaryButton>
-                    <PrimaryButton disabled={saving}>
+                    <PrimaryButton disabled={saving || pickerLocked}>
                       {saving
                         ? "Saving…"
                         : draftRows.filter(
@@ -3464,6 +3579,11 @@ export default function HomePage() {
   const [selectedMaterialItemId, setSelectedMaterialItemId] = useState(null);
   const [materialMasterList, setMaterialMasterList] = useState([]);
   const [materialPickerSearch, setMaterialPickerSearch] = useState("");
+  const [materialPickerOpenIds, setMaterialPickerOpenIds] = useState(
+    () => new Set(),
+  );
+  const [materialHoverUnit, setMaterialHoverUnit] = useState(null);
+  const [itemCatalogPickerOpen, setItemCatalogPickerOpen] = useState(false);
   const [materialComponentList, setMaterialComponentList] = useState([]);
   const [loadingMaterialComponents, setLoadingMaterialComponents] =
     useState(false);
@@ -4363,6 +4483,28 @@ export default function HomePage() {
         block: "start",
       });
     });
+  };
+
+  const materialPickerLocked = materialPickerOpenIds.size > 0;
+  const setMaterialPickerOpen = (id, isOpen) => {
+    setMaterialPickerOpenIds((prev) => {
+      if (isOpen === prev.has(id)) return prev;
+      const next = new Set(prev);
+      if (isOpen) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+  const materialLockedInputStyle = {
+    ...inputStyle,
+    background: "#f4f1ea",
+    color: "#8a8478",
+    cursor: "not-allowed",
+  };
+  const materialActiveUnitStyle = {
+    ...inputStyle,
+    background: "#fff",
+    color: theme.colors.ink,
   };
 
   const onMaterialComponentChange = (e) => {
@@ -8209,7 +8351,9 @@ export default function HomePage() {
                 color: theme.colors.accent,
               }}
             >
-              Masters {activeMasterMeta ? `· ${activeMasterMeta.label}` : ""}
+              {activeMaster === "items"
+                ? "Process Estimate"
+                : `Masters${activeMasterMeta ? ` · ${activeMasterMeta.label}` : ""}`}
             </div>
             <h1
               style={{
@@ -8218,11 +8362,14 @@ export default function HomePage() {
                 color: theme.colors.ink,
               }}
             >
-              Masters Management
+              {activeMaster === "items"
+                ? "Estimate Management"
+                : "Masters Management"}
             </h1>
             <p style={{ margin: 0, color: theme.colors.inkSoft, fontSize: 14 }}>
-              Manage the reference data behind your estimates — regions,
-              categories, items, works and sub-works.
+              {activeMaster === "items"
+                ? "The user needs to select Work, Sub Work, SSR Year / Region / Category / Sub Category to proceed with creating an abstract of items for the selected Sub Work."
+                : "Manage the reference data behind your estimates — regions, categories, items, works and sub-works."}
             </p>
           </div>
 
@@ -10946,7 +11093,15 @@ export default function HomePage() {
                 regionIds={componentCatalogRegionIds}
                 canEdit={canManageMaterials}
                 inputStyle={inputStyle}
+                onPickerOpenChange={setItemCatalogPickerOpen}
               />
+              <div
+                style={
+                  itemCatalogPickerOpen
+                    ? { pointerEvents: "none", opacity: 0.55 }
+                    : undefined
+                }
+              >
               <Card
                 eyebrow="MasterRAComponent"
                 title={
@@ -10970,6 +11125,9 @@ export default function HomePage() {
                         overflowX: "auto",
                         border: `1px solid ${theme.colors.line}`,
                         borderRadius: 10,
+                        ...(materialPickerLocked
+                          ? { pointerEvents: "none", opacity: 0.55 }
+                          : {}),
                       }}
                     >
                       <table className="wrms-table">
@@ -11064,14 +11222,26 @@ export default function HomePage() {
                                   placeholder="Select Material"
                                   search={materialPickerSearch}
                                   inputStyle={inputStyle}
-                                  onLeave={() => setCatalogHoverTip(null)}
-                                  onHover={(event, description) => {
-                                    const text = fullDescriptionText(description);
+                                  onOpenChange={(isOpen) =>
+                                    setMaterialPickerOpen("edit", isOpen)
+                                  }
+                                  onLeave={() => {
+                                    setCatalogHoverTip(null);
+                                    setMaterialHoverUnit(null);
+                                  }}
+                                  onHover={(event, option) => {
+                                    const text = fullDescriptionText(
+                                      option?.description,
+                                    );
                                     setCatalogHoverTip(
                                       text
                                         ? { text, ...catalogTipPosition(event) }
                                         : null,
                                     );
+                                    setMaterialHoverUnit({
+                                      id: "edit",
+                                      unit: String(option?.unit || ""),
+                                    });
                                   }}
                                   onSelect={(materialId) =>
                                     onMaterialComponentChange({
@@ -11097,6 +11267,10 @@ export default function HomePage() {
                                       id: m.MaterialId,
                                       label: formatMaterialLabel(m),
                                       description: m.MaterialDescription,
+                                      unit: m.MaterialLocalUnitShortName || "",
+                                      disabled: !String(
+                                        m.MaterialLocalUnitShortName || "",
+                                      ).trim(),
                                     }))}
                                 />
                               </Field>
@@ -11106,7 +11280,12 @@ export default function HomePage() {
                                   value={materialComponentForm.Description}
                                   maxLength={MATERIAL_COMPONENT_DESC_MAX}
                                   onChange={onMaterialComponentChange}
-                                  style={inputStyle}
+                                  disabled={materialPickerLocked}
+                                  style={
+                                    materialPickerLocked
+                                      ? materialLockedInputStyle
+                                      : inputStyle
+                                  }
                                 />
                               </Field>
                               <Field label="Material Component" required>
@@ -11119,28 +11298,40 @@ export default function HomePage() {
                                   }
                                   onChange={onMaterialComponentChange}
                                   required
-                                  style={inputStyle}
+                                  disabled={materialPickerLocked}
+                                  style={
+                                    materialPickerLocked
+                                      ? materialLockedInputStyle
+                                      : inputStyle
+                                  }
                                 />
                               </Field>
                               <Field label="Local Unit">
                                 <input
                                   value={
-                                    materialMasterList.find(
-                                      (m) =>
-                                        Number(m.MaterialId) ===
-                                        Number(
-                                          materialComponentForm.MaterialId,
-                                        ),
-                                    )?.MaterialLocalUnitShortName || ""
+                                    materialPickerOpenIds.has("edit") &&
+                                    materialHoverUnit?.id === "edit"
+                                      ? materialHoverUnit.unit
+                                      : materialMasterList.find(
+                                          (m) =>
+                                            Number(m.MaterialId) ===
+                                            Number(
+                                              materialComponentForm.MaterialId,
+                                            ),
+                                        )?.MaterialLocalUnitShortName || ""
                                   }
-                                  disabled
                                   readOnly
-                                  style={{
-                                    ...inputStyle,
-                                    background: "#EEF1F4",
-                                    color: theme.colors.inkSoft,
-                                    cursor: "not-allowed",
-                                  }}
+                                  disabled={!materialPickerOpenIds.has("edit")}
+                                  style={
+                                    materialPickerOpenIds.has("edit")
+                                      ? materialActiveUnitStyle
+                                      : {
+                                          ...inputStyle,
+                                          background: "#EEF1F4",
+                                          color: theme.colors.inkSoft,
+                                          cursor: "not-allowed",
+                                        }
+                                  }
                                 />
                               </Field>
                               <Field label="Material Rate">
@@ -11156,12 +11347,16 @@ export default function HomePage() {
                                   )}
                                   disabled
                                   readOnly
-                                  style={{
-                                    ...inputStyle,
-                                    background: "#EEF1F4",
-                                    color: theme.colors.inkSoft,
-                                    cursor: "not-allowed",
-                                  }}
+                                  style={
+                                    materialPickerLocked
+                                      ? materialLockedInputStyle
+                                      : {
+                                          ...inputStyle,
+                                          background: "#EEF1F4",
+                                          color: theme.colors.inkSoft,
+                                          cursor: "not-allowed",
+                                        }
+                                  }
                                 />
                               </Field>
                             </div>
@@ -11173,7 +11368,9 @@ export default function HomePage() {
                               }}
                             >
                               <PrimaryButton
-                                disabled={savingMaterialComponent}
+                                disabled={
+                                  savingMaterialComponent || materialPickerLocked
+                                }
                               >
                                 {savingMaterialComponent
                                   ? "Saving…"
@@ -11182,6 +11379,7 @@ export default function HomePage() {
                               <SecondaryButton
                                 type="button"
                                 onClick={resetMaterialComponentEdit}
+                                disabled={materialPickerLocked}
                               >
                                 Cancel edit
                               </SecondaryButton>
@@ -11258,10 +11456,17 @@ export default function HomePage() {
                                         placeholder="Select Material"
                                         search={materialPickerSearch}
                                         inputStyle={inputStyle}
-                                        onLeave={() => setCatalogHoverTip(null)}
-                                        onHover={(event, description) => {
-                                          const text =
-                                            fullDescriptionText(description);
+                                        onOpenChange={(isOpen) =>
+                                          setMaterialPickerOpen(row.key, isOpen)
+                                        }
+                                        onLeave={() => {
+                                          setCatalogHoverTip(null);
+                                          setMaterialHoverUnit(null);
+                                        }}
+                                        onHover={(event, option) => {
+                                          const text = fullDescriptionText(
+                                            option?.description,
+                                          );
                                           setCatalogHoverTip(
                                             text
                                               ? {
@@ -11270,6 +11475,10 @@ export default function HomePage() {
                                                 }
                                               : null,
                                           );
+                                          setMaterialHoverUnit({
+                                            id: row.key,
+                                            unit: String(option?.unit || ""),
+                                          });
                                         }}
                                         onSelect={(materialId) =>
                                           onMaterialDraftChange(
@@ -11292,6 +11501,11 @@ export default function HomePage() {
                                             id: m.MaterialId,
                                             label: formatMaterialLabel(m),
                                             description: m.MaterialDescription,
+                                            unit:
+                                              m.MaterialLocalUnitShortName || "",
+                                            disabled: !String(
+                                              m.MaterialLocalUnitShortName || "",
+                                            ).trim(),
                                           }))}
                                       />
                                     </Field>
@@ -11306,7 +11520,12 @@ export default function HomePage() {
                                             e.target.value,
                                           )
                                         }
-                                        style={inputStyle}
+                                        disabled={materialPickerLocked}
+                                        style={
+                                          materialPickerLocked
+                                            ? materialLockedInputStyle
+                                            : inputStyle
+                                        }
                                       />
                                     </Field>
                                     <Field
@@ -11324,21 +11543,37 @@ export default function HomePage() {
                                             e.target.value,
                                           )
                                         }
-                                        style={inputStyle}
+                                        disabled={materialPickerLocked}
+                                        style={
+                                          materialPickerLocked
+                                            ? materialLockedInputStyle
+                                            : inputStyle
+                                        }
                                       />
                                     </Field>
                                     <Field label="Local Unit">
                                       <input
-                                        value={unitName}
-                                        disabled
+                                        value={
+                                          materialPickerOpenIds.has(row.key) &&
+                                          materialHoverUnit?.id === row.key
+                                            ? materialHoverUnit.unit
+                                            : unitName
+                                        }
                                         readOnly
+                                        disabled={
+                                          !materialPickerOpenIds.has(row.key)
+                                        }
                                         placeholder="From selected material"
-                                        style={{
-                                          ...inputStyle,
-                                          background: "#EEF1F4",
-                                          color: theme.colors.inkSoft,
-                                          cursor: "not-allowed",
-                                        }}
+                                        style={
+                                          materialPickerOpenIds.has(row.key)
+                                            ? materialActiveUnitStyle
+                                            : {
+                                                ...inputStyle,
+                                                background: "#EEF1F4",
+                                                color: theme.colors.inkSoft,
+                                                cursor: "not-allowed",
+                                              }
+                                        }
                                       />
                                     </Field>
                                     <Field label="Material Rate">
@@ -11347,16 +11582,21 @@ export default function HomePage() {
                                         disabled
                                         readOnly
                                         placeholder="From selected material"
-                                        style={{
-                                          ...inputStyle,
-                                          background: "#EEF1F4",
-                                          color: theme.colors.inkSoft,
-                                          cursor: "not-allowed",
-                                        }}
+                                        style={
+                                          materialPickerLocked
+                                            ? materialLockedInputStyle
+                                            : {
+                                                ...inputStyle,
+                                                background: "#EEF1F4",
+                                                color: theme.colors.inkSoft,
+                                                cursor: "not-allowed",
+                                              }
+                                        }
                                       />
                                     </Field>
                                     <SecondaryButton
                                       type="button"
+                                      disabled={materialPickerLocked}
                                       onClick={() =>
                                         removeMaterialDraftRow(row.key)
                                       }
@@ -11378,12 +11618,15 @@ export default function HomePage() {
                             >
                               <SecondaryButton
                                 type="button"
+                                disabled={materialPickerLocked}
                                 onClick={addMaterialDraftRow}
                               >
                                 + Add another material
                               </SecondaryButton>
                               <PrimaryButton
-                                disabled={savingMaterialComponent}
+                                disabled={
+                                  savingMaterialComponent || materialPickerLocked
+                                }
                               >
                                 {savingMaterialComponent
                                   ? "Saving…"
@@ -11404,6 +11647,14 @@ export default function HomePage() {
                 )}
               </Card>
               </div>
+              </div>
+              <div
+                style={
+                  itemCatalogPickerOpen || materialPickerLocked
+                    ? { pointerEvents: "none", opacity: 0.55 }
+                    : undefined
+                }
+              >
               <LabourComponentsPanel
                 apiBase={API_BASE}
                 userId={currentUser?.UserId}
@@ -11431,6 +11682,7 @@ export default function HomePage() {
                 canEdit={canManageMaterials}
                 inputStyle={inputStyle}
               />
+              </div>
             </>
           )}
 
@@ -11659,7 +11911,7 @@ export default function HomePage() {
                       alignItems: "center",
                     }}
                   >
-                    <PrimaryButton>View</PrimaryButton>
+                    <PrimaryButton>View ALL Items</PrimaryButton>
                     <Button
                       type="button"
                       color="primary"
@@ -11670,8 +11922,53 @@ export default function HomePage() {
                         textTransform: "none",
                       }}
                     >
-                      View Checked Items
+                      View Selected Items
                     </Button>
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant="solid"
+                      onClick={() => handleGenerateEstimate()}
+                      disabled={!selectedProjectId || loadingEstimate}
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                      title={
+                        !selectedProjectId
+                          ? "Select Work first"
+                          : "Generate Estimate"
+                      }
+                    >
+                      {loadingEstimate ? "Generating…" : "Generate Estimate"}
+                    </Button>
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant={measurementGroupsOpen ? "soft" : "solid"}
+                      disabled={Number(selectedSubWorkId) <= 0}
+                      onClick={() => {
+                        if (Number(selectedSubWorkId) <= 0) return;
+                        window.alert("User Can Add New Measurement Groups here");
+                        if (measurementGroupsOpen) {
+                          setMeasurementGroupsReload((n) => n + 1);
+                          return;
+                        }
+                        setMeasurementGroupsOpen(true);
+                      }}
+                      title={
+                        Number(selectedSubWorkId) > 0
+                          ? "Add Measurement Groups"
+                          : "Select Sub Work first"
+                      }
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Add Measurement Groups
+                    </Button>
+                    <div style={{ marginLeft: "auto" }}>
                     <Dropdown>
                       <MenuButton
                         type="button"
@@ -11685,7 +11982,7 @@ export default function HomePage() {
                         Reports
                       </MenuButton>
                       <Menu
-                        placement="bottom-start"
+                        placement="bottom-end"
                         sx={{
                           minWidth: 240,
                           zIndex: 1300,
@@ -11734,50 +12031,7 @@ export default function HomePage() {
                         </MenuItem>
                       </Menu>
                     </Dropdown>
-                    <Button
-                      type="button"
-                      color="primary"
-                      variant="solid"
-                      onClick={() => handleGenerateEstimate()}
-                      disabled={!selectedProjectId || loadingEstimate}
-                      sx={{
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                      title={
-                        !selectedProjectId
-                          ? "Select Work first"
-                          : "Generate Estimate"
-                      }
-                    >
-                      {loadingEstimate ? "Generating…" : "Generate Estimate"}
-                    </Button>
-                    <Button
-                      type="button"
-                      color="primary"
-                      variant={measurementGroupsOpen ? "soft" : "solid"}
-                      disabled={Number(selectedSubWorkId) <= 0}
-                      onClick={() => {
-                        if (Number(selectedSubWorkId) <= 0) return;
-                        window.alert("User Can Add New Measurement Groups here");
-                        if (measurementGroupsOpen) {
-                          setMeasurementGroupsReload((n) => n + 1);
-                          return;
-                        }
-                        setMeasurementGroupsOpen(true);
-                      }}
-                      title={
-                        Number(selectedSubWorkId) > 0
-                          ? "Add Measurement Groups"
-                          : "Select Sub Work first"
-                      }
-                      sx={{
-                        fontSize: 13,
-                        textTransform: "none",
-                      }}
-                    >
-                      Add Measurement Groups
-                    </Button>
+                    </div>
                   </div>
                 </FormShell>
                 {measurementGroupsOpen &&
@@ -12366,22 +12620,22 @@ export default function HomePage() {
                       sx={{
                         fontWeight: 600,
                         fontSize: 13,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.04em",
+                        textTransform: "none",
+                        letterSpacing: "0.01em",
                       }}
                     >
-                      SSR Items List
+                      View ALL Items
                     </Tab>
                     <Tab
                       value={1}
                       sx={{
                         fontWeight: 600,
                         fontSize: 13,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.04em",
+                        textTransform: "none",
+                        letterSpacing: "0.01em",
                       }}
                     >
-                      Checked Items List
+                      View Selected Items AND Enter Measurement
                     </Tab>
                   </TabList>
 

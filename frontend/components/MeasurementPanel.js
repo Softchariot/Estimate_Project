@@ -1676,11 +1676,9 @@ function MeasurementPanel({
             marginBottom: 10,
           }}
         >
-          Paste from Excel: Description | No | L | B | H. Use{" "}
-          <code>Ctrl+`</code> (Show Formulas) so arithmetic / ROUND formulas
-          paste as text. Cell references (e.g. G4863) paste as their calculated
-          value when Excel includes it. Hover a cell for full text. Quantity =
-          No × L × B × H.
+          User can enter Measurements OR Paste from Excel ( Description | No |
+          L | B | H ). Use Show Formula Option in Excel to Paste Values with
+          Formula. Values with Cell Reference cannot be pasted.
           {reordering ? " Updating sequence…" : ""}
         </div>
 
