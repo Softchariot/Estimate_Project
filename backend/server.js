@@ -5007,10 +5007,36 @@ app.get("/api/generate-report", async (req, res) => {
       return negative ? `(-) ${amount}` : amount;
     };
 
+    const isRateFormulaLine = (line) =>
+      line.startsWith("Final Rate = ") && line.includes("*");
+
+    const rateFormulaParts = (line) => {
+      const body = line.slice("Final Rate = ".length);
+      const eq = body.lastIndexOf(" = ");
+      const expr = (eq === -1 ? body : body.slice(0, eq)).trim();
+      const result = eq === -1 ? "" : body.slice(eq + 3).trim();
+      const star = expr.indexOf("*");
+      const basic = star === -1 ? expr : expr.slice(0, star).trim();
+      const factor = star === -1 ? "" : expr.slice(star + 1).trim();
+      return {
+        label: `Final Rate = ₹  ${basic} * ${factor} =`,
+        value: `₹  ${result}`,
+      };
+    };
+
     const measureC2RateBlock = (rateString, width) => {
       const labelWidth = Math.max(40, width - c2ValueWidth - 6);
       let height = 0;
       for (const line of c2RateLines(rateString)) {
+        if (isRateFormulaLine(line)) {
+          const formula = rateFormulaParts(line);
+          doc.font(rupeeFonts.regular).fontSize(9);
+          height += Math.max(
+            11,
+            doc.heightOfString(formula.label, { width: labelWidth }),
+          );
+          continue;
+        }
         const eq = line.lastIndexOf(" = ");
         if (eq === -1) {
           doc.font("Helvetica-Bold").fontSize(9);
@@ -5031,6 +5057,22 @@ app.get("/api/generate-report", async (req, res) => {
       const labelWidth = Math.max(40, width - c2ValueWidth - 6);
       let cursor = y;
       for (const line of c2RateLines(rateString)) {
+        if (isRateFormulaLine(line)) {
+          const formula = rateFormulaParts(line);
+          doc.font(rupeeFonts.regular).fontSize(9);
+          const labelHeight = Math.max(
+            11,
+            doc.heightOfString(formula.label, { width: labelWidth }),
+          );
+          doc.text(formula.label, x, cursor, { width: labelWidth });
+          doc.text(formula.value, x + width - c2ValueWidth, cursor, {
+            width: c2ValueWidth,
+            align: "right",
+            lineBreak: false,
+          });
+          cursor += labelHeight;
+          continue;
+        }
         const eq = line.lastIndexOf(" = ");
         if (eq === -1) {
           doc.font("Helvetica-Bold").fontSize(9);
@@ -5040,14 +5082,18 @@ app.get("/api/generate-report", async (req, res) => {
           continue;
         }
         const label = line.slice(0, eq).trim();
-        const valueText = c2ValueText(line.slice(eq + 3));
+        const plainFactor =
+          String(rateString).startsWith("C3:") && label !== "Basic Rate";
+        const valueText = plainFactor
+          ? line.slice(eq + 3).trim()
+          : c2ValueText(line.slice(eq + 3));
         doc.font("Helvetica").fontSize(9);
         const labelHeight = Math.max(
           11,
           doc.heightOfString(label, { width: labelWidth }),
         );
         doc.text(label, x, cursor, { width: labelWidth });
-        doc.font(rupeeFonts.regular).fontSize(9);
+        doc.font(plainFactor ? "Helvetica" : rupeeFonts.regular).fontSize(9);
         doc.text(valueText, x + width - c2ValueWidth, cursor, {
           width: c2ValueWidth,
           align: "right",
@@ -5151,7 +5197,9 @@ app.get("/api/generate-report", async (req, res) => {
           : item.DisplayItemNo || item.ItemNumber || "";
         const rateString = String(item.RateString || "").trim();
         const c2Aligned =
-          !isParent && rateString.startsWith("C2: Final Rate Calculation");
+          !isParent &&
+          (rateString.startsWith("C2: Final Rate Calculation") ||
+            rateString.startsWith("C3: Final Rate Calculation"));
         const baseDesc = isGroupLine
           ? [groupLabel, String(item.GroupName || "Measurement Group").trim()]
               .filter(Boolean)
@@ -6927,24 +6975,30 @@ app.get("/api/generate-estimate", async (req, res) => {
       return res.status(404).json({ message: "Work not found." });
     }
 
-    // Distinct SSR regions from WorkAbstract checked items
-    // PLUS any region previously saved in WorkStandardAddition for this Work
+    // Drop saved standard additions for regions that no longer have abstract items.
+    await pool.query(
+      `DELETE FROM "WorkStandardAddition" wsa
+       WHERE wsa."MasterWorkId" = $1
+         AND NOT EXISTS (
+           SELECT 1
+           FROM "WorkAbstract" wa
+           INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+           WHERE wa."WorkId" = wsa."MasterWorkId"
+             AND i."RegionId" = wsa."SSRRegionId"
+         )`,
+      [Number(workId)],
+    );
+
+    // Distinct SSR regions from WorkAbstract checked items only.
     const regionResult = await pool.query(
       `
-      SELECT DISTINCT x."SSRRegionId", r."SSRRegionName", r."SSRRegionShortName"
-      FROM (
-        SELECT DISTINCT i."RegionId" AS "SSRRegionId"
-        FROM "WorkAbstract" wa
-        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
-        WHERE wa."WorkId" = $1
-          AND i."RegionId" IS NOT NULL
-        UNION
-        SELECT DISTINCT wsa."SSRRegionId"
-        FROM "WorkStandardAddition" wsa
-        WHERE wsa."MasterWorkId" = $1
-          AND wsa."SSRRegionId" IS NOT NULL
-      ) x
-      INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = x."SSRRegionId"
+      SELECT DISTINCT i."RegionId" AS "SSRRegionId",
+             r."SSRRegionName", r."SSRRegionShortName"
+      FROM "WorkAbstract" wa
+      INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+      INNER JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+      WHERE wa."WorkId" = $1
+        AND i."RegionId" IS NOT NULL
       ORDER BY r."SSRRegionName" ASC
       `,
       [Number(workId)],
@@ -7722,10 +7776,21 @@ app.post("/api/populate-work-materials", async (req, res) => {
           } else if (regionId === 2) {
             if (!applyLabourCess) {
               finalRate = baseCompletedRate * percentage;
-              rateString = withCondition(
-                "C3",
-                `Final Rate = (${formatNum(baseCompletedRate)} * ${formatNum(percentage)})`,
-              );
+              const money2 = (n) =>
+                Number(n || 0).toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                });
+              const factorName =
+                String(addition.Description || "")
+                  .replace(/\s+/g, " ")
+                  .trim() || "Multiplying Factor";
+              rateString = [
+                "C3: Final Rate Calculation",
+                `Basic Rate = ${money2(baseCompletedRate)}`,
+                `${factorName} = ${formatNum(percentage)}`,
+                `Final Rate = ${money2(baseCompletedRate)} * ${formatNum(percentage)} = ${money2(finalRate)}`,
+              ].join("\n");
             } else {
               finalRate =
                 (baseCompletedRate - baseCompletedRate * (labourCess / 100)) *

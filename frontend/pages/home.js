@@ -12105,7 +12105,13 @@ export default function HomePage() {
                                     }}
                                   />
                                 </Field>
-                                <Field label="Description + Percentage">
+                                <Field
+                                  label={
+                                    Number(region.SSRRegionId) === 2
+                                      ? "Description + Factor"
+                                      : "Description + Percentage"
+                                  }
+                                >
                                   <select
                                     value={region.selectedAdditionId || ""}
                                     onChange={(e) =>
@@ -12127,7 +12133,11 @@ export default function HomePage() {
                                         {opt.Description}
                                         {opt.Percentage !== null &&
                                         opt.Percentage !== undefined
-                                          ? ` — ${opt.Percentage}%`
+                                          ? ` — ${opt.Percentage}${
+                                              Number(region.SSRRegionId) === 2
+                                                ? ""
+                                                : "%"
+                                            }`
                                           : ""}
                                         {opt.Year ? ` (${opt.Year})` : ""}
                                       </option>
