@@ -1871,6 +1871,9 @@ app.get("/api/load-works", async (req, res) => {
   const onlyOwned =
     String(ownerOnly || "").toLowerCase() === "true" ||
     String(ownerOnly || "") === "1";
+  const organizationScope =
+    String(req.query.organizationScope || "").toLowerCase() === "true" ||
+    String(req.query.organizationScope || "") === "1";
   const targetUserId =
     filterUserId !== undefined &&
     filterUserId !== null &&
@@ -1898,6 +1901,44 @@ app.get("/api/load-works", async (req, res) => {
 
     const notDeletedClause = `COALESCE(w."MarkForDeletion", false) = false`;
     let result;
+
+    // Estimation dropdown for OrgAdmin: every work prepared by every user
+    // in the admin's organization. Organization comes from MasterUser, not
+    // from the request.
+    if (organizationScope) {
+      const actorResult = await pool.query(
+        `SELECT u."UserId", u."OrganizationId", uc."UserCategoryName"
+         FROM "MasterUser" u
+         INNER JOIN "MasterUserCategory" uc
+           ON uc."UserCategoryId" = u."UserCategoryId"
+         WHERE u."UserId" = $1
+           AND COALESCE(u."MarkForDeletion", false) = false`,
+        [Number(userId)],
+      );
+      const actor = actorResult.rows[0];
+      const actorCategory = String(actor?.UserCategoryName || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "");
+      const actorOrgId = Number(actor?.OrganizationId);
+      if (
+        actor &&
+        actorCategory === "orgadmin" &&
+        Number.isFinite(actorOrgId) &&
+        actorOrgId > 0
+      ) {
+        result = await pool.query(
+          `${selectSql}
+           WHERE u."OrganizationId" = $1
+             AND ${notDeletedClause}
+           ORDER BY u."UserName" ASC NULLS LAST,
+                    w."WorkName" ASC,
+                    w."MasterWorkId" ASC`,
+          [actorOrgId],
+        );
+        return res.status(200).send({ data: result.rows });
+      }
+    }
 
     // Estimation / own-works lists: always restrict to the logged-in user,
     // regardless of SuperAdmin / OrgAdmin privileges.
@@ -6269,7 +6310,7 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         })
         .filter((v) => v !== "" && v !== "0");
       if (parts.length === 0) return "";
-      return parts.join("*");
+      return parts.join(" x ");
     };
 
     // ── Group rows into SubWork -> Item -> Measurement[] ──
@@ -6338,19 +6379,39 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       `attachment; filename="${measurementFileName}"`,
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
+    // Filing margins: left +20% and right +10% from the 40pt page margin.
+    const leftMargin = 40 * 1.2;
+    const rightMargin = 40 * 1.1;
+    const doc = new PDFDocument({
+      size: "A4",
+      margins: { top: 40, bottom: 40, left: leftMargin, right: rightMargin },
+      bufferPages: true,
+    });
     doc.pipe(res);
 
-    const colX = { desc: 40, measurement: 272, qty: 490 };
-    const descWidth = 555 - colX.desc; // full-width description line
+    const contentRight = doc.page.width - rightMargin;
+    const baseLeft = 40;
+    const baseRight = 555;
+    const baseSpan = baseRight - baseLeft;
+    const contentSpan = contentRight - leftMargin;
+    const scaleX = (x) => leftMargin + ((x - baseLeft) / baseSpan) * contentSpan;
+    const colX = {
+      desc: scaleX(40),
+      measurement: scaleX(230),
+      qty: scaleX(490),
+    };
+    const descWidth = contentRight - colX.desc; // full-width description line
     const measurementColWidth = colX.qty - colX.measurement - 8;
-    const measurementQtyWidth = 555 - colX.qty;
+    const measurementQtyWidth = contentRight - colX.qty;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
 
     // Title / name of work — SSR year is shown per item, not in the header.
     const drawPageHeader = () => {
       doc.font("Helvetica-Bold").fontSize(14);
-      doc.text("Measurement Sheet", 0, 40, { align: "center" });
+      doc.text("Measurement Sheet", 0, 40, {
+        width: doc.page.width,
+        align: "center",
+      });
       doc.moveDown(1.2);
       doc.font("Helvetica-Bold").fontSize(10);
       doc.text(`Name of Work :   ${projectName}`, colX.desc, doc.y, {
@@ -6365,9 +6426,10 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         `${groupIdx + 1}. NAME OF SUB WORK -- ${subWorkName}`,
         colX.desc,
         doc.y,
+        { width: descWidth },
       );
       doc.moveDown(0.5);
-      doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
+      doc.moveTo(leftMargin, doc.y).lineTo(contentRight, doc.y).stroke();
       doc.moveDown(0.3);
       const tableTop = doc.y;
       doc.text("Item No. & Description", colX.desc, tableTop);
@@ -6381,12 +6443,12 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       });
       doc.moveDown(0.4);
       doc.font("Helvetica").fontSize(8);
-      doc.text("No.   L.   B.   D.", colX.measurement, doc.y, {
+      doc.text(["No.", "L.", "B.", "D."].join(" ".repeat(12)), colX.measurement, doc.y, {
         width: measurementColWidth,
         align: "left",
       });
       doc.moveDown(0.4);
-      doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
+      doc.moveTo(leftMargin, doc.y).lineTo(contentRight, doc.y).stroke();
       doc.moveDown(0.5);
     };
 
@@ -6394,6 +6456,12 @@ app.get("/api/generate-measurement-report", async (req, res) => {
       if (groupIdx > 0) doc.addPage();
       drawPageHeader();
       drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
+
+      const startMeasurementPage = () => {
+        doc.addPage();
+        drawPageHeader();
+        drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
+      };
 
       group.items.forEach((item, itemIdx) => {
         const refParts = [];
@@ -6408,14 +6476,9 @@ app.get("/api/generate-measurement-report", async (req, res) => {
         const descriptionWithNumber = `${item.itemDescription || ""}${numberSuffix}${ssrYearSuffix}`;
         const itemLabel = `ITEM NO. : ${itemIdx + 1}  ${descriptionWithNumber}`;
         const leftDescWidth = colX.measurement - colX.desc - 10;
-
-        doc.font("Helvetica").fontSize(9);
-        const itemLabelHeight = doc.heightOfString(itemLabel, {
-          width: leftDescWidth,
-        });
-
         const lineHeight = 14;
-        const measurementBlockHeight = item.measurements.reduce((sum, m) => {
+
+        const measurementRowHeight = (m) => {
           const descText = (m.description || "").trim();
           doc.font("Helvetica").fontSize(9);
           const leftH = descText
@@ -6424,21 +6487,21 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           const exprH = doc.heightOfString(m.expressionText || "", {
             width: measurementColWidth,
           });
-          return sum + Math.max(leftH, exprH, lineHeight) + 6;
-        }, 0);
-        const totalLineHeight = lineHeight;
-        const blockPadding = 14;
+          return Math.max(leftH, exprH, lineHeight) + 6;
+        };
 
-        const blockHeight =
-          itemLabelHeight +
-          measurementBlockHeight +
-          totalLineHeight +
-          blockPadding;
+        doc.font("Helvetica").fontSize(9);
+        const itemLabelHeight = doc.heightOfString(itemLabel, {
+          width: descWidth,
+        });
+        const firstRowHeight = item.measurements.length
+          ? measurementRowHeight(item.measurements[0])
+          : lineHeight;
 
-        if (doc.y + blockHeight > pageBottom - 30) {
-          doc.addPage();
-          drawPageHeader();
-          drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
+        // Start the item here when the heading and first row fit.
+        // Later rows continue on the next page.
+        if (doc.y + itemLabelHeight + firstRowHeight + 8 > pageBottom - 20) {
+          startMeasurementPage();
         }
 
         // ── Item heading on the left ──
@@ -6447,7 +6510,9 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           continued: true,
         });
         doc.font("Helvetica").fontSize(9);
-        doc.text(`  ${descriptionWithNumber}`, { width: leftDescWidth });
+        doc.text(`  ${descriptionWithNumber}`, {
+          width: Math.max(80, contentRight - doc.x),
+        });
         doc.moveDown(0.4);
 
         // ── Per row: Description (left) | Measurements (center) | Quantity (right) ──
@@ -6456,18 +6521,20 @@ app.get("/api/generate-measurement-report", async (req, res) => {
           if (m.quantity != null && isFinite(m.quantity)) {
             totalQuantity += m.quantity;
           }
+          const rowH = measurementRowHeight(m);
+          if (doc.y + rowH > pageBottom - 20) {
+            startMeasurementPage();
+            doc.font("Helvetica-Bold").fontSize(9);
+            doc.text(`ITEM NO. : ${itemIdx + 1} (contd.)`, colX.desc, doc.y, {
+              width: leftDescWidth,
+            });
+            doc.moveDown(0.3);
+          }
+
           const descText = (m.description || "").trim();
           const rowTop = doc.y;
 
           doc.font("Helvetica").fontSize(9);
-          const leftH = descText
-            ? doc.heightOfString(descText, { width: leftDescWidth })
-            : 0;
-          const exprH = doc.heightOfString(m.expressionText || "", {
-            width: measurementColWidth,
-          });
-          const rowH = Math.max(leftH, exprH, lineHeight);
-
           if (descText) {
             doc.text(descText, colX.desc, rowTop, { width: leftDescWidth });
           }
@@ -6486,11 +6553,14 @@ app.get("/api/generate-measurement-report", async (req, res) => {
             },
           );
 
-          doc.y = Math.max(doc.y, rowTop + rowH);
+          doc.y = Math.max(doc.y, rowTop + rowH - 6);
           doc.moveDown(0.45);
         });
 
         // ── Total Quantity line ──
+        if (doc.y + lineHeight > pageBottom - 20) {
+          startMeasurementPage();
+        }
         doc.font("Helvetica-Bold").fontSize(9);
         const totalY = doc.y;
         doc.text("Total Quantity", colX.measurement, totalY, {

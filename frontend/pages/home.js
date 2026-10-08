@@ -3719,6 +3719,7 @@ export default function HomePage() {
 
   const [workForm, setWorkForm] = useState(initialWorkForm);
   const [worksList, setWorksList] = useState([]);
+  const [estimationWorksList, setEstimationWorksList] = useState([]);
   const [workMasterList, setWorkMasterList] = useState([]);
   const [loadingWorks, setLoadingWorks] = useState(false);
   const [savingWork, setSavingWork] = useState(false);
@@ -3851,6 +3852,7 @@ export default function HomePage() {
       currentUser || JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
     if (!user?.UserId) {
       setWorksList([]);
+      setEstimationWorksList([]);
       return;
     }
     setLoadingWorks(true);
@@ -3863,10 +3865,25 @@ export default function HomePage() {
           ownerOnly: true,
         },
       });
-      if (res.status === 200) setWorksList(res.data.data || []);
+      const ownWorks = res.status === 200 ? res.data.data || [] : [];
+      setWorksList(ownWorks);
+      if (isOrgAdminUser(user)) {
+        const orgRes = await axios.get(`${API_BASE}/api/load-works`, {
+          params: {
+            userId: user.UserId,
+            organizationScope: true,
+          },
+        });
+        setEstimationWorksList(
+          orgRes.status === 200 ? orgRes.data.data || [] : ownWorks,
+        );
+      } else {
+        setEstimationWorksList(ownWorks);
+      }
     } catch (error) {
       console.error(error);
       setWorksList([]);
+      setEstimationWorksList([]);
       setMessage(`Work load failed: ${error.message}`);
     } finally {
       setLoadingWorks(false);
@@ -11728,12 +11745,15 @@ export default function HomePage() {
                         style={inputStyle}
                       >
                         <option value="">Select Work</option>
-                        {worksList.map((work) => (
+                        {estimationWorksList.map((work) => (
                           <option
                             key={work.MasterWorkId}
                             value={work.MasterWorkId}
                           >
                             {work.WorkName}
+                            {isOrgAdmin && work.UserName
+                              ? ` (${work.UserName})`
+                              : ""}
                           </option>
                         ))}
                       </select>
@@ -11974,6 +11994,12 @@ export default function HomePage() {
                         type="button"
                         color="primary"
                         variant="solid"
+                        disabled={!selectedProjectId}
+                        title={
+                          !selectedProjectId
+                            ? "Select Work first"
+                            : "Reports"
+                        }
                         sx={{
                           fontSize: 13,
                           textTransform: "none",
@@ -14369,7 +14395,7 @@ export default function HomePage() {
         open={generateReportModalOpen}
         onClose={() => setGenerateReportModalOpen(false)}
         API_BASE={API_BASE}
-        works={worksList}
+        works={estimationWorksList}
         defaultWorkId={selectedProjectId}
         reportType={generateReportType}
       />
