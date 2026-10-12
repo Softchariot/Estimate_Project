@@ -6305,6 +6305,56 @@ export default function HomePage() {
     }
   };
 
+  const handleGenerateMaterialConsumptionReport = async () => {
+    clearEstimationOutputs();
+    if (!selectedProjectId) {
+      alert("Please Select Work.");
+      return;
+    }
+
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/generate-material-consumption-report`,
+        {
+          params: { workId: selectedProjectId },
+          responseType: "blob",
+        },
+      );
+
+      const disposition = res.headers["content-disposition"];
+      let filename = `Work-${selectedProjectId}-MaterialConsumption.pdf`;
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) filename = match[1];
+      }
+
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate material consumption report:", err);
+      let message = "Failed to generate the Material Consumption report.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) message = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        message = err.response.data.message;
+      }
+      alert(message);
+    }
+  };
+
   const clearEstimatePanel = () => {
     setEstimatePanelOpen(false);
     setEstimateWorkName("");
@@ -12054,6 +12104,18 @@ export default function HomePage() {
                           }
                         >
                           Lead Statement
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() =>
+                            handleGenerateMaterialConsumptionReport()
+                          }
+                          title={
+                            !selectedProjectId
+                              ? "Please Select Work"
+                              : "Material Consumption"
+                          }
+                        >
+                          Material Consumption
                         </MenuItem>
                       </Menu>
                     </Dropdown>

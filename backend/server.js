@@ -6232,6 +6232,360 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
   }
 });
 
+/**
+ * Material Consumption Statement.
+ * Materials come from WorkMaterial for the selected work. For each material,
+ * every WorkAbstract item on that work is checked against MasterMaterialComponent.
+ * Matching rows use that component as the rate of consumption.
+ */
+app.get("/api/generate-material-consumption-report", async (req, res) => {
+  const workId = Number(req.query.workId || req.query.projectId);
+  if (!workId) {
+    return res.status(400).json({ message: "Please Select Work." });
+  }
+
+  try {
+    const workResult = await pool.query(
+      `SELECT "WorkName" FROM "MasterWork" WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    if (!workResult.rows[0]) {
+      return res.status(404).json({ message: "Selected Work was not found." });
+    }
+    const workName = workResult.rows[0].WorkName || "Untitled Work";
+
+    const materialsResult = await pool.query(
+      `SELECT wm."MaterialId",
+              COALESCE(
+                NULLIF(TRIM(MAX(m."MaterialShortDescription")), ''),
+                NULLIF(TRIM(MAX(m."MaterialDescription")), ''),
+                'Material'
+              ) AS "MaterialName",
+              MAX(u."UnitShortName") AS "UnitShortName"
+       FROM "WorkMaterial" wm
+       INNER JOIN "MasterMaterial" m ON m."MaterialId" = wm."MaterialId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
+       WHERE wm."WorkId" = $1
+       GROUP BY wm."MaterialId"
+       ORDER BY "MaterialName" ASC, wm."MaterialId" ASC`,
+      [workId],
+    );
+    if (!materialsResult.rows.length) {
+      return res.status(404).json({
+        message:
+          "No materials found for this work. Generate the estimate so WorkMaterial is prepared.",
+      });
+    }
+
+    const abstractsResult = await pool.query(
+      `SELECT wa."SubWorkId",
+              wa."ItemId",
+              i."ItemDescription",
+              MIN(wa."Sequence") AS "ItemSequence",
+              sw."Sequence" AS "SubWorkSequence",
+              SUM(wa."Quantity") AS "AbstractQuantity"
+       FROM "WorkAbstract" wa
+       INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+       LEFT JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
+       WHERE wa."WorkId" = $1
+       GROUP BY wa."SubWorkId", wa."ItemId", i."ItemDescription", sw."Sequence"
+       ORDER BY COALESCE(sw."Sequence", 999999) ASC,
+                MIN(wa."Sequence") ASC,
+                wa."ItemId" ASC`,
+      [workId],
+    );
+
+    const measuredResult = await pool.query(
+      `SELECT wa."SubWorkId", wa."ItemId",
+              COALESCE(SUM(meas."Quantity"), 0) AS "MeasuredQuantity"
+       FROM "WorkMeasurement" meas
+       INNER JOIN "WorkAbstract" wa
+         ON wa."WorkAbstractId" = meas."WorkAbstractId"
+       WHERE wa."WorkId" = $1
+       GROUP BY wa."SubWorkId", wa."ItemId"`,
+      [workId],
+    );
+    const measuredByItem = new Map(
+      measuredResult.rows.map((row) => [
+        `${row.SubWorkId}:${row.ItemId}`,
+        Number(row.MeasuredQuantity) || 0,
+      ]),
+    );
+
+    const itemIds = [
+      ...new Set(abstractsResult.rows.map((row) => Number(row.ItemId))),
+    ];
+    const materialIds = materialsResult.rows.map((row) =>
+      Number(row.MaterialId),
+    );
+    const componentResult = itemIds.length
+      ? await pool.query(
+          `SELECT mc."ItemId", mc."MaterialId",
+                  COALESCE(SUM(mc."MaterialComponent"), 0) AS "MaterialComponent"
+           FROM "MasterMaterialComponent" mc
+           WHERE mc."ItemId" = ANY($1::int[])
+             AND mc."MaterialId" = ANY($2::int[])
+           GROUP BY mc."ItemId", mc."MaterialId"`,
+          [itemIds, materialIds],
+        )
+      : { rows: [] };
+    const componentByKey = new Map(
+      componentResult.rows.map((row) => [
+        `${row.ItemId}:${row.MaterialId}`,
+        Number(row.MaterialComponent) || 0,
+      ]),
+    );
+
+    const cleanText = (value) =>
+      String(value || "")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim();
+    const fmt3 = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "0.000";
+      return n.toFixed(3);
+    };
+
+    const materialSections = [];
+    for (const material of materialsResult.rows) {
+      const materialId = Number(material.MaterialId);
+      const lines = [];
+      for (const item of abstractsResult.rows) {
+        const componentKey = `${item.ItemId}:${materialId}`;
+        if (!componentByKey.has(componentKey)) continue;
+        const measured = measuredByItem.get(
+          `${item.SubWorkId}:${item.ItemId}`,
+        );
+        const abstractQty =
+          item.AbstractQuantity === null || item.AbstractQuantity === undefined
+            ? null
+            : Number(item.AbstractQuantity);
+        const quantity =
+          abstractQty === null || !Number.isFinite(abstractQty)
+            ? Number(measured) || 0
+            : abstractQty;
+        const rate = componentByKey.get(componentKey) || 0;
+        const consumption = Number((quantity * rate).toFixed(3));
+        lines.push({
+          description:
+            cleanText(item.ItemDescription) || `Item ${item.ItemId}`,
+          quantity,
+          rate,
+          consumption,
+        });
+      }
+      if (!lines.length) continue;
+      materialSections.push({
+        name: cleanText(material.MaterialName) || `Material ${materialId}`,
+        unit: cleanText(material.UnitShortName),
+        lines,
+      });
+    }
+
+    if (!materialSections.length) {
+      return res.status(404).json({
+        message:
+          "No material components were found on the items of this work.",
+      });
+    }
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Work-${workId}-MaterialConsumption.pdf"`,
+    );
+
+    const doc = new PDFDocument({ size: "A4", margin: 40, bufferPages: true });
+    doc.pipe(res);
+
+    const left = 40;
+    const right = 555;
+    const contentWidth = right - left;
+    const col = {
+      sr: left,
+      sub: left + 28,
+      desc: left + 100,
+      qty: left + 318,
+      rate: left + 378,
+      cons: left + 458,
+    };
+    const colW = {
+      sr: 28,
+      sub: 72,
+      desc: col.qty - col.desc - 8,
+      qty: 56,
+      rate: 76,
+      cons: right - col.cons,
+    };
+    const pageBottom = doc.page.height - doc.page.margins.bottom;
+    const contentBottom = pageBottom - 18;
+
+    const drawPageHeader = () => {
+      doc.font("Helvetica-Bold").fontSize(13);
+      doc.text("MATERIAL CONSUMPTION STATEMENT", left, 40, {
+        width: contentWidth,
+        align: "center",
+      });
+      doc.moveDown(0.7);
+      const nameY = doc.y;
+      doc.font("Helvetica-Bold").fontSize(10);
+      doc.text("Name of Work", left, nameY, { lineBreak: false });
+      doc.text(workName, left + 100, nameY, {
+        width: contentWidth - 100,
+      });
+      doc.moveDown(0.45);
+      doc.moveTo(left, doc.y).lineTo(right, doc.y).stroke();
+      doc.moveDown(0.25);
+
+      const headers = [
+        { text: "Sr.\nNo.", x: col.sr, w: colW.sr, align: "left" },
+        { text: "Sub Work\nNo / Item", x: col.sub, w: colW.sub, align: "left" },
+        {
+          text: "Material / Item Description",
+          x: col.desc,
+          w: colW.desc,
+          align: "left",
+        },
+        { text: "Qty.", x: col.qty, w: colW.qty, align: "right" },
+        {
+          text: "Rate of\nConsumption",
+          x: col.rate,
+          w: colW.rate,
+          align: "right",
+        },
+        {
+          text: "Qty of\nConsumption",
+          x: col.cons,
+          w: colW.cons,
+          align: "right",
+        },
+      ];
+      doc.font("Helvetica-Bold").fontSize(8);
+      const headerHeight = Math.max(
+        ...headers.map((header) =>
+          doc.heightOfString(header.text, { width: header.w }),
+        ),
+      );
+      const headerY = doc.y;
+      for (const header of headers) {
+        doc.text(header.text, header.x, headerY, {
+          width: header.w,
+          align: header.align,
+        });
+      }
+      doc.y = headerY + headerHeight + 3;
+      doc.moveTo(left, doc.y).lineTo(right, doc.y).stroke();
+      doc.moveDown(0.45);
+    };
+
+    const ensureSpace = (needed) => {
+      if (doc.y + needed <= contentBottom) return false;
+      doc.addPage();
+      drawPageHeader();
+      return true;
+    };
+
+    drawPageHeader();
+
+    materialSections.forEach((section, sectionIndex) => {
+      doc.font("Helvetica").fontSize(10);
+      const nameHeight = doc.heightOfString(section.name, {
+        width: contentWidth,
+        align: "center",
+      });
+      if (sectionIndex > 0) doc.moveDown(0.7);
+      if (ensureSpace(nameHeight + 36)) {
+        /* header redrawn */
+      }
+      doc.font("Helvetica").fontSize(10);
+      doc.text(section.name, left, doc.y, {
+        width: contentWidth,
+        align: "center",
+      });
+      doc.moveDown(0.35);
+
+      section.lines.forEach((line, lineIndex) => {
+        doc.font("Helvetica").fontSize(9);
+        const descHeight = doc.heightOfString(line.description, {
+          width: colW.desc,
+        });
+        const rowHeight = Math.max(descHeight, 12);
+        if (ensureSpace(rowHeight + 4)) {
+          doc.font("Helvetica").fontSize(10);
+          doc.text(`${section.name} (contd.)`, left, doc.y, {
+            width: contentWidth,
+            align: "center",
+          });
+          doc.moveDown(0.35);
+        }
+        const rowY = doc.y;
+        doc.font("Helvetica").fontSize(9);
+        doc.text(String(lineIndex + 1), col.sr, rowY, { width: colW.sr });
+        doc.text(line.description, col.desc, rowY, { width: colW.desc });
+        doc.text(fmt3(line.quantity), col.qty, rowY, {
+          width: colW.qty,
+          align: "right",
+        });
+        doc.text(fmt3(line.rate), col.rate, rowY, {
+          width: colW.rate,
+          align: "right",
+        });
+        doc.text(fmt3(line.consumption), col.cons, rowY, {
+          width: colW.cons,
+          align: "right",
+        });
+        doc.y = rowY + rowHeight + 8;
+      });
+
+      const total = section.lines.reduce(
+        (sum, line) => sum + line.consumption,
+        0,
+      );
+      const totalLabel = `TOTAL ESTIMATED CONSUMPTION OF ${section.name}`;
+      const totalValue = section.unit
+        ? `${fmt3(total)} ${section.unit}`
+        : fmt3(total);
+      const labelWidth = col.cons - col.desc - 10;
+      doc.font("Helvetica").fontSize(9);
+      const labelHeight = doc.heightOfString(totalLabel, { width: labelWidth });
+      if (ensureSpace(labelHeight + 16)) {
+        doc.font("Helvetica").fontSize(10);
+        doc.text(`${section.name} (contd.)`, left, doc.y, {
+          width: contentWidth,
+          align: "center",
+        });
+        doc.moveDown(0.35);
+      }
+      const totalY = doc.y;
+      doc.font("Helvetica").fontSize(9);
+      doc.text(totalLabel, col.desc, totalY, { width: labelWidth });
+      doc.text(totalValue, col.cons, totalY, {
+        width: colW.cons,
+        align: "right",
+      });
+      doc.y = totalY + labelHeight + 6;
+      doc.save();
+      doc.dash(1, { space: 2 });
+      doc.moveTo(left, doc.y).lineTo(right, doc.y).stroke();
+      doc.restore();
+      doc.moveDown(0.2);
+    });
+
+    applyTrialReportBranding(doc);
+    doc.end();
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) {
+      res.status(500).json({ message: err.message });
+    }
+  }
+});
+
 app.get("/api/generate-measurement-report", async (req, res) => {
   const { projectId, subWorkId } = req.query;
 
