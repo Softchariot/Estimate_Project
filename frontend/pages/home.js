@@ -16,6 +16,7 @@ import {
 import MeasurementPanel from "../components/MeasurementPanel";
 import WorkMeasurementGroupsPanel from "../components/WorkMeasurementGroupsPanel";
 import GenerateReportModal from "../components/GenerateReportModal";
+import ImportCivilEstimateModal from "../components/ImportCivilEstimateModal";
 import UserProfileModal from "../components/UserProfileModal";
 
 const SESSION_KEY = "werms_user";
@@ -283,6 +284,21 @@ function getItemMasterAllowedRegionId(user) {
 function canAccessItemMaster(user) {
   return (
     isSuperAdminUser(user) || isOrgAdminUser(user) || isIndvUserUser(user)
+  );
+}
+
+/** R.A. Component menu: SuperAdmin, UserCategoryId 3, or OrgAdmin. */
+function canAccessRaComponent(user) {
+  if (isSuperAdminUser(user)) return true;
+  if (Number(user?.UserCategoryId) === 3) return true;
+  return Number(user?.UserCategoryId) !== 3 && isOrgAdminUser(user);
+}
+
+/** Category and sub category are optional for NON DSR and user category 3. */
+function isMaterialCategoryOptional(user, regionId) {
+  return (
+    Number(regionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+    Number(user?.UserCategoryId) === 3
   );
 }
 
@@ -3525,6 +3541,7 @@ export default function HomePage() {
   const [categoryForm, setCategoryForm] = useState(initialCategoryForm);
   const [regions, setRegions] = useState([]);
   const [estimationRegions, setEstimationRegions] = useState([]);
+  const [raComponentRegions, setRaComponentRegions] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loadingRegions, setLoadingRegions] = useState(false);
   const [loadingCategories, setLoadingCategories] = useState(false);
@@ -3670,6 +3687,9 @@ export default function HomePage() {
     useState(false);
   const [generateReportModalOpen, setGenerateReportModalOpen] = useState(false);
   const [generateReportType, setGenerateReportType] = useState("abstract");
+  const [importCivilEstimateOpen, setImportCivilEstimateOpen] = useState(false);
+  const [civilEstimateWorks, setCivilEstimateWorks] = useState([]);
+  const [importingCivilEstimate, setImportingCivilEstimate] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
   const [measurementGroupsReload, setMeasurementGroupsReload] = useState(0);
@@ -3815,6 +3835,37 @@ export default function HomePage() {
         );
         return stillThere ? prev : "";
       });
+    } catch (error) {
+      console.error(error);
+      setEstimationRegions([]);
+      setMessage(`Estimation region load failed: ${error.message}`);
+    }
+  };
+
+  const loadRaComponentRegions = async (user = currentUser) => {
+    const sessionUser =
+      user ||
+      (() => {
+        try {
+          return JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+        } catch (_) {
+          return null;
+        }
+      })();
+    if (!sessionUser?.UserId || !canAccessRaComponent(sessionUser)) {
+      setRaComponentRegions([]);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/ra-component-regions?userId=${encodeURIComponent(sessionUser.UserId)}`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to load R.A. Component regions.");
+      }
+      const list = Array.isArray(data?.data) ? data.data : [];
+      setRaComponentRegions(sortByDOrderAsc(list));
       setMaterialRegionId((prev) => {
         if (!prev) return prev;
         const stillThere = list.some(
@@ -3824,8 +3875,8 @@ export default function HomePage() {
       });
     } catch (error) {
       console.error(error);
-      setEstimationRegions([]);
-      setMessage(`Estimation region load failed: ${error.message}`);
+      setRaComponentRegions([]);
+      setMessage(`R.A. Component region load failed: ${error.message}`);
     }
   };
 
@@ -4398,8 +4449,10 @@ export default function HomePage() {
   };
 
   const loadMaterialItems = async () => {
-    const categoryOptional =
-      Number(materialRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    const categoryOptional = isMaterialCategoryOptional(
+      currentUser,
+      materialRegionId,
+    );
     if (!materialRegionId || !materialSsrYearId) {
       alert("Please select SSR Region and SSR Year.");
       return;
@@ -4429,6 +4482,7 @@ export default function HomePage() {
       if (materialSubCategoryId) params.subCategoryId = materialSubCategoryId;
       if (search) params.search = search;
       if (currentUser?.UserId) params.userId = currentUser.UserId;
+      params.raComponent = 1;
       const res = await axios.get(`${API_BASE}/api/ssr-items-load`, {
         params,
       });
@@ -6355,6 +6409,24 @@ export default function HomePage() {
     }
   };
 
+  const handleImportCivilEstimate = async () => {
+    if (importingCivilEstimate) return;
+    setImportingCivilEstimate(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/civil-estimate/aemwork`);
+      setCivilEstimateWorks(Array.isArray(res.data?.data) ? res.data.data : []);
+      setImportCivilEstimateOpen(true);
+    } catch (err) {
+      setImportCivilEstimateOpen(false);
+      window.alert(
+        err.response?.data?.message ||
+          "Could not open the Civil Estimate database.",
+      );
+    } finally {
+      setImportingCivilEstimate(false);
+    }
+  };
+
   const clearEstimatePanel = () => {
     setEstimatePanelOpen(false);
     setEstimateWorkName("");
@@ -6962,6 +7034,7 @@ export default function HomePage() {
       }
       loadWorksMaster();
       loadEstimationRegions(user);
+      loadRaComponentRegions(user);
       if (!isSuperAdminUser(user)) {
         // Non-SuperAdmin Work Master list matches general works (non-deleted).
         loadWorkMasterList("", "");
@@ -7090,6 +7163,9 @@ export default function HomePage() {
       currentUser?.UserId
     ) {
       loadEstimationRegions(currentUser);
+      if (activeMaster === "materials") {
+        loadRaComponentRegions(currentUser);
+      }
     }
   }, [activeMaster, currentUser?.UserId]);
 
@@ -7913,7 +7989,7 @@ export default function HomePage() {
   const isOrgAdmin = isOrgAdminUser(currentUser);
   const isIndvUser = isIndvUserUser(currentUser);
   const canManageProjects = isOrgAdmin || isSuperAdmin;
-  const canManageMaterials = isSuperAdmin || isOrgAdmin;
+  const canManageMaterials = canAccessRaComponent(currentUser);
   const canManageItemMaster = canAccessItemMaster(currentUser);
   const itemNumberIsAuto =
     !isSuperAdmin ||
@@ -8268,7 +8344,7 @@ export default function HomePage() {
                   item.id === "materials" ? !canManageMaterials : !isSuperAdmin,
                 disabledTitle:
                   item.id === "materials"
-                    ? "Available for SuperAdmin and OrgAdmin of your organization"
+                    ? "Available for SuperAdmin, OrgAdmin, and user category 3"
                     : "Available only for SuperAdmin",
               }),
             )}
@@ -10755,7 +10831,7 @@ export default function HomePage() {
                 eyebrow="Master · R.A. Component"
                 title="R.A. Component"
                 subtitle={
-                  Number(materialRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID
+                  isMaterialCategoryOptional(currentUser, materialRegionId)
                     ? "Select SSR region and year. Category and sub category are optional."
                     : "Select SSR region, year, category, sub category, and an item."
                 }
@@ -10783,7 +10859,7 @@ export default function HomePage() {
                         resetMaterialRALogic();
                         loadMaterialSsrYears(regionId);
                         loadMaterialCategories(regionId);
-                        if (Number(regionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID) {
+                        if (isMaterialCategoryOptional(currentUser, regionId)) {
                           loadMaterialSubCategories("", regionId);
                         }
                         if (!isNonSsrMaterialRegion(regionId)) {
@@ -10795,7 +10871,7 @@ export default function HomePage() {
                       style={inputStyle}
                     >
                       <option value="">Select SSR Region</option>
-                      {estimationRegions.map((r) => (
+                      {raComponentRegions.map((r) => (
                         <option key={r.SSRRegionId} value={r.SSRRegionId}>
                           {r.SSRRegionShortName || r.SSRRegionName}
                         </option>
@@ -10832,7 +10908,7 @@ export default function HomePage() {
                   <Field
                     label="SSR Category"
                     required={
-                      Number(materialRegionId) !== ITEM_MASTER_ORG_ADMIN_REGION_ID
+                      !isMaterialCategoryOptional(currentUser, materialRegionId)
                     }
                   >
                     <select
@@ -10847,8 +10923,10 @@ export default function HomePage() {
                         setMaterialRALogicPickerOpen(false);
                         if (
                           categoryId ||
-                          Number(materialRegionId) ===
-                            ITEM_MASTER_ORG_ADMIN_REGION_ID
+                          isMaterialCategoryOptional(
+                            currentUser,
+                            materialRegionId,
+                          )
                         ) {
                           loadMaterialSubCategories(
                             categoryId,
@@ -10862,8 +10940,10 @@ export default function HomePage() {
                       style={inputStyle}
                     >
                       <option value="">
-                        {Number(materialRegionId) ===
-                        ITEM_MASTER_ORG_ADMIN_REGION_ID
+                        {isMaterialCategoryOptional(
+                          currentUser,
+                          materialRegionId,
+                        )
                           ? "All SSR Categories"
                           : "Select SSR Category"}
                       </option>
@@ -10881,7 +10961,7 @@ export default function HomePage() {
                   <Field
                     label="SSR Sub Category"
                     required={
-                      Number(materialRegionId) !== ITEM_MASTER_ORG_ADMIN_REGION_ID
+                      !isMaterialCategoryOptional(currentUser, materialRegionId)
                     }
                   >
                     <select
@@ -10895,15 +10975,19 @@ export default function HomePage() {
                       }}
                       disabled={
                         !materialRegionId ||
-                        (Number(materialRegionId) !==
-                          ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                        (!isMaterialCategoryOptional(
+                          currentUser,
+                          materialRegionId,
+                        ) &&
                           !materialCategoryId)
                       }
                       style={inputStyle}
                     >
                       <option value="">
-                        {Number(materialRegionId) ===
-                        ITEM_MASTER_ORG_ADMIN_REGION_ID
+                        {isMaterialCategoryOptional(
+                          currentUser,
+                          materialRegionId,
+                        )
                           ? "All SSR Sub Categories"
                           : "Select SSR Sub Category"}
                       </option>
@@ -11036,6 +11120,7 @@ export default function HomePage() {
                   <table className="wrms-table">
                     <thead>
                       <tr>
+                        <th>Item Code</th>
                         <th>Item Number</th>
                         <th>Description</th>
                         <th>Unit</th>
@@ -11044,7 +11129,7 @@ export default function HomePage() {
                     </thead>
                     <tbody>
                       {loadingMaterialItems ? (
-                        <EmptyRow colSpan={4}>Loading…</EmptyRow>
+                        <EmptyRow colSpan={5}>Loading…</EmptyRow>
                       ) : materialItemList.length ? (
                         materialItemList.map((row) => {
                           const canSelect = hasItemUnitId(row);
@@ -11098,6 +11183,15 @@ export default function HomePage() {
                                   verticalAlign: "top",
                                 }}
                               >
+                                {row.ItemCode || ""}
+                              </td>
+                              <td
+                                style={{
+                                  fontFamily: theme.font.mono,
+                                  whiteSpace: "nowrap",
+                                  verticalAlign: "top",
+                                }}
+                              >
                                 {row.ItemNumber}
                               </td>
                               <td
@@ -11137,7 +11231,7 @@ export default function HomePage() {
                           );
                         })
                       ) : (
-                        <EmptyRow colSpan={4}>
+                        <EmptyRow colSpan={5}>
                           Select filters above, optionally enter Search, then
                           click View Items.
                         </EmptyRow>
@@ -12038,7 +12132,27 @@ export default function HomePage() {
                     >
                       Add Measurement Groups
                     </Button>
-                    <div style={{ marginLeft: "auto" }}>
+                    <div
+                      style={{
+                        marginLeft: "auto",
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                      }}
+                    >
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant="solid"
+                      loading={importingCivilEstimate}
+                      onClick={handleImportCivilEstimate}
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      IMPORT
+                    </Button>
                     <Dropdown>
                       <MenuButton
                         type="button"
@@ -14460,6 +14574,12 @@ export default function HomePage() {
         works={estimationWorksList}
         defaultWorkId={selectedProjectId}
         reportType={generateReportType}
+      />
+      <ImportCivilEstimateModal
+        open={importCivilEstimateOpen}
+        onClose={() => setImportCivilEstimateOpen(false)}
+        works={civilEstimateWorks}
+        API_BASE={API_BASE}
       />
       <UserProfileModal
         open={profileOpen}

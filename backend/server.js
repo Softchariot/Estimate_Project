@@ -28,6 +28,9 @@ const {
   ensureWorkMeasurementGroupSchema,
   registerWorkMeasurementGroupRoutes,
 } = require("./workMeasurementGroups");
+const {
+  registerCivilEstimateImportRoutes,
+} = require("./civilEstimateImport");
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -40,6 +43,7 @@ app.set("trust proxy", true);
 
 app.use(cors());
 app.use(express.json());
+registerCivilEstimateImportRoutes(app);
 
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
 const connectionString =
@@ -755,6 +759,40 @@ app.get("/api/estimation-regions", async (req, res) => {
   }
 });
 
+app.get("/api/ra-component-regions", async (req, res) => {
+  try {
+    const access = await resolveRaComponentAccess(req.query.userId);
+    if (access.error) {
+      return res
+        .status(access.error.status)
+        .json({ message: access.error.message });
+    }
+
+    const params = [];
+    let where = "";
+    if (access.scope === "category3") {
+      params.push(RA_COMPONENT_CATEGORY3_REGION_ID);
+      where = `WHERE "SSRRegionId" = $1`;
+    } else if (access.scope === "orgadmin") {
+      params.push(RA_COMPONENT_ORG_ADMIN_REGION_ID);
+      where = `WHERE "SSRRegionId" = $1`;
+    }
+
+    const result = await pool.query(
+      `SELECT "SSRRegionId", "SSRRegionName", "SSRRegionShortName",
+              "DOrder", "DOrder1", "Remarks"
+       FROM "MasterSSRRegion"
+       ${where}
+       ORDER BY "DOrder" ASC NULLS LAST, "SSRRegionName" ASC`,
+      params,
+    );
+    return res.json({ data: result.rows, scope: access.scope });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
 app.post("/api/ssr-regions", async (req, res) => {
   const { SSRRegionName, SSRRegionShortName, DOrder, DOrder1, Remarks } =
     req.body;
@@ -1033,7 +1071,40 @@ app.get("/api/ssr-items-load", async (req, res) => {
       )`;
     }
 
-    if (userId) {
+    if (
+      String(req.query.raComponent || "") === "1" ||
+      String(req.query.raComponent || "").toLowerCase() === "true"
+    ) {
+      const access = await resolveRaComponentAccess(userId);
+      if (access.error) {
+        return res
+          .status(access.error.status)
+          .json({ message: access.error.message });
+      }
+      const selectedRegion = Number(regionId);
+      if (access.scope === "category3") {
+        if (selectedRegion !== RA_COMPONENT_CATEGORY3_REGION_ID) {
+          return res.status(403).json({
+            message: "This SSR Region is not available for your user.",
+          });
+        }
+        params.push(Number(access.actor.UserId));
+        query += ` AND i."UserId" = $${params.length}`;
+      } else if (access.scope === "orgadmin") {
+        if (selectedRegion !== RA_COMPONENT_ORG_ADMIN_REGION_ID) {
+          return res.status(403).json({
+            message: "This SSR Region is not available for your user.",
+          });
+        }
+        if (!access.orgCode) {
+          return res.status(403).json({
+            message: "Organization code was not found for your user.",
+          });
+        }
+        params.push(access.orgCode);
+        query += ` AND UPPER(BTRIM(split_part(COALESCE(i."ItemCode", ''), '-', 1))) = UPPER(BTRIM($${params.length}))`;
+      }
+    } else if (userId) {
       const auth = await requireItemMasterAccess(userId);
       if (!auth.error && auth.isOrgAdmin) {
         const selectedRegion = Number(regionId);
@@ -4025,6 +4096,92 @@ app.put("/api/master-units/:id", async (req, res) => {
 /** OrgAdmin / IndvUser NON-SSR region locks for Item Master. */
 const ITEM_MASTER_ORG_ADMIN_REGION_ID = 3;
 const ITEM_MASTER_INDV_USER_REGION_ID = 4;
+const RA_COMPONENT_USER_CATEGORY_ID = 3;
+const RA_COMPONENT_ORG_ADMIN_REGION_ID = 3;
+const RA_COMPONENT_CATEGORY3_REGION_ID = 4;
+
+/** R.A. Component access from MasterUser + MasterUserCategory, not the browser. */
+async function resolveRaComponentAccess(userId) {
+  if (!userId) {
+    return { error: { status: 400, message: "userId is required." } };
+  }
+  const result = await pool.query(
+    `SELECT u."UserId", u."UserCategoryId", u."OrganizationId",
+            uc."UserCategoryName", o."OrgCode"
+     FROM "MasterUser" u
+     INNER JOIN "MasterUserCategory" uc
+       ON uc."UserCategoryId" = u."UserCategoryId"
+     LEFT JOIN "MasterOrganization" o
+       ON o."OrganizationId" = u."OrganizationId"
+     WHERE u."UserId" = $1
+       AND COALESCE(u."MarkForDeletion", false) = false`,
+    [Number(userId)],
+  );
+  const actor = result.rows[0];
+  if (!actor) {
+    return { error: { status: 403, message: "User not found or inactive." } };
+  }
+  const category = normalizeUserCategoryName(actor.UserCategoryName);
+  const isSuperAdmin = category === "superadmin";
+  const isOrgAdmin = category === "orgadmin";
+  const categoryId = Number(actor.UserCategoryId);
+  let scope = null;
+  if (isSuperAdmin) scope = "superadmin";
+  else if (categoryId === RA_COMPONENT_USER_CATEGORY_ID) scope = "category3";
+  else if (isOrgAdmin) scope = "orgadmin";
+  if (!scope) {
+    return {
+      error: {
+        status: 403,
+        message: "R.A. Component is not available for this user.",
+      },
+    };
+  }
+  return {
+    actor,
+    scope,
+    isSuperAdmin: scope === "superadmin",
+    isOrgAdmin: scope === "orgadmin",
+    orgCode: actor.OrgCode == null ? "" : String(actor.OrgCode).trim(),
+  };
+}
+
+async function assertRaComponentItemAccess(auth, itemId) {
+  if (!auth || auth.scope === "superadmin") return null;
+  const itemResult = await pool.query(
+    `SELECT "UserId", "RegionId", "ItemCode"
+     FROM "MasterItem"
+     WHERE "ItemId" = $1`,
+    [Number(itemId)],
+  );
+  const item = itemResult.rows[0];
+  if (!item) return { status: 404, message: "Item not found." };
+  if (auth.scope === "category3") {
+    if (
+      Number(item.RegionId) !== RA_COMPONENT_CATEGORY3_REGION_ID ||
+      Number(item.UserId) !== Number(auth.actor.UserId)
+    ) {
+      return {
+        status: 403,
+        message: "You can only manage R.A. Components for your own items.",
+      };
+    }
+    return null;
+  }
+  const prefix = String(item.ItemCode || "").split("-")[0].trim();
+  if (
+    Number(item.RegionId) !== RA_COMPONENT_ORG_ADMIN_REGION_ID ||
+    !auth.orgCode ||
+    prefix.toUpperCase() !== auth.orgCode.toUpperCase()
+  ) {
+    return {
+      status: 403,
+      message:
+        "You can only manage R.A. Components for your organization's items.",
+    };
+  }
+  return null;
+}
 
 async function ensureMasterItemUserId() {
   await pool.query(`
@@ -5965,8 +6122,8 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
     for (const region of regionResult.rows) {
       const materialsResult = await pool.query(
         `
-        SELECT DISTINCT ON (mc."MaterialId")
-          mc."MaterialId",
+        SELECT DISTINCT ON (ra."ComponentId")
+          ra."ComponentId" AS "MaterialId",
           m."MaterialShortDescription",
           u."UnitShortName",
           wl."QuaryName",
@@ -5975,17 +6132,21 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
           wl."Lead"
         FROM "WorkAbstract" wa
         INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
-        INNER JOIN "MasterMaterialComponent" mc ON mc."ItemId" = i."ItemId"
-        INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
+        INNER JOIN "MasterRAComponent" ra
+          ON ra."ItemId" = i."ItemId"
+         AND ra."ComponentType" = $3
+        INNER JOIN "MasterMaterial" m
+          ON m."MaterialId" = ra."ComponentId"
+         AND m."MaterialLoadFactor" > 0
         LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
         LEFT JOIN "WorkLead" wl
           ON wl."MasterWorkId" = $1
-         AND wl."MaterialId" = mc."MaterialId"
+         AND wl."MaterialId" = ra."ComponentId"
         WHERE wa."WorkId" = $1
           AND i."RegionId" = $2
-        ORDER BY mc."MaterialId", m."MaterialShortDescription" ASC NULLS LAST
+        ORDER BY ra."ComponentId", m."MaterialShortDescription" ASC NULLS LAST
         `,
-        [workId, region.SSRRegionId],
+        [workId, region.SSRRegionId, RA_COMPONENT_TYPE_MATERIAL],
       );
 
       if (!materialsResult.rows.length) continue;
@@ -6371,9 +6532,22 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
             : abstractQty;
         const rate = componentByKey.get(componentKey) || 0;
         const consumption = Number((quantity * rate).toFixed(3));
+        const description =
+          cleanText(item.ItemDescription) || `Item ${item.ItemId}`;
         lines.push({
+          itemNo:
+            item.ItemSequence === null || item.ItemSequence === undefined
+              ? ""
+              : String(item.ItemSequence),
+          subWorkNo:
+            item.SubWorkSequence === null ||
+            item.SubWorkSequence === undefined
+              ? ""
+              : String(item.SubWorkSequence),
           description:
-            cleanText(item.ItemDescription) || `Item ${item.ItemId}`,
+            description.length > 150
+              ? `${description.slice(0, 150)}......`
+              : description,
           quantity,
           rate,
           consumption,
@@ -6443,8 +6617,8 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
       doc.moveDown(0.25);
 
       const headers = [
-        { text: "Sr.\nNo.", x: col.sr, w: colW.sr, align: "left" },
-        { text: "Sub Work\nNo / Item", x: col.sub, w: colW.sub, align: "left" },
+        { text: "Item\nNo", x: col.sr, w: colW.sr, align: "left" },
+        { text: "Sub Work\nNo", x: col.sub, w: colW.sub, align: "left" },
         {
           text: "Material / Item Description",
           x: col.desc,
@@ -6509,7 +6683,7 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
       });
       doc.moveDown(0.35);
 
-      section.lines.forEach((line, lineIndex) => {
+      section.lines.forEach((line) => {
         doc.font("Helvetica").fontSize(9);
         const descHeight = doc.heightOfString(line.description, {
           width: colW.desc,
@@ -6525,7 +6699,8 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
         }
         const rowY = doc.y;
         doc.font("Helvetica").fontSize(9);
-        doc.text(String(lineIndex + 1), col.sr, rowY, { width: colW.sr });
+        doc.text(line.itemNo, col.sr, rowY, { width: colW.sr });
+        doc.text(line.subWorkNo, col.sub, rowY, { width: colW.sub });
         doc.text(line.description, col.desc, rowY, { width: colW.desc });
         doc.text(fmt3(line.quantity), col.qty, rowY, {
           width: colW.qty,
@@ -7549,8 +7724,8 @@ app.get("/api/generate-estimate", async (req, res) => {
     for (const region of leadRegionResult.rows) {
       const materialsResult = await pool.query(
         `
-        SELECT DISTINCT ON (mc."MaterialId")
-          mc."MaterialId",
+        SELECT DISTINCT ON (ra."ComponentId")
+          ra."ComponentId" AS "MaterialId",
           m."MaterialShortDescription",
           m."MaterialUnitId",
           m."MaterialLocalUnitId",
@@ -7564,17 +7739,21 @@ app.get("/api/generate-estimate", async (req, res) => {
           wl."Lead"
         FROM "WorkAbstract" wa
         INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
-        INNER JOIN "MasterMaterialComponent" mc ON mc."ItemId" = i."ItemId"
-        INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
+        INNER JOIN "MasterRAComponent" ra
+          ON ra."ItemId" = i."ItemId"
+         AND ra."ComponentType" = $3
+        INNER JOIN "MasterMaterial" m
+          ON m."MaterialId" = ra."ComponentId"
+         AND m."MaterialLoadFactor" > 0
         LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
         LEFT JOIN "WorkLead" wl
           ON wl."MasterWorkId" = $1
-         AND wl."MaterialId" = mc."MaterialId"
+         AND wl."MaterialId" = ra."ComponentId"
         WHERE wa."WorkId" = $1
           AND i."RegionId" = $2
-        ORDER BY mc."MaterialId", m."MaterialShortDescription" ASC NULLS LAST
+        ORDER BY ra."ComponentId", m."MaterialShortDescription" ASC NULLS LAST
         `,
-        [Number(workId), region.SSRRegionId],
+        [Number(workId), region.SSRRegionId, RA_COMPONENT_TYPE_MATERIAL],
       );
 
       if (!materialsResult.rows.length) continue;
@@ -8087,15 +8266,17 @@ app.post("/api/populate-work-materials", async (req, res) => {
       const labourCess = Number(addition.LabourCess) || 0;
 
       const components = await client.query(
-        `SELECT mc."MaterialId",
-                mc."MaterialComponent",
+        `SELECT ra."ComponentId" AS "MaterialId",
+                ra."Component" AS "MaterialComponent",
                 m."ConversionFactor",
                 m."MaterialUnitId"
-         FROM "MasterMaterialComponent" mc
-         INNER JOIN "MasterMaterial" m ON m."MaterialId" = mc."MaterialId"
-         WHERE mc."ItemId" = $1
-         ORDER BY mc."MaterialComponentId" ASC`,
-        [itemId],
+         FROM "MasterRAComponent" ra
+         INNER JOIN "MasterMaterial" m ON m."MaterialId" = ra."ComponentId"
+         WHERE ra."ItemId" = $1
+           AND ra."ComponentType" = $2
+           AND m."MaterialLoadFactor" > 0
+         ORDER BY ra."RAComponentId" ASC`,
+        [itemId, RA_COMPONENT_TYPE_MATERIAL],
       );
 
       const withCondition = (code, text) => `${code}: ${text}`;
@@ -8449,48 +8630,15 @@ app.post("/api/populate-work-materials", async (req, res) => {
   }
 });
 
-/** Resolve acting user and confirm SuperAdmin or OrgAdmin. */
+/** Resolve acting user for R.A. Component edits. */
 async function requireSuperOrOrgAdmin(userId, itemId) {
-  if (!userId) {
-    return { error: { status: 400, message: "userId is required." } };
+  const auth = await resolveRaComponentAccess(userId);
+  if (auth.error) return auth;
+  if (itemId != null && String(itemId).trim() !== "") {
+    const itemAccess = await assertRaComponentItemAccess(auth, itemId);
+    if (itemAccess) return { error: itemAccess };
   }
-  const result = await pool.query(
-    `SELECT u."UserId", u."OrganizationId", uc."UserCategoryName"
-     FROM "MasterUser" u
-     INNER JOIN "MasterUserCategory" uc
-       ON uc."UserCategoryId" = u."UserCategoryId"
-     WHERE u."UserId" = $1
-       AND COALESCE(u."MarkForDeletion", false) = false`,
-    [Number(userId)],
-  );
-  const actor = result.rows[0];
-  if (!actor) {
-    return { error: { status: 403, message: "User not found or inactive." } };
-  }
-  const category = String(actor.UserCategoryName || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "");
-  const isSuperAdmin = category === "superadmin";
-  const isOrgAdmin = category === "orgadmin";
-  if (!isSuperAdmin && !isOrgAdmin) {
-    return {
-      error: {
-        status: 403,
-        message: "Only SuperAdmin or OrgAdmin can manage material components.",
-      },
-    };
-  }
-  if (isOrgAdmin && itemId != null && String(itemId).trim() !== "") {
-    const itemAccess = await assertOrgAdminMaterialItemAccess(
-      { actor, isOrgAdmin },
-      itemId,
-    );
-    if (itemAccess) {
-      return { error: itemAccess };
-    }
-  }
-  return { actor, isSuperAdmin, isOrgAdmin };
+  return auth;
 }
 
 /** OrgAdmin may only manage RA for org NON SSR items (region 3); SSR regions are shared. */
@@ -10474,13 +10622,25 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     const totalA = drawSection("A: MATERIAL", materials.rows);
     const totalB = drawSection("B: LABOUR", labours.rows);
     const totalC = drawSection("C: MACHINERY", machineries.rows);
-    let running = roundMoney(totalItem + totalA + totalB + totalC);
+    // Percentages apply to A+B+C only. ITEM COMPONENT is kept in the total.
+    let additions = roundMoney(totalA + totalB + totalC);
+    let running = roundMoney(totalItem + additions);
     drawLabelAmount(
       hasItemComponents ? "Total Item+A+B+C" : "Total A+B+C",
       running,
       true,
     );
     drawLine();
+
+    const addPercentage = (label, pct) => {
+      const extra = roundMoney(additions * (Number(pct) / 100));
+      drawLabelAmount(label, extra);
+      additions = roundMoney(additions + extra);
+      running = roundMoney(totalItem + additions);
+      drawLabelAmount("Total", running, true);
+      drawLine();
+      return extra;
+    };
 
     const optionalAdds = [
       { key: "Scaffolding", label: "Scaffolding" },
@@ -10494,39 +10654,24 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       for (const add of optionalAdds) {
         const pct = Number(params[add.key]) || 0;
         if (!pct) continue;
-        const extra = roundMoney(running * (pct / 100));
-        drawLabelAmount(`Add ${formatQty(pct)}% ${add.label}`, extra);
-        running = roundMoney(running + extra);
-        drawLabelAmount("Total", running, true);
-        drawLine();
+        addPercentage(`Add ${formatQty(pct)}% ${add.label}`, pct);
       }
     }
 
     const wcPct = Number(params.WCharges) || 0;
-    const wcAmt = roundMoney(running * (wcPct / 100));
-    drawLabelAmount(`Add ${formatQty(wcPct)}% W.C.`, wcAmt);
-    running = roundMoney(running + wcAmt);
-    drawLabelAmount("Total", running, true);
-    drawLine();
+    addPercentage(`Add ${formatQty(wcPct)}% W.C.`, wcPct);
 
     const cpohPct = Number(params.CPOHCharges) || 0;
-    const cpohAmt = roundMoney(running * (cpohPct / 100));
-    drawLabelAmount(`Add ${formatQty(cpohPct)}% for C.P. & O.H.`, cpohAmt);
-    running = roundMoney(running + cpohAmt);
-    drawLabelAmount("Total", running, true);
-    drawLine();
+    addPercentage(`Add ${formatQty(cpohPct)}% for C.P. & O.H.`, cpohPct);
 
     const cessPct = Number(params.LabourCess) || 0;
-    const cessAmt = roundMoney(running * (cessPct / 100));
-    drawLabelAmount(`Add labour cess ${formatQty(cessPct)}%`, cessAmt);
-    running = roundMoney(running + cessAmt);
-    drawLabelAmount("Total", running, true);
-    drawLine();
+    addPercentage(`Add labour cess ${formatQty(cessPct)}%`, cessPct);
 
     const gstPct = Number(params.GSTCharges) || 0;
-    const gstAmt = roundMoney(running * (gstPct / 100));
+    const gstAmt = roundMoney(additions * (gstPct / 100));
     drawLabelAmount(`Add ${formatQty(gstPct)}% GST`, gstAmt);
-    running = roundMoney(running + gstAmt);
+    additions = roundMoney(additions + gstAmt);
+    running = roundMoney(totalItem + additions);
     drawLine();
     drawLabelAmount("", running, true);
 
