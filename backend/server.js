@@ -194,8 +194,23 @@ function resolveRupeeFontPaths() {
   return null;
 }
 
-/** Register Unicode fonts on a PDFDocument so ₹ amounts render correctly. */
+/**
+ * Register Unicode fonts on a PDFDocument so ₹ amounts render correctly.
+ * The online host has no Windows fonts, and Helvetica has no rupee glyph,
+ * so the embedded Noto Sans files are used first.
+ */
 function registerRupeeFonts(doc) {
+  try {
+    const embedded = require("./rupeeFontData");
+    if (embedded && embedded.regular) {
+      doc.registerFont("Rupee", embedded.regular);
+      doc.registerFont("Rupee-Bold", embedded.bold || embedded.regular);
+      return { regular: "Rupee", bold: "Rupee-Bold" };
+    }
+  } catch (err) {
+    console.error("Failed to register embedded rupee fonts:", err.message);
+  }
+
   const fonts = resolveRupeeFontPaths();
   if (!fonts) return { regular: "Helvetica", bold: "Helvetica-Bold" };
   try {
