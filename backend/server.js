@@ -5748,6 +5748,11 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
+    const qty3 = (n) =>
+      Number(n || 0).toLocaleString("en-IN", {
+        minimumFractionDigits: 3,
+        maximumFractionDigits: 3,
+      });
     const rs = (n) => `Rs.${money2(n)}`;
 
     res.setHeader("Content-Type", "application/pdf");
@@ -5925,7 +5930,7 @@ app.get("/api/generate-rate-analysis-report", async (req, res) => {
           const rowY = doc.y;
           const matHeight = doc.heightOfString(matName, { width: 165 });
           doc.text(matName, colMat, rowY, { width: 165 });
-          doc.text(`${money2(component)} / ${matUnit}`, colQty, rowY, {
+          doc.text(`${qty3(component)} / ${matUnit}`, colQty, rowY, {
             width: 95,
           });
           doc.text(distance, colDist, rowY, { width: 75 });
