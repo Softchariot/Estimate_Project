@@ -5314,15 +5314,15 @@ app.get("/api/generate-report", async (req, res) => {
     const rupees = (n) => formatInrAmount(n, { roundToRupee: true });
 
     // Item No | SSR Item No | Description | Quantity | Rate/Unit | Amount
-    // Description +10% again; Qty/Rate/Amount shifted right to keep Rate width.
-    // Item No → SSR Item No gap minimized (serial ~24pt; header wraps).
-    // Description pulled left to close unused space after SSR Item No.
+    // Rate/Unit grows from the left so a large rate such as
+    // ₹  12,45,297.00/Sq.Mt. stays on one line. Quantity moves left
+    // with it. The Amount column is unchanged.
     const colX = {
       serial: 40,
       ssrItemNo: 68,
       desc: 128,
-      qty: 378,
-      rate: 448,
+      qty: 320,
+      rate: 390,
       amount: 502,
     };
     const serialWidth = colX.ssrItemNo - colX.serial - 4;
@@ -5624,7 +5624,10 @@ app.get("/api/generate-report", async (req, res) => {
       doc.moveDown(0.3);
       const totalY = doc.y;
       doc.font("Helvetica-Bold").fontSize(10);
-      doc.text("Total", colX.rate, totalY);
+      doc.text("Total", colX.rate, totalY, {
+        width: rateWidth,
+        align: "right",
+      });
       doc.font(rupeeFonts.bold).fontSize(10);
       doc.text(rupees(subWorkTotal), colX.amount, totalY, {
         width: amountWidth,
