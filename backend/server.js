@@ -1145,6 +1145,102 @@ app.get("/api/ssr-items-load", async (req, res) => {
   }
 });
 
+app.get("/api/ssr-item-master", async (req, res) => {
+  const regionId = Number(req.query.regionId);
+  const categoryId = Number(req.query.categoryId);
+  const subCategoryId = Number(req.query.subCategoryId);
+  const access = await requireSsrItemMasterAccess(req.query.userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ message: access.error.message });
+  }
+  if (!regionId || !categoryId || !subCategoryId) {
+    return res.status(400).json({
+      message: "SSR Region, SSR Category, and SSR Sub Category are required.",
+    });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT i."ItemId", i."ItemNumber", i."ItemDescription",
+              u."UnitShortName", i."CompletedRate", i."LabourRate"
+       FROM "MasterItem" i
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+       WHERE i."RegionId" = $1
+         AND i."CategoryId" = $2
+         AND i."SubCategoryId" = $3
+         AND COALESCE(i."MarkForDeletion", false) = false
+       ORDER BY i."ItemNumber" ASC NULLS LAST, i."ItemId" ASC`,
+      [regionId, categoryId, subCategoryId],
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.put("/api/ssr-item-master", async (req, res) => {
+  const { userId, rows } = req.body || {};
+  const access = await requireSsrItemMasterAccess(userId);
+  if (access.error) {
+    return res.status(access.error.status).json({ message: access.error.message });
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    return res.status(400).json({ message: "No items to update." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let updated = 0;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i] || {};
+      const itemId = Number(row.ItemId);
+      if (!itemId) {
+        throw Object.assign(new Error(`Row ${i + 1}: ItemId is required.`), {
+          status: 400,
+        });
+      }
+      const parseRate = (value, label) => {
+        if (value === "" || value === null || value === undefined) return null;
+        const n = Number(value);
+        if (!Number.isFinite(n)) {
+          throw Object.assign(new Error(`Row ${i + 1}: ${label} must be a number.`), {
+            status: 400,
+          });
+        }
+        return n;
+      };
+      const completedRate = parseRate(row.CompletedRate, "Completed Rate");
+      const labourRate = parseRate(row.LabourRate, "Labour Rate");
+      const result = await client.query(
+        `UPDATE "MasterItem"
+         SET "CompletedRate" = $1,
+             "LabourRate" = $2
+         WHERE "ItemId" = $3
+           AND COALESCE("MarkForDeletion", false) = false
+         RETURNING "ItemId"`,
+        [completedRate, labourRate, itemId],
+      );
+      if (result.rows[0]) updated += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({
+      message: `Updated ${updated} item(s).`,
+      count: updated,
+    });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.get("/api/work-abstract-get", async (req, res) => {
   const { workId, subWorkId } = req.query;
   console.log("Work Id: ", workId);
@@ -4214,6 +4310,37 @@ function normalizeUserCategoryName(name) {
 }
 
 /** Resolve actor for Item Master (SuperAdmin / OrgAdmin / IndvUser). */
+async function requireSsrItemMasterAccess(userId) {
+  if (!userId) {
+    return { error: { status: 400, message: "userId is required." } };
+  }
+  const result = await pool.query(
+    `SELECT u."UserId", uc."UserCategoryName"
+     FROM "MasterUser" u
+     INNER JOIN "MasterUserCategory" uc
+       ON uc."UserCategoryId" = u."UserCategoryId"
+     WHERE u."UserId" = $1
+       AND COALESCE(u."MarkForDeletion", false) = false`,
+    [Number(userId)],
+  );
+  const actor = result.rows[0];
+  if (!actor) {
+    return { error: { status: 403, message: "User not found or inactive." } };
+  }
+  const category = normalizeUserCategoryName(actor.UserCategoryName);
+  const isSuperAdmin = category === "superadmin";
+  const isOrgAdmin = category === "orgadmin";
+  if (!isSuperAdmin && !isOrgAdmin) {
+    return {
+      error: {
+        status: 403,
+        message: "Only SuperAdmin or OrgAdmin can maintain SSR Item Master.",
+      },
+    };
+  }
+  return { actor, isSuperAdmin, isOrgAdmin };
+}
+
 async function requireItemMasterAccess(userId) {
   if (!userId) {
     return { error: { status: 400, message: "userId is required." } };

@@ -88,6 +88,12 @@ const superAdminMenu = [
     icon: "🧱",
   },
   {
+    id: "ssr-item-master",
+    label: "SSR Item Master",
+    status: "active",
+    icon: "📘",
+  },
+  {
     id: "print-ssr",
     label: "Print SSR",
     status: "active",
@@ -3542,6 +3548,17 @@ export default function HomePage() {
   const [regions, setRegions] = useState([]);
   const [estimationRegions, setEstimationRegions] = useState([]);
   const [raComponentRegions, setRaComponentRegions] = useState([]);
+  const [ssrItemMasterRegionId, setSsrItemMasterRegionId] = useState("");
+  const [ssrItemMasterCategoryId, setSsrItemMasterCategoryId] = useState("");
+  const [ssrItemMasterSubCategoryId, setSsrItemMasterSubCategoryId] =
+    useState("");
+  const [ssrItemMasterCategories, setSsrItemMasterCategories] = useState([]);
+  const [ssrItemMasterSubCategories, setSsrItemMasterSubCategories] =
+    useState([]);
+  const [ssrItemMasterRows, setSsrItemMasterRows] = useState([]);
+  const [ssrItemMasterOriginal, setSsrItemMasterOriginal] = useState([]);
+  const [loadingSsrItemMaster, setLoadingSsrItemMaster] = useState(false);
+  const [savingSsrItemMaster, setSavingSsrItemMaster] = useState(false);
   const [categories, setCategories] = useState([]);
   const [loadingRegions, setLoadingRegions] = useState(false);
   const [loadingCategories, setLoadingCategories] = useState(false);
@@ -3839,6 +3856,145 @@ export default function HomePage() {
       console.error(error);
       setEstimationRegions([]);
       setMessage(`Estimation region load failed: ${error.message}`);
+    }
+  };
+
+  const loadSsrItemMasterCategories = async (regionId) => {
+    if (!regionId) {
+      setSsrItemMasterCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setSsrItemMasterCategories(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error(error);
+      setSsrItemMasterCategories([]);
+    }
+  };
+
+  const loadSsrItemMasterSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setSsrItemMasterSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      const rows = Array.isArray(res.data?.data)
+        ? res.data.data
+        : Array.isArray(res.data)
+          ? res.data
+          : [];
+      setSsrItemMasterSubCategories(rows);
+    } catch (error) {
+      console.error(error);
+      setSsrItemMasterSubCategories([]);
+    }
+  };
+
+  const loadSsrItemMaster = async () => {
+    if (
+      !ssrItemMasterRegionId ||
+      !ssrItemMasterCategoryId ||
+      !ssrItemMasterSubCategoryId
+    ) {
+      alert("Please select SSR Region, SSR Category, and SSR Sub Category.");
+      return;
+    }
+    if (!currentUser?.UserId) return;
+    setLoadingSsrItemMaster(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/ssr-item-master`, {
+        params: {
+          userId: currentUser.UserId,
+          regionId: ssrItemMasterRegionId,
+          categoryId: ssrItemMasterCategoryId,
+          subCategoryId: ssrItemMasterSubCategoryId,
+        },
+      });
+      const rows = (Array.isArray(res.data?.data) ? res.data.data : []).map(
+        (row) => ({
+          ...row,
+          CompletedRate:
+            row.CompletedRate === null || row.CompletedRate === undefined
+              ? ""
+              : String(row.CompletedRate),
+          LabourRate:
+            row.LabourRate === null || row.LabourRate === undefined
+              ? ""
+              : String(row.LabourRate),
+        }),
+      );
+      setSsrItemMasterRows(rows);
+      setSsrItemMasterOriginal(rows.map((row) => ({ ...row })));
+    } catch (error) {
+      console.error(error);
+      setSsrItemMasterRows([]);
+      setSsrItemMasterOriginal([]);
+      alert(
+        error.response?.data?.message ||
+          error.message ||
+          "Failed to load SSR items.",
+      );
+    } finally {
+      setLoadingSsrItemMaster(false);
+    }
+  };
+
+  const onSsrItemMasterRateChange = (itemId, field, value) => {
+    setSsrItemMasterRows((prev) =>
+      prev.map((row) =>
+        Number(row.ItemId) === Number(itemId) ? { ...row, [field]: value } : row,
+      ),
+    );
+  };
+
+  const saveSsrItemMaster = async () => {
+    const originalById = new Map(
+      ssrItemMasterOriginal.map((row) => [Number(row.ItemId), row]),
+    );
+    const changed = ssrItemMasterRows.filter((row) => {
+      const original = originalById.get(Number(row.ItemId));
+      if (!original) return true;
+      return (
+        String(original.CompletedRate) !== String(row.CompletedRate) ||
+        String(original.LabourRate) !== String(row.LabourRate)
+      );
+    });
+    if (!changed.length) {
+      alert("No rate changes to save.");
+      return;
+    }
+    if (
+      !window.confirm(`Save Completed Rate and Labour Rate for ${changed.length} item(s)?`)
+    ) {
+      return;
+    }
+    setSavingSsrItemMaster(true);
+    try {
+      const res = await axios.put(`${API_BASE}/api/ssr-item-master`, {
+        userId: currentUser?.UserId,
+        rows: changed.map((row) => ({
+          ItemId: row.ItemId,
+          CompletedRate: row.CompletedRate,
+          LabourRate: row.LabourRate,
+        })),
+      });
+      setSsrItemMasterOriginal(ssrItemMasterRows.map((row) => ({ ...row })));
+      alert(res.data?.message || "SSR items updated.");
+    } catch (error) {
+      console.error(error);
+      alert(
+        error.response?.data?.message ||
+          error.message ||
+          "Failed to update SSR items.",
+      );
+    } finally {
+      setSavingSsrItemMaster(false);
     }
   };
 
@@ -8341,11 +8497,17 @@ export default function HomePage() {
             {superAdminMenu.map((item) =>
               renderMenuItem(item, {
                 forceDisabled:
-                  item.id === "materials" ? !canManageMaterials : !isSuperAdmin,
+                  item.id === "materials"
+                    ? !canManageMaterials
+                    : item.id === "ssr-item-master"
+                      ? !(isSuperAdmin || isOrgAdmin)
+                      : !isSuperAdmin,
                 disabledTitle:
                   item.id === "materials"
                     ? "Available for SuperAdmin, OrgAdmin, and user category 3"
-                    : "Available only for SuperAdmin",
+                    : item.id === "ssr-item-master"
+                      ? "Available for SuperAdmin and OrgAdmin"
+                      : "Available only for SuperAdmin",
               }),
             )}
 
@@ -10019,6 +10181,200 @@ export default function HomePage() {
           )}
 
           {/* ── Item Master ── */}
+          {activeMaster === "ssr-item-master" && (isSuperAdmin || isOrgAdmin) && (
+            <Card
+              eyebrow="Master · SSR Item"
+              title="SSR Item Master"
+              subtitle="Select region, category, and sub category. Edit Completed Rate and Labour Rate, then save the changed rows together."
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr 1fr auto",
+                  gap: 14,
+                  alignItems: "end",
+                }}
+              >
+                <Field label="SSR Region" required>
+                  <select
+                    value={ssrItemMasterRegionId}
+                    onChange={(e) => {
+                      const regionId = e.target.value;
+                      setSsrItemMasterRegionId(regionId);
+                      setSsrItemMasterCategoryId("");
+                      setSsrItemMasterSubCategoryId("");
+                      setSsrItemMasterSubCategories([]);
+                      setSsrItemMasterRows([]);
+                      setSsrItemMasterOriginal([]);
+                      loadSsrItemMasterCategories(regionId);
+                    }}
+                    style={inputStyle}
+                  >
+                    <option value="">Select SSR Region</option>
+                    {regions.map((region) => (
+                      <option key={region.SSRRegionId} value={region.SSRRegionId}>
+                        {region.SSRRegionName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Category" required>
+                  <select
+                    value={ssrItemMasterCategoryId}
+                    onChange={(e) => {
+                      const categoryId = e.target.value;
+                      setSsrItemMasterCategoryId(categoryId);
+                      setSsrItemMasterSubCategoryId("");
+                      setSsrItemMasterRows([]);
+                      setSsrItemMasterOriginal([]);
+                      loadSsrItemMasterSubCategories(categoryId);
+                    }}
+                    disabled={!ssrItemMasterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">
+                      {ssrItemMasterRegionId
+                        ? "Select SSR Category"
+                        : "Select SSR Region first"}
+                    </option>
+                    {ssrItemMasterCategories.map((category) => (
+                      <option
+                        key={category.SSRCategoryId}
+                        value={category.SSRCategoryId}
+                      >
+                        {category.SSRCategoryShortName || category.SSRCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Sub Category" required>
+                  <select
+                    value={ssrItemMasterSubCategoryId}
+                    onChange={(e) => {
+                      setSsrItemMasterSubCategoryId(e.target.value);
+                      setSsrItemMasterRows([]);
+                      setSsrItemMasterOriginal([]);
+                    }}
+                    disabled={!ssrItemMasterCategoryId}
+                    style={inputStyle}
+                  >
+                    <option value="">
+                      {ssrItemMasterCategoryId
+                        ? "Select SSR Sub Category"
+                        : "Select SSR Category first"}
+                    </option>
+                    {ssrItemMasterSubCategories.map((sub) => (
+                      <option key={sub.SSRSubCategoryId} value={sub.SSRSubCategoryId}>
+                        {sub.SSRSubCategoryShortName || sub.SSRSubCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <PrimaryButton
+                  type="button"
+                  onClick={loadSsrItemMaster}
+                  disabled={loadingSsrItemMaster}
+                >
+                  {loadingSsrItemMaster ? "Loading…" : "List Items"}
+                </PrimaryButton>
+              </div>
+
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                  marginTop: 18,
+                  maxHeight: 520,
+                  overflowY: "auto",
+                }}
+              >
+                <table className="wrms-table">
+                  <thead>
+                    <tr>
+                      <th>Item Number</th>
+                      <th>Item Description</th>
+                      <th>Unit</th>
+                      <th>Completed Rate</th>
+                      <th>Labour Rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingSsrItemMaster ? (
+                      <EmptyRow colSpan={5}>Loading…</EmptyRow>
+                    ) : ssrItemMasterRows.length ? (
+                      ssrItemMasterRows.map((row) => (
+                        <tr key={row.ItemId}>
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              whiteSpace: "nowrap",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {row.ItemNumber}
+                          </td>
+                          <td style={{ minWidth: 280, verticalAlign: "top" }}>
+                            {row.ItemDescription}
+                          </td>
+                          <td style={{ whiteSpace: "nowrap", verticalAlign: "top" }}>
+                            {row.UnitShortName || ""}
+                          </td>
+                          <td style={{ verticalAlign: "top" }}>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={row.CompletedRate}
+                              onChange={(e) =>
+                                onSsrItemMasterRateChange(
+                                  row.ItemId,
+                                  "CompletedRate",
+                                  e.target.value,
+                                )
+                              }
+                              style={{ ...inputStyle, width: 120 }}
+                            />
+                          </td>
+                          <td style={{ verticalAlign: "top" }}>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={row.LabourRate}
+                              onChange={(e) =>
+                                onSsrItemMasterRateChange(
+                                  row.ItemId,
+                                  "LabourRate",
+                                  e.target.value,
+                                )
+                              }
+                              style={{ ...inputStyle, width: 120 }}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <EmptyRow colSpan={5}>
+                        Select SSR Region, Category, and Sub Category, then list
+                        items.
+                      </EmptyRow>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {ssrItemMasterRows.length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <PrimaryButton
+                    type="button"
+                    onClick={saveSsrItemMaster}
+                    disabled={savingSsrItemMaster}
+                  >
+                    {savingSsrItemMaster ? "Saving…" : "Save Changes"}
+                  </PrimaryButton>
+                </div>
+              )}
+            </Card>
+          )}
+
           {activeMaster === "item-master" && canManageItemMaster && (
             <Card
               eyebrow="Master · Item"
