@@ -4324,7 +4324,7 @@ function normalizeUserCategoryName(name) {
     .replace(/\s+/g, "");
 }
 
-/** Resolve actor for Item Master (SuperAdmin / OrgAdmin / IndvUser). */
+/** SSR Item Master is limited to SuperAdmin, looked up from MasterUserCategory. */
 async function requireSsrItemMasterAccess(userId) {
   if (!userId) {
     return { error: { status: 400, message: "userId is required." } };
@@ -4344,16 +4344,15 @@ async function requireSsrItemMasterAccess(userId) {
   }
   const category = normalizeUserCategoryName(actor.UserCategoryName);
   const isSuperAdmin = category === "superadmin";
-  const isOrgAdmin = category === "orgadmin";
-  if (!isSuperAdmin && !isOrgAdmin) {
+  if (!isSuperAdmin) {
     return {
       error: {
         status: 403,
-        message: "Only SuperAdmin or OrgAdmin can maintain SSR Item Master.",
+        message: "Only SuperAdmin can maintain SSR Item Master.",
       },
     };
   }
-  return { actor, isSuperAdmin, isOrgAdmin };
+  return { actor, isSuperAdmin };
 }
 
 async function requireItemMasterAccess(userId) {
@@ -5314,20 +5313,21 @@ app.get("/api/generate-report", async (req, res) => {
     const rupees = (n) => formatInrAmount(n, { roundToRupee: true });
 
     // Item No | SSR Item No | Description | Quantity | Rate/Unit | Amount
-    // Rate/Unit grows from the left so a large rate such as
-    // ₹  12,45,297.00/Sq.Mt. stays on one line. Quantity moves left
-    // with it. The Amount column is unchanged.
+    // Amount stays put. Rate/Unit shifts 5% of its x to the right
+    // (390 → 410) to close the gap before Amount. Quantity shifts
+    // 10% of its x to the right (320 → 352). Description width
+    // grows 15% on the right (182 → 209).
     const colX = {
       serial: 40,
       ssrItemNo: 68,
       desc: 128,
-      qty: 320,
-      rate: 390,
+      qty: 352,
+      rate: 410,
       amount: 502,
     };
     const serialWidth = colX.ssrItemNo - colX.serial - 4;
     const ssrItemNoWidth = colX.desc - colX.ssrItemNo - 6;
-    const descWidth = colX.qty - colX.desc - 10;
+    const descWidth = Math.round(182 * 1.15);
     const rateWidth = colX.amount - colX.rate - 6;
     const amountWidth = 555 - colX.amount;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
@@ -5623,16 +5623,19 @@ app.get("/api/generate-report", async (req, res) => {
       doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
       doc.moveDown(0.3);
       const totalY = doc.y;
+      const contentRight = 555;
+      doc.font(rupeeFonts.bold).fontSize(10);
+      const totalText = rupees(subWorkTotal);
+      const totalTextWidth = doc.widthOfString(totalText);
       doc.font("Helvetica-Bold").fontSize(10);
-      doc.text("Total", colX.rate, totalY, {
-        width: rateWidth,
-        align: "right",
+      const totalLabel = "Total";
+      const totalLabelWidth = doc.widthOfString(totalLabel);
+      const totalAmountX = contentRight - totalTextWidth;
+      doc.text(totalLabel, totalAmountX - 10 - totalLabelWidth, totalY, {
+        lineBreak: false,
       });
       doc.font(rupeeFonts.bold).fontSize(10);
-      doc.text(rupees(subWorkTotal), colX.amount, totalY, {
-        width: amountWidth,
-        align: "right",
-      });
+      doc.text(totalText, totalAmountX, totalY, { lineBreak: false });
 
       // Total in words (Indian currency)
       const words = amountInIndianWords(subWorkTotal);

@@ -8497,17 +8497,11 @@ export default function HomePage() {
             {superAdminMenu.map((item) =>
               renderMenuItem(item, {
                 forceDisabled:
-                  item.id === "materials"
-                    ? !canManageMaterials
-                    : item.id === "ssr-item-master"
-                      ? !(isSuperAdmin || isOrgAdmin)
-                      : !isSuperAdmin,
+                  item.id === "materials" ? !canManageMaterials : !isSuperAdmin,
                 disabledTitle:
                   item.id === "materials"
                     ? "Available for SuperAdmin, OrgAdmin, and user category 3"
-                    : item.id === "ssr-item-master"
-                      ? "Available for SuperAdmin and OrgAdmin"
-                      : "Available only for SuperAdmin",
+                    : "Available only for SuperAdmin",
               }),
             )}
 
@@ -10181,7 +10175,7 @@ export default function HomePage() {
           )}
 
           {/* ── Item Master ── */}
-          {activeMaster === "ssr-item-master" && (isSuperAdmin || isOrgAdmin) && (
+          {activeMaster === "ssr-item-master" && isSuperAdmin && (
             <Card
               eyebrow="Master · SSR Item"
               title="SSR Item Master"
