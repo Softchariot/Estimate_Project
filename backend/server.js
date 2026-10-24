@@ -462,6 +462,28 @@ async function ensureRAComponentYearIdNullable() {
   `);
 }
 
+async function ensureQuantityColumnScale3(tableName, columnName) {
+  const current = await pool.query(
+    `SELECT data_type, numeric_scale
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = $1
+       AND column_name = $2`,
+    [tableName, columnName],
+  );
+  const column = current.rows[0];
+  if (!column) return;
+  if (column.data_type === "numeric" && Number(column.numeric_scale) === 3) {
+    return;
+  }
+  await pool.query(
+    `ALTER TABLE public."${tableName}"
+       ALTER COLUMN "${columnName}" TYPE numeric(18,3)
+       USING ROUND("${columnName}"::numeric, 3)`,
+  );
+  console.log(`${tableName}.${columnName} set to 3 decimal places.`);
+}
+
 async function ensureRAComponentTypeItem() {
   await pool.query(`
     ALTER TABLE public."MasterRAComponent"
@@ -1140,7 +1162,9 @@ app.get("/api/ssr-items-load", async (req, res) => {
       }
     }
 
-    if (String(req.query.listOrder || "") === "component") {
+    if (String(req.query.listOrder || "") === "itemcode") {
+      query += ` ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemId" ASC`;
+    } else if (String(req.query.listOrder || "") === "component") {
       query += `
         ORDER BY c."DOrder" ASC NULLS LAST,
                  COALESCE(NULLIF(c."SSRCategoryShortName", ''), c."SSRCategoryName") ASC NULLS LAST,
@@ -4211,7 +4235,7 @@ const RA_COMPONENT_USER_CATEGORY_ID = 3;
 const RA_COMPONENT_ORG_ADMIN_REGION_ID = 3;
 const RA_COMPONENT_CATEGORY3_REGION_ID = 4;
 
-/** R.A. Component access from MasterUser + MasterUserCategory, not the browser. */
+/** R.A. Component and Extra Item R A, from MasterUser + MasterUserCategory. */
 async function resolveRaComponentAccess(userId) {
   if (!userId) {
     return { error: { status: 400, message: "userId is required." } };
@@ -8794,6 +8818,66 @@ async function requireSuperOrOrgAdmin(userId, itemId) {
   return auth;
 }
 
+async function deleteRaComponentRow(req, res, componentType, label) {
+  const id = Number(req.params.id);
+  const userId = req.query.userId || req.body?.userId;
+  if (!id) {
+    return res.status(400).json({ message: `${label} id is required.` });
+  }
+  try {
+    const existing = await pool.query(
+      `SELECT "ItemId"
+       FROM "MasterRAComponent"
+       WHERE "RAComponentId" = $1
+         AND "ComponentType" = $2`,
+      [id, componentType],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      return res.status(404).json({ message: `${label} not found.` });
+    }
+    const auth = await requireSuperOrOrgAdmin(userId, row.ItemId);
+    if (auth.error) {
+      return res.status(auth.error.status).json({ message: auth.error.message });
+    }
+    await pool.query(
+      `DELETE FROM "MasterRADetail" WHERE "RAComponentId" = $1`,
+      [id],
+    );
+    const deleted = await pool.query(
+      `DELETE FROM "MasterRAComponent"
+       WHERE "RAComponentId" = $1
+         AND "ComponentType" = $2`,
+      [id, componentType],
+    );
+    if (!deleted.rowCount) {
+      return res.status(404).json({ message: `${label} not found.` });
+    }
+    return res.json({ message: `${label} removed.` });
+  } catch (error) {
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  }
+}
+
+app.delete("/api/material-components/:id", (req, res) =>
+  deleteRaComponentRow(req, res, RA_COMPONENT_TYPE_MATERIAL, "Material component"),
+);
+app.delete("/api/item-components/:id", (req, res) =>
+  deleteRaComponentRow(req, res, RA_COMPONENT_TYPE_ITEM, "Item component"),
+);
+app.delete("/api/labour-components/:id", (req, res) =>
+  deleteRaComponentRow(req, res, RA_COMPONENT_TYPE_LABOUR, "Labour component"),
+);
+app.delete("/api/machinery-components/:id", (req, res) =>
+  deleteRaComponentRow(
+    req,
+    res,
+    RA_COMPONENT_TYPE_MACHINERY,
+    "Machinery component",
+  ),
+);
+
 /** OrgAdmin may only manage RA for org NON SSR items (region 3); SSR regions are shared. */
 async function assertOrgAdminMaterialItemAccess(auth, itemId) {
   if (!auth?.isOrgAdmin) return null;
@@ -9266,6 +9350,524 @@ app.get("/api/ra-component-items", async (req, res) => {
     console.error(error);
     return res.status(500).json({ message: error.message });
   }
+});
+
+function roundQty3(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Number(n.toFixed(3));
+}
+
+function evaluateMathExpression(raw) {
+  const source = String(raw ?? "")
+    .trim()
+    .replace(/×/g, "*")
+    .replace(/[xX]/g, "*")
+    .replace(/\s+/g, "");
+  if (!source) return { error: "Math String is required." };
+  if (!/^[\d+\-*/().]+$/.test(source)) {
+    return { error: "Math String must contain only a mathematical expression." };
+  }
+  let index = 0;
+  const peek = () => source[index];
+  const parseFactor = () => {
+    if (peek() === "+") {
+      index += 1;
+      return parseFactor();
+    }
+    if (peek() === "-") {
+      index += 1;
+      return -parseFactor();
+    }
+    if (peek() === "(") {
+      index += 1;
+      const value = parseExpression();
+      if (peek() !== ")") throw new Error("paren");
+      index += 1;
+      return value;
+    }
+    const start = index;
+    while (index < source.length && /[\d.]/.test(source[index])) index += 1;
+    const token = source.slice(start, index);
+    if (!/^(?:\d+\.?\d*|\.\d+)$/.test(token)) throw new Error("number");
+    const value = Number(token);
+    if (!Number.isFinite(value)) throw new Error("number");
+    return value;
+  };
+  const parseTerm = () => {
+    let value = parseFactor();
+    while (peek() === "*" || peek() === "/") {
+      const op = source[index];
+      index += 1;
+      const right = parseFactor();
+      if (op === "/" && right === 0) throw new Error("divide");
+      value = op === "*" ? value * right : value / right;
+    }
+    return value;
+  };
+  const parseExpression = () => {
+    let value = parseTerm();
+    while (peek() === "+" || peek() === "-") {
+      const op = source[index];
+      index += 1;
+      const right = parseTerm();
+      value = op === "+" ? value + right : value - right;
+    }
+    return value;
+  };
+  try {
+    const value = parseExpression();
+    if (index !== source.length || !Number.isFinite(value)) {
+      return { error: "Math String must contain only a mathematical expression." };
+    }
+    return { quantity: roundQty3(value) };
+  } catch {
+    return { error: "Math String must contain only a mathematical expression." };
+  }
+}
+
+function parseExtraItemDetailLines(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return { error: "Add at least one quantity line." };
+  }
+  const parsed = [];
+  let total = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] || {};
+    const mathString = String(line.MathString ?? "").trim();
+    const description = String(line.Description ?? "").trim();
+    const calculated = evaluateMathExpression(mathString);
+    if (calculated.error) {
+      return {
+        error: `Line ${i + 1}: Math String must contain only a mathematical expression.`,
+      };
+    }
+    total += calculated.quantity;
+    parsed.push({
+      description: description || null,
+      mathString,
+      quantity: calculated.quantity,
+    });
+  }
+  return { lines: parsed, total: roundQty3(total) };
+}
+
+async function writeExtraItemRaDetails(client, raComponentId, lines) {
+  await client.query(
+    `DELETE FROM "MasterRADetail" WHERE "RAComponentId" = $1`,
+    [raComponentId],
+  );
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    await client.query(
+      `INSERT INTO "MasterRADetail"
+        ("RAComponentId", "Description", "MathString", "Quantity", "Remarks", "Sequence")
+       VALUES ($1, $2, $3, ROUND($4::numeric, 3), NULL, $5)`,
+      [raComponentId, line.description, line.mathString, line.quantity, i + 1],
+    );
+  }
+}
+
+app.get("/api/item-components/:id/details", async (req, res) => {
+  const id = Number(req.params.id);
+  const userId = req.query.userId;
+  if (!id) {
+    return res.status(400).json({ message: "Item component id is required." });
+  }
+  try {
+    const existing = await pool.query(
+      `SELECT "RAComponentId", "ItemId", "ComponentId"
+       FROM "MasterRAComponent"
+       WHERE "RAComponentId" = $1
+         AND "ComponentType" = $2`,
+      [id, RA_COMPONENT_TYPE_ITEM],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      return res.status(404).json({ message: "Item component not found." });
+    }
+    const auth = await requireSuperOrOrgAdmin(userId, row.ItemId);
+    if (auth.error) {
+      return res.status(auth.error.status).json({ message: auth.error.message });
+    }
+    const details = await pool.query(
+      `SELECT "RADetailId", "Description", "MathString", "Quantity", "Sequence"
+       FROM "MasterRADetail"
+       WHERE "RAComponentId" = $1
+       ORDER BY "Sequence" ASC, "RADetailId" ASC`,
+      [id],
+    );
+    return res.json({
+      ItemComponentId: row.RAComponentId,
+      ComponentItemId: row.ComponentId,
+      lines: details.rows,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.post("/api/extra-item-ra/item-components", async (req, res) => {
+  const { userId, ItemId, ComponentItemId, lines } = req.body || {};
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!ComponentItemId) {
+    return res.status(400).json({ message: "Item is required." });
+  }
+  if (Number(ComponentItemId) === Number(ItemId)) {
+    return res.status(400).json({
+      message: "An item cannot be a component of itself.",
+    });
+  }
+  const parsed = parseExtraItemDetailLines(lines);
+  if (parsed.error) {
+    return res.status(400).json({ message: parsed.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureRAComponentIdSequence();
+    const itemResult = await client.query(
+      `SELECT "UnitId" FROM "MasterItem" WHERE "ItemId" = $1`,
+      [Number(ComponentItemId)],
+    );
+    const unitId = itemResult.rows[0]?.UnitId;
+    if (!unitId) {
+      return res.status(400).json({
+        message: "Selected item has no Unit. Cannot save component.",
+      });
+    }
+    await client.query("BEGIN");
+    const inserted = await client.query(
+      `INSERT INTO "MasterRAComponent"
+        ("ItemId", "ComponentType", "ComponentId", "UnitId",
+         "Component", "Description", "Remarks")
+       VALUES ($1, $2, $3, $4, ROUND($5::numeric, 3), NULL, NULL)
+       RETURNING "RAComponentId"`,
+      [
+        Number(ItemId),
+        RA_COMPONENT_TYPE_ITEM,
+        Number(ComponentItemId),
+        Number(unitId),
+        parsed.total,
+      ],
+    );
+    const raComponentId = inserted.rows[0].RAComponentId;
+    await writeExtraItemRaDetails(client, raComponentId, parsed.lines);
+    await client.query("COMMIT");
+    return res.status(201).json({
+      ItemComponentId: raComponentId,
+      Component: parsed.total,
+    });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/api/extra-item-ra/item-components/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const { userId, ItemId, ComponentItemId, lines } = req.body || {};
+  if (!id) {
+    return res.status(400).json({ message: "Item component id is required." });
+  }
+  const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  if (!ItemId) {
+    return res.status(400).json({ message: "ItemId is required." });
+  }
+  if (!ComponentItemId) {
+    return res.status(400).json({ message: "Item is required." });
+  }
+  if (Number(ComponentItemId) === Number(ItemId)) {
+    return res.status(400).json({
+      message: "An item cannot be a component of itself.",
+    });
+  }
+  const parsed = parseExtraItemDetailLines(lines);
+  if (parsed.error) {
+    return res.status(400).json({ message: parsed.error });
+  }
+
+  const client = await pool.connect();
+  try {
+    const existing = await client.query(
+      `SELECT "RAComponentId"
+       FROM "MasterRAComponent"
+       WHERE "RAComponentId" = $1
+         AND "ItemId" = $2
+         AND "ComponentType" = $3`,
+      [id, Number(ItemId), RA_COMPONENT_TYPE_ITEM],
+    );
+    if (!existing.rows[0]) {
+      return res.status(404).json({ message: "Item component not found." });
+    }
+    const itemResult = await client.query(
+      `SELECT "UnitId" FROM "MasterItem" WHERE "ItemId" = $1`,
+      [Number(ComponentItemId)],
+    );
+    const unitId = itemResult.rows[0]?.UnitId;
+    if (!unitId) {
+      return res.status(400).json({
+        message: "Selected item has no Unit. Cannot save component.",
+      });
+    }
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE "MasterRAComponent"
+       SET "ComponentId" = $1,
+           "UnitId" = $2,
+           "Component" = ROUND($3::numeric, 3),
+           "Description" = NULL,
+           "Remarks" = NULL
+       WHERE "RAComponentId" = $4
+         AND "ComponentType" = $5`,
+      [Number(ComponentItemId), Number(unitId), parsed.total, id, RA_COMPONENT_TYPE_ITEM],
+    );
+    await writeExtraItemRaDetails(client, id, parsed.lines);
+    await client.query("COMMIT");
+    return res.json({ ItemComponentId: id, Component: parsed.total });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+function registerExtraItemRaDetailRoutes(spec) {
+  app.get(spec.detailsPath, async (req, res) => {
+    const id = Number(req.params.id);
+    const userId = req.query.userId;
+    if (!id) {
+      return res.status(400).json({ message: `${spec.label} id is required.` });
+    }
+    try {
+      const existing = await pool.query(
+        `SELECT "RAComponentId", "ItemId", "ComponentId"
+         FROM "MasterRAComponent"
+         WHERE "RAComponentId" = $1
+           AND "ComponentType" = $2`,
+        [id, spec.componentType],
+      );
+      const row = existing.rows[0];
+      if (!row) {
+        return res.status(404).json({ message: `${spec.label} not found.` });
+      }
+      const auth = await requireSuperOrOrgAdmin(userId, row.ItemId);
+      if (auth.error) {
+        return res.status(auth.error.status).json({ message: auth.error.message });
+      }
+      const details = await pool.query(
+        `SELECT "RADetailId", "Description", "MathString", "Quantity", "Sequence"
+         FROM "MasterRADetail"
+         WHERE "RAComponentId" = $1
+         ORDER BY "Sequence" ASC, "RADetailId" ASC`,
+        [id],
+      );
+      return res.json({
+        [spec.idKey]: row.RAComponentId,
+        [spec.componentKey]: row.ComponentId,
+        lines: details.rows,
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post(spec.createPath, async (req, res) => {
+    const body = req.body || {};
+    const componentId = body[spec.componentKey];
+    const { userId, ItemId, lines } = body;
+    const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+    if (auth.error) {
+      return res.status(auth.error.status).json({ message: auth.error.message });
+    }
+    if (!ItemId) {
+      return res.status(400).json({ message: "ItemId is required." });
+    }
+    if (!componentId) {
+      return res.status(400).json({ message: spec.missingComponent });
+    }
+    const parsed = parseExtraItemDetailLines(lines);
+    if (parsed.error) {
+      return res.status(400).json({ message: parsed.error });
+    }
+
+    const client = await pool.connect();
+    try {
+      await ensureRAComponentIdSequence();
+      const unitResult = await client.query(spec.unitSql, [Number(componentId)]);
+      const unitId = unitResult.rows[0]?.UnitId;
+      if (!unitId) {
+        return res.status(400).json({ message: spec.missingUnit });
+      }
+      await client.query("BEGIN");
+      const inserted = await client.query(
+        `INSERT INTO "MasterRAComponent"
+          ("ItemId", "ComponentType", "ComponentId", "UnitId",
+           "Component", "Description", "Remarks")
+         VALUES ($1, $2, $3, $4, ROUND($5::numeric, 3), NULL, NULL)
+         RETURNING "RAComponentId"`,
+        [
+          Number(ItemId),
+          spec.componentType,
+          Number(componentId),
+          Number(unitId),
+          parsed.total,
+        ],
+      );
+      const raComponentId = inserted.rows[0].RAComponentId;
+      await writeExtraItemRaDetails(client, raComponentId, parsed.lines);
+      await client.query("COMMIT");
+      return res.status(201).json({
+        [spec.idKey]: raComponentId,
+        Component: parsed.total,
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {
+        /* ignore */
+      }
+      console.error(error);
+      return res.status(error.status || 500).json({ message: error.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  app.put(`${spec.createPath}/:id`, async (req, res) => {
+    const id = Number(req.params.id);
+    const body = req.body || {};
+    const componentId = body[spec.componentKey];
+    const { userId, ItemId, lines } = body;
+    if (!id) {
+      return res.status(400).json({ message: `${spec.label} id is required.` });
+    }
+    const auth = await requireSuperOrOrgAdmin(userId, ItemId);
+    if (auth.error) {
+      return res.status(auth.error.status).json({ message: auth.error.message });
+    }
+    if (!ItemId) {
+      return res.status(400).json({ message: "ItemId is required." });
+    }
+    if (!componentId) {
+      return res.status(400).json({ message: spec.missingComponent });
+    }
+    const parsed = parseExtraItemDetailLines(lines);
+    if (parsed.error) {
+      return res.status(400).json({ message: parsed.error });
+    }
+
+    const client = await pool.connect();
+    try {
+      const existing = await client.query(
+        `SELECT "RAComponentId"
+         FROM "MasterRAComponent"
+         WHERE "RAComponentId" = $1
+           AND "ItemId" = $2
+           AND "ComponentType" = $3`,
+        [id, Number(ItemId), spec.componentType],
+      );
+      if (!existing.rows[0]) {
+        return res.status(404).json({ message: `${spec.label} not found.` });
+      }
+      const unitResult = await client.query(spec.unitSql, [Number(componentId)]);
+      const unitId = unitResult.rows[0]?.UnitId;
+      if (!unitId) {
+        return res.status(400).json({ message: spec.missingUnit });
+      }
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE "MasterRAComponent"
+         SET "ComponentId" = $1,
+             "UnitId" = $2,
+             "Component" = ROUND($3::numeric, 3),
+             "Description" = NULL,
+             "Remarks" = NULL
+         WHERE "RAComponentId" = $4
+           AND "ComponentType" = $5`,
+        [
+          Number(componentId),
+          Number(unitId),
+          parsed.total,
+          id,
+          spec.componentType,
+        ],
+      );
+      await writeExtraItemRaDetails(client, id, parsed.lines);
+      await client.query("COMMIT");
+      return res.json({ [spec.idKey]: id, Component: parsed.total });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {
+        /* ignore */
+      }
+      console.error(error);
+      return res.status(error.status || 500).json({ message: error.message });
+    } finally {
+      client.release();
+    }
+  });
+}
+
+registerExtraItemRaDetailRoutes({
+  label: "Material component",
+  componentType: RA_COMPONENT_TYPE_MATERIAL,
+  idKey: "MaterialComponentId",
+  componentKey: "MaterialId",
+  detailsPath: "/api/material-components/:id/details",
+  createPath: "/api/extra-item-ra/material-components",
+  missingComponent: "Material is required.",
+  missingUnit: "Selected material has no Unit. Cannot save component.",
+  unitSql: `SELECT "MaterialLocalUnitId" AS "UnitId" FROM "MasterMaterial" WHERE "MaterialId" = $1`,
+});
+
+registerExtraItemRaDetailRoutes({
+  label: "Labour component",
+  componentType: RA_COMPONENT_TYPE_LABOUR,
+  idKey: "LabourComponentId",
+  componentKey: "LabourId",
+  detailsPath: "/api/labour-components/:id/details",
+  createPath: "/api/extra-item-ra/labour-components",
+  missingComponent: "Labour is required.",
+  missingUnit: "Selected labour has no Unit. Cannot save component.",
+  unitSql: `SELECT "UnitId" FROM "MasterLabour" WHERE "LabourId" = $1`,
+});
+
+registerExtraItemRaDetailRoutes({
+  label: "Machinery component",
+  componentType: RA_COMPONENT_TYPE_MACHINERY,
+  idKey: "MachineryComponentId",
+  componentKey: "MachineryId",
+  detailsPath: "/api/machinery-components/:id/details",
+  createPath: "/api/extra-item-ra/machinery-components",
+  missingComponent: "Machinery is required.",
+  missingUnit: "Selected machinery has no Unit. Cannot save component.",
+  unitSql: `SELECT "UnitId" FROM "MasterMachinery" WHERE "MachineryId" = $1`,
 });
 
 app.get("/api/item-components", async (req, res) => {
@@ -10416,7 +11018,8 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
         .toUpperCase() === "CPWD";
 
     const materials = await pool.query(
-      `SELECT m."ItemCode",
+      `SELECT ra."RAComponentId",
+              m."ItemCode",
               COALESCE(
                 NULLIF(BTRIM(m."MaterialShortDescription"), ''),
                 NULLIF(BTRIM(m."MaterialDescription"), '')
@@ -10435,7 +11038,8 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       [Number(itemId), RA_COMPONENT_TYPE_MATERIAL],
     );
     const labours = await pool.query(
-      `SELECT l."ItemCode",
+      `SELECT ra."RAComponentId",
+              l."ItemCode",
               NULLIF(BTRIM(l."LabourDescription"), '') AS "ComponentName",
               NULLIF(BTRIM(ra."Description"), '') AS "Description",
               u."UnitShortName",
@@ -10450,7 +11054,8 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       [Number(itemId), RA_COMPONENT_TYPE_LABOUR],
     );
     const machineries = await pool.query(
-      `SELECT m."ItemCode",
+      `SELECT ra."RAComponentId",
+              m."ItemCode",
               NULLIF(BTRIM(m."MachineryDescription"), '') AS "ComponentName",
               NULLIF(BTRIM(ra."Description"), '') AS "Description",
               u."UnitShortName",
@@ -10465,7 +11070,8 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       [Number(itemId), RA_COMPONENT_TYPE_MACHINERY],
     );
     const itemComponents = await pool.query(
-      `SELECT COALESCE(
+      `SELECT ra."RAComponentId",
+              COALESCE(
                 NULLIF(BTRIM(src."ItemNumber"), ''),
                 NULLIF(BTRIM(src."ItemCode"), '')
               ) AS "ItemCode",
@@ -10487,8 +11093,37 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       [Number(itemId), RA_COMPONENT_TYPE_ITEM],
     );
 
+    const detailComponentIds = [
+      ...materials.rows,
+      ...labours.rows,
+      ...machineries.rows,
+      ...itemComponents.rows,
+    ]
+      .map((row) => Number(row.RAComponentId))
+      .filter((id) => id > 0);
+    const detailsByComponent = new Map();
+    if (detailComponentIds.length) {
+      const detailResult = await pool.query(
+        `SELECT "RAComponentId", "Description", "MathString", "Quantity"
+         FROM "MasterRADetail"
+         WHERE "RAComponentId" = ANY($1::int[])
+         ORDER BY "RAComponentId" ASC, "Sequence" ASC, "RADetailId" ASC`,
+        [detailComponentIds],
+      );
+      for (const line of detailResult.rows) {
+        const key = Number(line.RAComponentId);
+        if (!detailsByComponent.has(key)) detailsByComponent.set(key, []);
+        detailsByComponent.get(key).push(line);
+      }
+    }
+
     const unitLabel = item.UnitName || item.UnitShortName || "";
+    const itemCode = String(item.ItemCode || "").trim();
     const itemNumber = String(item.ItemNumber || "").trim();
+    const itemCodeDisplay =
+      itemCode && itemNumber
+        ? `${itemCode} - Item No: ${itemNumber}`
+        : itemCode || (itemNumber ? `Item No: ${itemNumber}` : "—");
     const fullDescription = String(item.ItemDescription || "")
       .replace(/\s+/g, " ")
       .trim();
@@ -10575,6 +11210,43 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       drawLine();
     };
 
+    const formatDetailQty = (n) =>
+      Number(n || 0).toLocaleString("en-IN", {
+        minimumFractionDigits: 3,
+        maximumFractionDigits: 3,
+      });
+
+    const drawDetailLine = (detail) => {
+      const desc = String(detail.Description || "").trim();
+      const math = String(detail.MathString || "").trim();
+      const qty = Number(detail.Quantity) || 0;
+      const indent = 10;
+      const mathW = Math.min(110, Math.floor(colDescW * 0.38));
+      const descW = Math.max(40, colDescW - indent - mathW - 6);
+      doc.font("Helvetica").fontSize(8);
+      const descHeight = Math.max(
+        11,
+        doc.heightOfString(desc || " ", { width: descW }),
+        math
+          ? doc.heightOfString(math, { width: mathW })
+          : 0,
+      );
+      ensureSpace(descHeight + 3);
+      const y = doc.y;
+      doc.text(desc, colDesc + indent, y, { width: descW });
+      if (math) {
+        doc.text(math, colDesc + indent + descW, y, {
+          width: mathW,
+          align: "right",
+        });
+      }
+      doc.text(formatDetailQty(qty), colQty, y, {
+        width: colQtyW,
+        align: "right",
+      });
+      doc.y = Math.max(doc.y, y + descHeight + 2);
+    };
+
     const drawComponentRow = (row) => {
       const code = String(row.ItemCode || "");
       const componentName = String(row.ComponentName || "").trim();
@@ -10613,6 +11285,8 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       drawAmount(rate, colRate, y, colRateW);
       drawAmount(amount, colAmt, y, colAmtW);
       doc.y = y + descHeight + 4;
+      const details = detailsByComponent.get(Number(row.RAComponentId)) || [];
+      for (const detail of details) drawDetailLine(detail);
       return amount;
     };
 
@@ -10747,7 +11421,7 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     });
     doc.y = headerY + 18;
     doc.font("Helvetica-Bold").fontSize(11);
-    doc.text(`Item Code  ${itemNumber || "—"}`, left, doc.y, { width });
+    doc.text(`Item Code  ${itemCodeDisplay}`, left, doc.y, { width });
     doc.moveDown(0.25);
     if (fullDescription) {
       doc.font("Helvetica").fontSize(10);
@@ -11584,6 +12258,8 @@ app.listen(port, async () => {
     await ensureWorkMeasurementSequence();
     await ensureWorkMeasurementNullableQuantity();
     await ensureWorkMeasurementGroupId();
+    await ensureQuantityColumnScale3("MasterRAComponent", "Component");
+    await ensureQuantityColumnScale3("MasterRADetail", "Quantity");
     await ensureMaterialComponentIdSequence();
     await ensureRAComponentIdSequence();
     await ensureRAComponentYearIdNullable();

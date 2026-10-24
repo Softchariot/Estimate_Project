@@ -88,6 +88,12 @@ const superAdminMenu = [
     icon: "🧱",
   },
   {
+    id: "extra-item-ra",
+    label: "Extra Item R A",
+    status: "active",
+    icon: "🔧",
+  },
+  {
     id: "ssr-item-master",
     label: "SSR Item Master",
     status: "active",
@@ -293,11 +299,19 @@ function canAccessItemMaster(user) {
   );
 }
 
-/** R.A. Component menu: SuperAdmin, UserCategoryId 3, or OrgAdmin. */
+/** R.A. Component menu: SuperAdmin only. */
 function canAccessRaComponent(user) {
-  if (isSuperAdminUser(user)) return true;
+  return isSuperAdminUser(user);
+}
+
+/**
+ * Extra Item R A: OrgAdmin (region 3, own organization) or user category 3 (region 4).
+ * SuperAdmin keeps R.A. Component instead.
+ */
+function canAccessExtraItemRa(user) {
+  if (isSuperAdminUser(user)) return false;
   if (Number(user?.UserCategoryId) === 3) return true;
-  return Number(user?.UserCategoryId) !== 3 && isOrgAdminUser(user);
+  return isOrgAdminUser(user);
 }
 
 /** Category and sub category are optional for NON DSR and user category 3. */
@@ -944,6 +958,352 @@ function createItemComponentDraftRow() {
   };
 }
 
+function createDetailLine() {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    Description: "",
+    MathString: "",
+    Quantity: "",
+  };
+}
+
+function roundQty3(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Number(n.toFixed(3));
+}
+
+function detailQuantityTotal(lines) {
+  const sum = (lines || []).reduce((total, line) => {
+    const value = Number(line.Quantity);
+    return total + (Number.isFinite(value) ? value : 0);
+  }, 0);
+  return roundQty3(sum);
+}
+
+/** Numbers and + - * / x ( ) only. Quantity is the calculated result. */
+function evaluateMathExpression(raw) {
+  const source = String(raw ?? "")
+    .trim()
+    .replace(/×/g, "*")
+    .replace(/[xX]/g, "*")
+    .replace(/\s+/g, "");
+  if (!source) return { error: "Math String is required." };
+  if (!/^[\d+\-*/().]+$/.test(source)) {
+    return { error: "Math String must contain only a mathematical expression." };
+  }
+  let index = 0;
+  const peek = () => source[index];
+  const parseFactor = () => {
+    if (peek() === "+") {
+      index += 1;
+      return parseFactor();
+    }
+    if (peek() === "-") {
+      index += 1;
+      return -parseFactor();
+    }
+    if (peek() === "(") {
+      index += 1;
+      const value = parseExpression();
+      if (peek() !== ")") throw new Error("paren");
+      index += 1;
+      return value;
+    }
+    const start = index;
+    while (index < source.length && /[\d.]/.test(source[index])) index += 1;
+    const token = source.slice(start, index);
+    if (!/^(?:\d+\.?\d*|\.\d+)$/.test(token)) throw new Error("number");
+    const value = Number(token);
+    if (!Number.isFinite(value)) throw new Error("number");
+    return value;
+  };
+  const parseTerm = () => {
+    let value = parseFactor();
+    while (peek() === "*" || peek() === "/") {
+      const op = source[index];
+      index += 1;
+      const right = parseFactor();
+      if (op === "/" && right === 0) throw new Error("divide");
+      value = op === "*" ? value * right : value / right;
+    }
+    return value;
+  };
+  const parseExpression = () => {
+    let value = parseTerm();
+    while (peek() === "+" || peek() === "-") {
+      const op = source[index];
+      index += 1;
+      const right = parseTerm();
+      value = op === "+" ? value + right : value - right;
+    }
+    return value;
+  };
+  try {
+    const value = parseExpression();
+    if (index !== source.length || !Number.isFinite(value)) {
+      return { error: "Math String must contain only a mathematical expression." };
+    }
+    return { quantity: roundQty3(value) };
+  } catch {
+    return { error: "Math String must contain only a mathematical expression." };
+  }
+}
+
+function mapLoadedDetailLines(lines) {
+  if (!Array.isArray(lines) || !lines.length) return [createDetailLine()];
+  return lines.map((line) => ({
+    key: `detail-${line.RADetailId || line.Sequence}`,
+    Description: line.Description == null ? "" : String(line.Description),
+    MathString: line.MathString == null ? "" : String(line.MathString),
+    Quantity:
+      line.Quantity === null || line.Quantity === undefined
+        ? ""
+        : roundQty3(line.Quantity).toFixed(3),
+  }));
+}
+
+function validateExtraItemLines(lines) {
+  const filled = (lines || []).filter(
+    (line) =>
+      String(line.MathString || "").trim() ||
+      String(line.Quantity || "").trim() ||
+      String(line.Description || "").trim(),
+  );
+  if (!filled.length) {
+    return { error: "Add at least one line with a mathematical expression." };
+  }
+  const calculated = filled.map((line) => evaluateMathExpression(line.MathString));
+  if (calculated.some((result) => result.error)) {
+    return {
+      error:
+        "Math String must be a mathematical expression only, such as 2*3*0.5. Quantity is calculated from it.",
+    };
+  }
+  return {
+    lines: filled.map((line, index) => ({
+      Description: String(line.Description || "").trim(),
+      MathString: String(line.MathString || "").trim(),
+      Quantity: calculated[index].quantity,
+    })),
+  };
+}
+
+function ExtraItemDetailEntry({
+  inputStyle,
+  readonlyInputStyle,
+  search,
+  onSearchChange,
+  searchPlaceholder,
+  selectLabel,
+  selectValue,
+  selectPlaceholder,
+  options,
+  onSelect,
+  onOpenChange,
+  lines,
+  setLines,
+  unitName,
+  unitPlaceholder,
+  pickerLocked = false,
+  saving = false,
+  editing = false,
+  onCancel,
+}) {
+  const [listOpen, setListOpen] = useState(false);
+  const [hoverTip, setHoverTip] = useState(null);
+  const locked = pickerLocked || listOpen;
+  const detailGrid =
+    "minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(120px, 0.7fr) minmax(90px, 0.5fr) auto";
+
+  return (
+    <div
+      style={{
+        background: "#D9D3C3",
+        border: "1px solid #C4BCA8",
+        borderRadius: 10,
+        padding: 16,
+      }}
+    >
+      <div style={{ marginBottom: 14 }}>
+        <Field label="Search Text or Item Code">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder={searchPlaceholder}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.preventDefault();
+            }}
+            style={inputStyle}
+          />
+        </Field>
+      </div>
+      <Field label={selectLabel} required>
+        <CatalogOptionList
+          value={selectValue}
+          placeholder={selectPlaceholder}
+          search={search}
+          inputStyle={inputStyle}
+          onOpenChange={(isOpen) => {
+            setListOpen(isOpen);
+            onOpenChange?.(isOpen);
+          }}
+          onLeave={() => setHoverTip(null)}
+          onHover={(event, option) => {
+            const text = fullDescriptionText(option?.description);
+            setHoverTip(text ? { text, ...catalogTipPosition(event) } : null);
+          }}
+          onSelect={(id) => onSelect(id == null ? "" : String(id))}
+          options={options}
+        />
+      </Field>
+      <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+        {lines.map((line, index) => (
+          <div
+            key={line.key}
+            style={{
+              display: "grid",
+              gridTemplateColumns: detailGrid,
+              gap: 12,
+              alignItems: "end",
+              padding: 12,
+              border: "1px solid #C4BCA8",
+              borderRadius: 8,
+              background: "#E8E3D4",
+            }}
+          >
+            <Field label={index === 0 ? "Description" : `Description ${index + 1}`}>
+              <input
+                value={line.Description}
+                onChange={(e) =>
+                  setLines((prev) =>
+                    prev.map((item) =>
+                      item.key === line.key
+                        ? { ...item, Description: e.target.value }
+                        : item,
+                    ),
+                  )
+                }
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </Field>
+            <Field label="Math String" required>
+              <input
+                value={line.MathString}
+                placeholder="e.g. 2*3*0.5"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  const result = evaluateMathExpression(next);
+                  setLines((prev) =>
+                    prev.map((item) =>
+                      item.key === line.key
+                        ? {
+                            ...item,
+                            MathString: next,
+                            Quantity:
+                              result.quantity == null
+                                ? ""
+                                : result.quantity.toFixed(3),
+                          }
+                        : item,
+                    ),
+                  );
+                }}
+                style={{ ...inputStyle, width: "100%" }}
+              />
+              {String(line.MathString || "").trim() &&
+              evaluateMathExpression(line.MathString).error ? (
+                <span style={{ color: theme.colors.red, fontSize: 12 }}>
+                  Mathematical expression only.
+                </span>
+              ) : null}
+            </Field>
+            <Field label="Quantity" required>
+              <input
+                value={line.Quantity}
+                readOnly
+                placeholder="Calculated"
+                style={{ ...readonlyInputStyle, width: "100%" }}
+              />
+            </Field>
+            <Field label="Unit">
+              <input
+                value={unitName}
+                readOnly
+                disabled
+                placeholder={unitPlaceholder}
+                style={{ ...readonlyInputStyle, width: "100%" }}
+              />
+            </Field>
+            <SecondaryButton
+              type="button"
+              disabled={locked}
+              onClick={() =>
+                setLines((prev) => {
+                  if (prev.length <= 1) return [createDetailLine()];
+                  return prev.filter((item) => item.key !== line.key);
+                })
+              }
+              style={{ marginBottom: 2 }}
+            >
+              Remove
+            </SecondaryButton>
+          </div>
+        ))}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: detailGrid,
+          gap: 12,
+          alignItems: "center",
+          marginTop: 8,
+          padding: "0 13px",
+          fontWeight: 700,
+          fontSize: 14,
+        }}
+      >
+        <span />
+        <span style={{ textAlign: "right" }}>Total Quantity</span>
+        <span style={{ paddingLeft: 11 }}>
+          {detailQuantityTotal(lines).toLocaleString("en-IN", {
+            minimumFractionDigits: 3,
+            maximumFractionDigits: 3,
+          })}
+        </span>
+        <span style={{ paddingLeft: 11 }}>{unitName}</span>
+        <span />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          marginTop: 18,
+          flexWrap: "wrap",
+        }}
+      >
+        <SecondaryButton
+          type="button"
+          disabled={locked}
+          onClick={() => setLines((prev) => [...prev, createDetailLine()])}
+        >
+          + Add another line
+        </SecondaryButton>
+        <PrimaryButton disabled={saving || locked}>
+          {saving ? "Saving…" : editing ? "Update component" : "Save component"}
+        </PrimaryButton>
+        {editing ? (
+          <SecondaryButton type="button" onClick={onCancel} disabled={locked}>
+            Cancel edit
+          </SecondaryButton>
+        ) : null}
+      </div>
+      <FullDescriptionTip tip={hoverTip} />
+    </div>
+  );
+}
+
 function ItemComponentsPanel({
   apiBase,
   userId,
@@ -953,6 +1313,7 @@ function ItemComponentsPanel({
   canEdit,
   inputStyle,
   onPickerOpenChange,
+  detailEntry = false,
 }) {
   const [itemMasterList, setItemMasterList] = useState([]);
   const [pickerSearch, setPickerSearch] = useState("");
@@ -960,6 +1321,8 @@ function ItemComponentsPanel({
   const [componentList, setComponentList] = useState([]);
   const [loadingComponents, setLoadingComponents] = useState(false);
   const [draftRows, setDraftRows] = useState([createItemComponentDraftRow()]);
+  const [detailItemId, setDetailItemId] = useState("");
+  const [detailLines, setDetailLines] = useState([createDetailLine()]);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
     ComponentItemId: "",
@@ -1071,6 +1434,8 @@ function ItemComponentsPanel({
       UnitId: "",
     });
     setDraftRows([createItemComponentDraftRow()]);
+    setDetailItemId("");
+    setDetailLines([createDetailLine()]);
     setPanelMessage("");
     loadComponents(itemId);
   }, [itemId]);
@@ -1120,9 +1485,42 @@ function ItemComponentsPanel({
       UnitId: "",
     });
     setDraftRows([createItemComponentDraftRow()]);
+    setDetailItemId("");
+    setDetailLines([createDetailLine()]);
   };
 
-  const startEdit = (row) => {
+  const startEdit = async (row) => {
+    if (detailEntry) {
+      setEditingId(row.ItemComponentId);
+      setDetailItemId(String(row.ComponentItemId || ""));
+      setPanelMessage("");
+      try {
+        const res = await axios.get(
+          `${apiBase}/api/item-components/${row.ItemComponentId}/details`,
+          { params: { userId } },
+        );
+        const lines = Array.isArray(res.data?.lines) ? res.data.lines : [];
+        setDetailItemId(String(res.data?.ComponentItemId || row.ComponentItemId || ""));
+        setDetailLines(
+          lines.length
+            ? lines.map((line) => ({
+                key: `detail-${line.RADetailId || line.Sequence}`,
+                Description: line.Description == null ? "" : String(line.Description),
+                MathString: line.MathString == null ? "" : String(line.MathString),
+                Quantity:
+                  line.Quantity === null || line.Quantity === undefined
+                    ? ""
+                    : String(line.Quantity),
+              }))
+            : [createDetailLine()],
+        );
+      } catch (err) {
+        setPanelMessage(
+          `Failed to load detail lines: ${err.response?.data?.message || err.message}`,
+        );
+      }
+      return;
+    }
     const selected = selectableItems.find(
       (item) => Number(item.ItemId) === Number(row.ComponentItemId),
     );
@@ -1140,6 +1538,27 @@ function ItemComponentsPanel({
     });
   };
 
+  const removeItemComponent = async (row) => {
+    if (!canEdit) {
+      setPanelMessage("Only SuperAdmin or OrgAdmin can manage item components.");
+      return;
+    }
+    const label = formatItemComponentLabel(row) || row.ComponentItemId;
+    if (!window.confirm(`Remove item component ${label}?`)) return;
+    try {
+      await axios.delete(`${apiBase}/api/item-components/${row.ItemComponentId}`, {
+        params: { userId },
+      });
+      if (Number(editingId) === Number(row.ItemComponentId)) resetEdit();
+      setPanelMessage("Item component removed.");
+      await loadComponents(itemId);
+    } catch (err) {
+      setPanelMessage(
+        `Item component remove failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
+  };
+
   const onSubmit = async (e) => {
     e.preventDefault();
     if (!canEdit) {
@@ -1148,6 +1567,79 @@ function ItemComponentsPanel({
     }
     if (!itemId) {
       alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (detailEntry) {
+      if (!detailItemId) {
+        alert("Select an item.");
+        return;
+      }
+      const selected = selectableItems.find(
+        (row) => Number(row.ItemId) === Number(detailItemId),
+      );
+      if (!selected?.UnitId && !String(selected?.UnitShortName || "").trim()) {
+        alert("Selected item has no Unit. Choose another item.");
+        return;
+      }
+      const lines = detailLines.filter(
+        (line) =>
+          String(line.MathString || "").trim() ||
+          String(line.Quantity || "").trim() ||
+          String(line.Description || "").trim(),
+      );
+      if (!lines.length) {
+        alert("Add at least one line with a mathematical expression.");
+        return;
+      }
+      const calculated = lines.map((line) =>
+        evaluateMathExpression(line.MathString),
+      );
+      if (calculated.some((result) => result.error)) {
+        alert(
+          "Math String must be a mathematical expression only, such as 2*3*0.5. Quantity is calculated from it.",
+        );
+        return;
+      }
+      if (
+        !window.confirm(
+          editingId ? "Update this item component?" : "Save this item component?",
+        )
+      ) {
+        return;
+      }
+      setSaving(true);
+      setPanelMessage("");
+      try {
+        const payload = {
+          userId,
+          ItemId: itemId,
+          ComponentItemId: detailItemId,
+          lines: lines.map((line, index) => ({
+            Description: String(line.Description || "").trim(),
+            MathString: String(line.MathString || "").trim(),
+            Quantity: calculated[index].quantity,
+          })),
+        };
+        if (editingId) {
+          await axios.put(
+            `${apiBase}/api/extra-item-ra/item-components/${editingId}`,
+            payload,
+          );
+          setPanelMessage("Item component updated.");
+        } else {
+          await axios.post(`${apiBase}/api/extra-item-ra/item-components`, payload);
+          setPanelMessage("Item component saved.");
+        }
+        resetEdit();
+        await loadComponents(itemId);
+      } catch (err) {
+        setPanelMessage(
+          `Item component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSaving(false);
+      }
       return;
     }
 
@@ -1319,12 +1811,20 @@ function ItemComponentsPanel({
                         {formatRupees(row.CompletedRate)}
                       </td>
                       <td>
-                        <GhostIconButton
-                          tone={theme.colors.accent}
-                          onClick={() => startEdit(row)}
-                        >
-                          ✎ Edit
-                        </GhostIconButton>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <GhostIconButton
+                            tone={theme.colors.accent}
+                            onClick={() => startEdit(row)}
+                          >
+                            ✎ Edit
+                          </GhostIconButton>
+                          <GhostIconButton
+                            tone={theme.colors.red}
+                            onClick={() => removeItemComponent(row)}
+                          >
+                            Remove
+                          </GhostIconButton>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1339,7 +1839,228 @@ function ItemComponentsPanel({
 
           <div style={{ marginTop: 18 }}>
             <FormShell onSubmit={onSubmit}>
-              {editingId ? (
+              {detailEntry ? (
+                <div
+                  style={{
+                    background: "#D9D3C3",
+                    border: "1px solid #C4BCA8",
+                    borderRadius: 10,
+                    padding: 16,
+                  }}
+                >
+                  <div style={{ marginBottom: 14 }}>
+                    <Field label="Search Text or Item Code">
+                      <input
+                        type="text"
+                        value={pickerSearch}
+                        onChange={(e) => setPickerSearch(e.target.value)}
+                        placeholder="Type Item Code or text to filter Item"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.preventDefault();
+                        }}
+                        style={inputStyle}
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Item" required>
+                    <CatalogOptionList
+                      value={detailItemId}
+                      placeholder="Select Item"
+                      search={pickerSearch}
+                      inputStyle={inputStyle}
+                      onOpenChange={(isOpen) => setPickerOpen("detail-item", isOpen)}
+                      onLeave={() => {
+                        setItemHoverTip(null);
+                        setHoverPreview(null);
+                      }}
+                      onHover={(event, option) => {
+                        const text = fullDescriptionText(option?.description);
+                        setItemHoverTip(
+                          text ? { text, ...catalogTipPosition(event) } : null,
+                        );
+                      }}
+                      onSelect={(componentItemId) =>
+                        setDetailItemId(String(componentItemId))
+                      }
+                      options={selectableItems
+                        .filter(
+                          (row) =>
+                            Number(row.ItemId) === Number(detailItemId) ||
+                            itemComponentMatchesSearch(row, pickerSearch),
+                        )
+                        .map((row) => ({
+                          id: row.ItemId,
+                          label: formatItemComponentLabel(row),
+                          description: row.ItemDescription,
+                          unit: row.UnitShortName || "",
+                          disabled: !String(row.UnitShortName || "").trim(),
+                        }))}
+                    />
+                  </Field>
+                  <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+                    {detailLines.map((line, index) => (
+                      <div
+                        key={line.key}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(120px, 0.7fr) minmax(90px, 0.5fr) auto",
+                          gap: 12,
+                          alignItems: "end",
+                          padding: 12,
+                          border: "1px solid #C4BCA8",
+                          borderRadius: 8,
+                          background: "#E8E3D4",
+                        }}
+                      >
+                        <Field label={index === 0 ? "Description" : `Description ${index + 1}`}>
+                          <input
+                            value={line.Description}
+                            onChange={(e) =>
+                              setDetailLines((prev) =>
+                                prev.map((item) =>
+                                  item.key === line.key
+                                    ? { ...item, Description: e.target.value }
+                                    : item,
+                                ),
+                              )
+                            }
+                            style={{ ...inputStyle, width: "100%" }}
+                          />
+                        </Field>
+                        <Field label="Math String" required>
+                          <input
+                            value={line.MathString}
+                            placeholder="e.g. 2*3*0.5"
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              const result = evaluateMathExpression(next);
+                              setDetailLines((prev) =>
+                                prev.map((item) =>
+                                  item.key === line.key
+                                    ? {
+                                        ...item,
+                                        MathString: next,
+                                        Quantity:
+                                          result.quantity == null
+                                            ? ""
+                                            : result.quantity.toFixed(3),
+                                      }
+                                    : item,
+                                ),
+                              );
+                            }}
+                            style={{ ...inputStyle, width: "100%" }}
+                          />
+                          {String(line.MathString || "").trim() &&
+                          evaluateMathExpression(line.MathString).error ? (
+                            <span style={{ color: theme.colors.red, fontSize: 12 }}>
+                              Mathematical expression only.
+                            </span>
+                          ) : null}
+                        </Field>
+                        <Field label="Quantity" required>
+                          <input
+                            value={line.Quantity}
+                            readOnly
+                            placeholder="Calculated"
+                            style={{ ...readonlyInputStyle, width: "100%" }}
+                          />
+                        </Field>
+                        <Field label="Unit">
+                          <input
+                            value={
+                              selectableItems.find(
+                                (row) =>
+                                  Number(row.ItemId) === Number(detailItemId),
+                              )?.UnitShortName || ""
+                            }
+                            readOnly
+                            disabled
+                            placeholder="Item unit"
+                            style={{ ...readonlyInputStyle, width: "100%" }}
+                          />
+                        </Field>
+                        <SecondaryButton
+                          type="button"
+                          disabled={pickerLocked}
+                          onClick={() =>
+                            setDetailLines((prev) => {
+                              if (prev.length <= 1) return [createDetailLine()];
+                              return prev.filter((item) => item.key !== line.key);
+                            })
+                          }
+                          style={{ marginBottom: 2 }}
+                        >
+                          Remove
+                        </SecondaryButton>
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(120px, 0.7fr) minmax(90px, 0.5fr) auto",
+                      gap: 12,
+                      alignItems: "center",
+                      marginTop: 8,
+                      padding: "0 13px",
+                      fontWeight: 700,
+                      fontSize: 14,
+                    }}
+                  >
+                    <span />
+                    <span style={{ textAlign: "right" }}>Total Quantity</span>
+                    <span style={{ paddingLeft: 11 }}>
+                      {detailQuantityTotal(detailLines).toLocaleString("en-IN", {
+                        minimumFractionDigits: 3,
+                        maximumFractionDigits: 3,
+                      })}
+                    </span>
+                    <span style={{ paddingLeft: 11 }}>
+                      {selectableItems.find(
+                        (row) => Number(row.ItemId) === Number(detailItemId),
+                      )?.UnitShortName || ""}
+                    </span>
+                    <span />
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      marginTop: 18,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <SecondaryButton
+                      type="button"
+                      disabled={pickerLocked}
+                      onClick={() =>
+                        setDetailLines((prev) => [...prev, createDetailLine()])
+                      }
+                    >
+                      + Add another line
+                    </SecondaryButton>
+                    <PrimaryButton disabled={saving || pickerLocked}>
+                      {saving
+                        ? "Saving…"
+                        : editingId
+                          ? "Update component"
+                          : "Save component"}
+                    </PrimaryButton>
+                    {editingId ? (
+                      <SecondaryButton
+                        type="button"
+                        onClick={resetEdit}
+                        disabled={pickerLocked}
+                      >
+                        Cancel edit
+                      </SecondaryButton>
+                    ) : null}
+                  </div>
+                </div>
+              ) : editingId ? (
                 <>
                   <div style={{ marginBottom: 14 }}>
                     <Field label="Search Text or Item Code">
@@ -1711,6 +2432,7 @@ function LabourComponentsPanel({
   regionIds,
   canEdit,
   inputStyle,
+  detailEntry = false,
 }) {
   const [labourMasterList, setLabourMasterList] = useState([]);
   const [labourPickerSearch, setLabourPickerSearch] = useState("");
@@ -1729,6 +2451,8 @@ function LabourComponentsPanel({
   });
   const [savingLabourComponent, setSavingLabourComponent] = useState(false);
   const [labourMessage, setLabourMessage] = useState("");
+  const [detailLabourId, setDetailLabourId] = useState("");
+  const [detailLines, setDetailLines] = useState([createDetailLine()]);
 
   useEffect(() => {
     const catalogRegionId =
@@ -1791,6 +2515,8 @@ function LabourComponentsPanel({
       UnitId: "",
     });
     setLabourDraftRows([createLabourDraftRow()]);
+    setDetailLabourId("");
+    setDetailLines([createDetailLine()]);
     setLabourMessage("");
     loadLabourComponents(itemId);
   }, [itemId]);
@@ -1840,9 +2566,29 @@ function LabourComponentsPanel({
       UnitId: "",
     });
     setLabourDraftRows([createLabourDraftRow()]);
+    setDetailLabourId("");
+    setDetailLines([createDetailLine()]);
   };
 
-  const startLabourEdit = (row) => {
+  const startLabourEdit = async (row) => {
+    if (detailEntry) {
+      setEditingLabourComponentId(row.LabourComponentId);
+      setDetailLabourId(String(row.LabourId || ""));
+      setLabourMessage("");
+      try {
+        const res = await axios.get(
+          `${apiBase}/api/labour-components/${row.LabourComponentId}/details`,
+          { params: { userId } },
+        );
+        setDetailLabourId(String(res.data?.LabourId || row.LabourId || ""));
+        setDetailLines(mapLoadedDetailLines(res.data?.lines));
+      } catch (err) {
+        setLabourMessage(
+          `Failed to load detail lines: ${err.response?.data?.message || err.message}`,
+        );
+      }
+      return;
+    }
     const labour = labourMasterList.find(
       (item) => Number(item.LabourId) === Number(row.LabourId),
     );
@@ -1860,6 +2606,30 @@ function LabourComponentsPanel({
     });
   };
 
+  const removeLabourComponent = async (row) => {
+    if (!canEdit) {
+      setLabourMessage("Only SuperAdmin or OrgAdmin can manage labour components.");
+      return;
+    }
+    const label = formatLabourLabel(row) || row.LabourId;
+    if (!window.confirm(`Remove labour component ${label}?`)) return;
+    try {
+      await axios.delete(
+        `${apiBase}/api/labour-components/${row.LabourComponentId}`,
+        { params: { userId } },
+      );
+      if (Number(editingLabourComponentId) === Number(row.LabourComponentId)) {
+        resetLabourEdit();
+      }
+      setLabourMessage("Labour component removed.");
+      await loadLabourComponents(itemId);
+    } catch (err) {
+      setLabourMessage(
+        `Labour component remove failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
+  };
+
   const onLabourSubmit = async (e) => {
     e.preventDefault();
     if (!canEdit) {
@@ -1868,6 +2638,66 @@ function LabourComponentsPanel({
     }
     if (!itemId) {
       alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (detailEntry) {
+      if (!detailLabourId) {
+        alert("Select a labour.");
+        return;
+      }
+      const selected = labourMasterList.find(
+        (row) => Number(row.LabourId) === Number(detailLabourId),
+      );
+      if (!selected?.UnitId && !String(selected?.UnitShortName || "").trim()) {
+        alert("Selected labour has no Unit. Choose another labour.");
+        return;
+      }
+      const validated = validateExtraItemLines(detailLines);
+      if (validated.error) {
+        alert(validated.error);
+        return;
+      }
+      if (
+        !window.confirm(
+          editingLabourComponentId
+            ? "Update this labour component?"
+            : "Save this labour component?",
+        )
+      ) {
+        return;
+      }
+      setSavingLabourComponent(true);
+      setLabourMessage("");
+      try {
+        const payload = {
+          userId,
+          ItemId: itemId,
+          LabourId: detailLabourId,
+          lines: validated.lines,
+        };
+        if (editingLabourComponentId) {
+          await axios.put(
+            `${apiBase}/api/extra-item-ra/labour-components/${editingLabourComponentId}`,
+            payload,
+          );
+          setLabourMessage("Labour component updated.");
+        } else {
+          await axios.post(
+            `${apiBase}/api/extra-item-ra/labour-components`,
+            payload,
+          );
+          setLabourMessage("Labour component saved.");
+        }
+        resetLabourEdit();
+        await loadLabourComponents(itemId);
+      } catch (err) {
+        setLabourMessage(
+          `Labour component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSavingLabourComponent(false);
+      }
       return;
     }
 
@@ -2055,12 +2885,20 @@ function LabourComponentsPanel({
                         {formatRupees(row.LabourRate)}
                       </td>
                       <td>
-                        <GhostIconButton
-                          tone={theme.colors.accent}
-                          onClick={() => startLabourEdit(row)}
-                        >
-                          ✎ Edit
-                        </GhostIconButton>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <GhostIconButton
+                            tone={theme.colors.accent}
+                            onClick={() => startLabourEdit(row)}
+                          >
+                            ✎ Edit
+                          </GhostIconButton>
+                          <GhostIconButton
+                            tone={theme.colors.red}
+                            onClick={() => removeLabourComponent(row)}
+                          >
+                            Remove
+                          </GhostIconButton>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -2075,7 +2913,43 @@ function LabourComponentsPanel({
 
           <div style={{ marginTop: 18 }}>
             <FormShell onSubmit={onLabourSubmit}>
-              {editingLabourComponentId ? (
+              {detailEntry ? (
+                <ExtraItemDetailEntry
+                  inputStyle={inputStyle}
+                  readonlyInputStyle={readonlyInputStyle}
+                  search={labourPickerSearch}
+                  onSearchChange={setLabourPickerSearch}
+                  searchPlaceholder="Type Item Code or text to filter Labour"
+                  selectLabel="Labour"
+                  selectValue={detailLabourId}
+                  selectPlaceholder="Select Labour"
+                  options={labourMasterList
+                    .filter(
+                      (row) =>
+                        Number(row.LabourId) === Number(detailLabourId) ||
+                        labourMatchesPickerSearch(row, labourPickerSearch),
+                    )
+                    .map((row) => ({
+                      id: row.LabourId,
+                      label: formatLabourLabel(row),
+                      description: row.LabourDescription,
+                      unit: row.UnitShortName || "",
+                      disabled: !String(row.UnitShortName || "").trim(),
+                    }))}
+                  onSelect={setDetailLabourId}
+                  lines={detailLines}
+                  setLines={setDetailLines}
+                  unitName={
+                    labourMasterList.find(
+                      (row) => Number(row.LabourId) === Number(detailLabourId),
+                    )?.UnitShortName || ""
+                  }
+                  unitPlaceholder="Labour unit"
+                  saving={savingLabourComponent}
+                  editing={Boolean(editingLabourComponentId)}
+                  onCancel={resetLabourEdit}
+                />
+              ) : editingLabourComponentId ? (
                 <>
                   <div style={{ marginBottom: 14 }}>
                     <Field label="Search Text or Item Code">
@@ -2408,6 +3282,7 @@ function MachineryComponentsPanel({
   regionIds,
   canEdit,
   inputStyle,
+  detailEntry = false,
 }) {
   const [machineryMasterList, setMachineryMasterList] = useState([]);
   const [machineryPickerSearch, setMachineryPickerSearch] = useState("");
@@ -2428,6 +3303,8 @@ function MachineryComponentsPanel({
   const [savingMachineryComponent, setSavingMachineryComponent] =
     useState(false);
   const [machineryMessage, setMachineryMessage] = useState("");
+  const [detailMachineryId, setDetailMachineryId] = useState("");
+  const [detailLines, setDetailLines] = useState([createDetailLine()]);
 
   useEffect(() => {
     const catalogRegionId =
@@ -2490,6 +3367,8 @@ function MachineryComponentsPanel({
       UnitId: "",
     });
     setMachineryDraftRows([createMachineryDraftRow()]);
+    setDetailMachineryId("");
+    setDetailLines([createDetailLine()]);
     setMachineryMessage("");
     loadMachineryComponents(itemId);
   }, [itemId]);
@@ -2539,9 +3418,31 @@ function MachineryComponentsPanel({
       UnitId: "",
     });
     setMachineryDraftRows([createMachineryDraftRow()]);
+    setDetailMachineryId("");
+    setDetailLines([createDetailLine()]);
   };
 
-  const startMachineryEdit = (row) => {
+  const startMachineryEdit = async (row) => {
+    if (detailEntry) {
+      setEditingMachineryComponentId(row.MachineryComponentId);
+      setDetailMachineryId(String(row.MachineryId || ""));
+      setMachineryMessage("");
+      try {
+        const res = await axios.get(
+          `${apiBase}/api/machinery-components/${row.MachineryComponentId}/details`,
+          { params: { userId } },
+        );
+        setDetailMachineryId(
+          String(res.data?.MachineryId || row.MachineryId || ""),
+        );
+        setDetailLines(mapLoadedDetailLines(res.data?.lines));
+      } catch (err) {
+        setMachineryMessage(
+          `Failed to load detail lines: ${err.response?.data?.message || err.message}`,
+        );
+      }
+      return;
+    }
     const machinery = machineryMasterList.find(
       (item) => Number(item.MachineryId) === Number(row.MachineryId),
     );
@@ -2560,6 +3461,34 @@ function MachineryComponentsPanel({
     });
   };
 
+  const removeMachineryComponent = async (row) => {
+    if (!canEdit) {
+      setMachineryMessage(
+        "Only SuperAdmin or OrgAdmin can manage machinery components.",
+      );
+      return;
+    }
+    const label = formatMachineryLabel(row) || row.MachineryId;
+    if (!window.confirm(`Remove machinery component ${label}?`)) return;
+    try {
+      await axios.delete(
+        `${apiBase}/api/machinery-components/${row.MachineryComponentId}`,
+        { params: { userId } },
+      );
+      if (
+        Number(editingMachineryComponentId) === Number(row.MachineryComponentId)
+      ) {
+        resetMachineryEdit();
+      }
+      setMachineryMessage("Machinery component removed.");
+      await loadMachineryComponents(itemId);
+    } catch (err) {
+      setMachineryMessage(
+        `Machinery component remove failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
+  };
+
   const onMachinerySubmit = async (e) => {
     e.preventDefault();
     if (!canEdit) {
@@ -2568,6 +3497,66 @@ function MachineryComponentsPanel({
     }
     if (!itemId) {
       alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (detailEntry) {
+      if (!detailMachineryId) {
+        alert("Select a machinery.");
+        return;
+      }
+      const selected = machineryMasterList.find(
+        (row) => Number(row.MachineryId) === Number(detailMachineryId),
+      );
+      if (!selected?.UnitId && !String(selected?.UnitShortName || "").trim()) {
+        alert("Selected machinery has no Unit. Choose another machinery.");
+        return;
+      }
+      const validated = validateExtraItemLines(detailLines);
+      if (validated.error) {
+        alert(validated.error);
+        return;
+      }
+      if (
+        !window.confirm(
+          editingMachineryComponentId
+            ? "Update this machinery component?"
+            : "Save this machinery component?",
+        )
+      ) {
+        return;
+      }
+      setSavingMachineryComponent(true);
+      setMachineryMessage("");
+      try {
+        const payload = {
+          userId,
+          ItemId: itemId,
+          MachineryId: detailMachineryId,
+          lines: validated.lines,
+        };
+        if (editingMachineryComponentId) {
+          await axios.put(
+            `${apiBase}/api/extra-item-ra/machinery-components/${editingMachineryComponentId}`,
+            payload,
+          );
+          setMachineryMessage("Machinery component updated.");
+        } else {
+          await axios.post(
+            `${apiBase}/api/extra-item-ra/machinery-components`,
+            payload,
+          );
+          setMachineryMessage("Machinery component saved.");
+        }
+        resetMachineryEdit();
+        await loadMachineryComponents(itemId);
+      } catch (err) {
+        setMachineryMessage(
+          `Machinery component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSavingMachineryComponent(false);
+      }
       return;
     }
 
@@ -2765,12 +3754,20 @@ function MachineryComponentsPanel({
                         {formatRupees(row.MachineryRate)}
                       </td>
                       <td>
-                        <GhostIconButton
-                          tone={theme.colors.accent}
-                          onClick={() => startMachineryEdit(row)}
-                        >
-                          ✎ Edit
-                        </GhostIconButton>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <GhostIconButton
+                            tone={theme.colors.accent}
+                            onClick={() => startMachineryEdit(row)}
+                          >
+                            ✎ Edit
+                          </GhostIconButton>
+                          <GhostIconButton
+                            tone={theme.colors.red}
+                            onClick={() => removeMachineryComponent(row)}
+                          >
+                            Remove
+                          </GhostIconButton>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -2785,7 +3782,44 @@ function MachineryComponentsPanel({
 
           <div style={{ marginTop: 18 }}>
             <FormShell onSubmit={onMachinerySubmit}>
-              {editingMachineryComponentId ? (
+              {detailEntry ? (
+                <ExtraItemDetailEntry
+                  inputStyle={inputStyle}
+                  readonlyInputStyle={readonlyInputStyle}
+                  search={machineryPickerSearch}
+                  onSearchChange={setMachineryPickerSearch}
+                  searchPlaceholder="Type Item Code or text to filter Machinery"
+                  selectLabel="Machinery"
+                  selectValue={detailMachineryId}
+                  selectPlaceholder="Select Machinery"
+                  options={machineryMasterList
+                    .filter(
+                      (row) =>
+                        Number(row.MachineryId) === Number(detailMachineryId) ||
+                        machineryMatchesPickerSearch(row, machineryPickerSearch),
+                    )
+                    .map((row) => ({
+                      id: row.MachineryId,
+                      label: formatMachineryLabel(row),
+                      description: row.MachineryDescription,
+                      unit: row.UnitShortName || "",
+                      disabled: !String(row.UnitShortName || "").trim(),
+                    }))}
+                  onSelect={setDetailMachineryId}
+                  lines={detailLines}
+                  setLines={setDetailLines}
+                  unitName={
+                    machineryMasterList.find(
+                      (row) =>
+                        Number(row.MachineryId) === Number(detailMachineryId),
+                    )?.UnitShortName || ""
+                  }
+                  unitPlaceholder="Machinery unit"
+                  saving={savingMachineryComponent}
+                  editing={Boolean(editingMachineryComponentId)}
+                  onCancel={resetMachineryEdit}
+                />
+              ) : editingMachineryComponentId ? (
                 <>
                   <div style={{ marginBottom: 14 }}>
                     <Field label="Search Text or Item Code">
@@ -3629,6 +4663,10 @@ export default function HomePage() {
   ]);
   const [editingMaterialComponentId, setEditingMaterialComponentId] =
     useState(null);
+  const [materialDetailId, setMaterialDetailId] = useState("");
+  const [materialDetailLines, setMaterialDetailLines] = useState([
+    createDetailLine(),
+  ]);
   const [savingMaterialComponent, setSavingMaterialComponent] = useState(false);
   const materialComponentSectionRef = useRef(null);
   const [message, setMessage] = useState("");
@@ -4008,7 +5046,7 @@ export default function HomePage() {
           return null;
         }
       })();
-    if (!sessionUser?.UserId || !canAccessRaComponent(sessionUser)) {
+    if (!sessionUser?.UserId || (!canAccessRaComponent(sessionUser) && !canAccessExtraItemRa(sessionUser))) {
       setRaComponentRegions([]);
       return;
     }
@@ -4475,6 +5513,8 @@ export default function HomePage() {
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
+    setMaterialDetailId("");
+    setMaterialDetailLines([createDetailLine()]);
     setMaterialPickerSearch("");
   };
 
@@ -4633,7 +5673,8 @@ export default function HomePage() {
         regionId: materialRegionId,
         ssrYearId: materialSsrYearId,
       };
-      if (categoryOptional) params.listOrder = "component";
+      if (activeMaster === "extra-item-ra") params.listOrder = "itemcode";
+      else if (categoryOptional) params.listOrder = "component";
       if (materialCategoryId) params.categoryId = materialCategoryId;
       if (materialSubCategoryId) params.subCategoryId = materialSubCategoryId;
       if (search) params.search = search;
@@ -4696,6 +5737,8 @@ export default function HomePage() {
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
+    setMaterialDetailId("");
+    setMaterialDetailLines([createDetailLine()]);
     if (materialRALogic) {
       persistMaterialRALogic(item.ItemId, materialRALogic).catch((err) => {
         alert(
@@ -4789,9 +5832,29 @@ export default function HomePage() {
     setEditingMaterialComponentId(null);
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
+    setMaterialDetailId("");
+    setMaterialDetailLines([createDetailLine()]);
   };
 
-  const startMaterialComponentEdit = (row) => {
+  const startMaterialComponentEdit = async (row) => {
+    if (activeMaster === "extra-item-ra") {
+      setEditingMaterialComponentId(row.MaterialComponentId);
+      setMaterialDetailId(String(row.MaterialId || ""));
+      setMessage("");
+      try {
+        const res = await axios.get(
+          `${API_BASE}/api/material-components/${row.MaterialComponentId}/details`,
+          { params: { userId: currentUser?.UserId } },
+        );
+        setMaterialDetailId(String(res.data?.MaterialId || row.MaterialId || ""));
+        setMaterialDetailLines(mapLoadedDetailLines(res.data?.lines));
+      } catch (err) {
+        setMessage(
+          `Failed to load detail lines: ${err.response?.data?.message || err.message}`,
+        );
+      }
+      return;
+    }
     const material = materialMasterList.find(
       (m) => Number(m.MaterialId) === Number(row.MaterialId),
     );
@@ -4809,6 +5872,30 @@ export default function HomePage() {
     });
   };
 
+  const removeMaterialComponent = async (row) => {
+    if (!canManageMaterials && !canManageExtraItemRa) {
+      setMessage("Only SuperAdmin or OrgAdmin can manage material components.");
+      return;
+    }
+    const label = formatMaterialLabel(row) || row.MaterialId;
+    if (!window.confirm(`Remove material component ${label}?`)) return;
+    try {
+      await axios.delete(
+        `${API_BASE}/api/material-components/${row.MaterialComponentId}`,
+        { params: { userId: currentUser?.UserId } },
+      );
+      if (Number(editingMaterialComponentId) === Number(row.MaterialComponentId)) {
+        resetMaterialComponentEdit();
+      }
+      setMessage("Material component removed.");
+      await loadMaterialComponents(selectedMaterialItemId);
+    } catch (err) {
+      setMessage(
+        `Material component remove failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
+  };
+
   const onMaterialComponentSubmit = async (e) => {
     e.preventDefault();
     if (!isSuperAdminUser(currentUser) && !isOrgAdminUser(currentUser)) {
@@ -4817,6 +5904,72 @@ export default function HomePage() {
     }
     if (!selectedMaterialItemId) {
       alert("Please select an item from the list first.");
+      return;
+    }
+
+    if (activeMaster === "extra-item-ra") {
+      if (!materialDetailId) {
+        alert("Select a material.");
+        return;
+      }
+      const selected = materialMasterList.find(
+        (row) => Number(row.MaterialId) === Number(materialDetailId),
+      );
+      if (
+        !selected?.MaterialLocalUnitId &&
+        !String(selected?.MaterialLocalUnitShortName || "").trim()
+      ) {
+        alert(
+          "Selected material has no Material Local Unit. Choose another material.",
+        );
+        return;
+      }
+      const validated = validateExtraItemLines(materialDetailLines);
+      if (validated.error) {
+        alert(validated.error);
+        return;
+      }
+      if (
+        !window.confirm(
+          editingMaterialComponentId
+            ? "Update this material component?"
+            : "Save this material component?",
+        )
+      ) {
+        return;
+      }
+      setSavingMaterialComponent(true);
+      setMessage("");
+      try {
+        const payload = {
+          userId: currentUser?.UserId,
+          ItemId: selectedMaterialItemId,
+          MaterialId: materialDetailId,
+          lines: validated.lines,
+        };
+        if (editingMaterialComponentId) {
+          await axios.put(
+            `${API_BASE}/api/extra-item-ra/material-components/${editingMaterialComponentId}`,
+            payload,
+          );
+          setMessage("Material component updated.");
+        } else {
+          await axios.post(
+            `${API_BASE}/api/extra-item-ra/material-components`,
+            payload,
+          );
+          setMessage("Material component saved.");
+        }
+        resetMaterialComponentEdit();
+        await loadMaterialComponents(selectedMaterialItemId);
+      } catch (err) {
+        console.error(err);
+        setMessage(
+          `Material component save failed: ${err.response?.data?.message || err.message}`,
+        );
+      } finally {
+        setSavingMaterialComponent(false);
+      }
       return;
     }
 
@@ -6650,11 +7803,13 @@ export default function HomePage() {
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
+    setMaterialDetailId("");
+    setMaterialDetailLines([createDetailLine()]);
     setSavingMaterialComponent(false);
   };
 
   useEffect(() => {
-    if (activeMaster === "materials") return;
+    if (activeMaster === "materials" || activeMaster === "extra-item-ra") return;
     resetRAComponentScreen();
   }, [activeMaster]);
 
@@ -7315,11 +8470,13 @@ export default function HomePage() {
 
   useEffect(() => {
     if (
-      (activeMaster === "items" || activeMaster === "materials") &&
+      (activeMaster === "items" ||
+        activeMaster === "materials" ||
+        activeMaster === "extra-item-ra") &&
       currentUser?.UserId
     ) {
       loadEstimationRegions(currentUser);
-      if (activeMaster === "materials") {
+      if (activeMaster === "materials" || activeMaster === "extra-item-ra") {
         loadRaComponentRegions(currentUser);
       }
     }
@@ -8146,6 +9303,7 @@ export default function HomePage() {
   const isIndvUser = isIndvUserUser(currentUser);
   const canManageProjects = isOrgAdmin || isSuperAdmin;
   const canManageMaterials = canAccessRaComponent(currentUser);
+  const canManageExtraItemRa = canAccessExtraItemRa(currentUser);
   const canManageItemMaster = canAccessItemMaster(currentUser);
   const itemNumberIsAuto =
     !isSuperAdmin ||
@@ -8497,11 +9655,17 @@ export default function HomePage() {
             {superAdminMenu.map((item) =>
               renderMenuItem(item, {
                 forceDisabled:
-                  item.id === "materials" ? !canManageMaterials : !isSuperAdmin,
+                  item.id === "materials"
+                    ? !canManageMaterials
+                    : item.id === "extra-item-ra"
+                      ? !canManageExtraItemRa
+                      : !isSuperAdmin,
                 disabledTitle:
                   item.id === "materials"
-                    ? "Available for SuperAdmin, OrgAdmin, and user category 3"
-                    : "Available only for SuperAdmin",
+                    ? "Available only for SuperAdmin"
+                    : item.id === "extra-item-ra"
+                      ? "Available for OrgAdmin and user category 3"
+                      : "Available only for SuperAdmin",
               }),
             )}
 
@@ -11175,11 +12339,22 @@ export default function HomePage() {
           )}
 
           {/* ── Material ── */}
-          {activeMaster === "materials" && canManageMaterials && (
+          {(activeMaster === "materials" || activeMaster === "extra-item-ra") &&
+            (activeMaster === "extra-item-ra"
+              ? canManageExtraItemRa
+              : canManageMaterials) && (
             <>
               <Card
-                eyebrow="Master · R.A. Component"
-                title="R.A. Component"
+                eyebrow={
+                  activeMaster === "extra-item-ra"
+                    ? "Master · Extra Item R A"
+                    : "Master · R.A. Component"
+                }
+                title={
+                  activeMaster === "extra-item-ra"
+                    ? "Extra Item R A"
+                    : "R.A. Component"
+                }
                 subtitle={
                   isMaterialCategoryOptional(currentUser, materialRegionId)
                     ? "Select SSR region and year. Category and sub category are optional."
@@ -11602,7 +12777,8 @@ export default function HomePage() {
                 itemId={selectedMaterialItemId}
                 regionId={materialRegionId}
                 regionIds={componentCatalogRegionIds}
-                canEdit={canManageMaterials}
+                canEdit={canManageMaterials || canManageExtraItemRa}
+                detailEntry={activeMaster === "extra-item-ra"}
                 inputStyle={inputStyle}
                 onPickerOpenChange={setItemCatalogPickerOpen}
               />
@@ -11679,14 +12855,22 @@ export default function HomePage() {
                                   {formatMaterialRate(row.MaterialRate)}
                                 </td>
                                 <td>
-                                  <GhostIconButton
-                                    tone={theme.colors.accent}
-                                    onClick={() =>
-                                      startMaterialComponentEdit(row)
-                                    }
-                                  >
-                                    ✎ Edit
-                                  </GhostIconButton>
+                                  <div style={{ display: "flex", gap: 4 }}>
+                                    <GhostIconButton
+                                      tone={theme.colors.accent}
+                                      onClick={() =>
+                                        startMaterialComponentEdit(row)
+                                      }
+                                    >
+                                      ✎ Edit
+                                    </GhostIconButton>
+                                    <GhostIconButton
+                                      tone={theme.colors.red}
+                                      onClick={() => removeMaterialComponent(row)}
+                                    >
+                                      Remove
+                                    </GhostIconButton>
+                                  </div>
                                 </td>
                               </tr>
                             ))
@@ -11702,7 +12886,60 @@ export default function HomePage() {
 
                     <div style={{ marginTop: 18 }}>
                       <FormShell onSubmit={onMaterialComponentSubmit}>
-                        {editingMaterialComponentId ? (
+                        {activeMaster === "extra-item-ra" ? (
+                          <ExtraItemDetailEntry
+                            inputStyle={inputStyle}
+                            readonlyInputStyle={{
+                              ...inputStyle,
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }}
+                            search={materialPickerSearch}
+                            onSearchChange={setMaterialPickerSearch}
+                            searchPlaceholder="Type Item Code or text to filter Material"
+                            selectLabel="Material"
+                            selectValue={materialDetailId}
+                            selectPlaceholder="Select Material"
+                            onOpenChange={(isOpen) =>
+                              setMaterialPickerOpen("detail-material", isOpen)
+                            }
+                            options={materialMasterList
+                              .filter(
+                                (row) =>
+                                  Number(row.MaterialId) ===
+                                    Number(materialDetailId) ||
+                                  materialMatchesPickerSearch(
+                                    row,
+                                    materialPickerSearch,
+                                  ),
+                              )
+                              .map((row) => ({
+                                id: row.MaterialId,
+                                label: formatMaterialLabel(row),
+                                description: row.MaterialDescription,
+                                unit: row.MaterialLocalUnitShortName || "",
+                                disabled: !String(
+                                  row.MaterialLocalUnitShortName || "",
+                                ).trim(),
+                              }))}
+                            onSelect={setMaterialDetailId}
+                            lines={materialDetailLines}
+                            setLines={setMaterialDetailLines}
+                            unitName={
+                              materialMasterList.find(
+                                (row) =>
+                                  Number(row.MaterialId) ===
+                                  Number(materialDetailId),
+                              )?.MaterialLocalUnitShortName || ""
+                            }
+                            unitPlaceholder="Material unit"
+                            pickerLocked={materialPickerLocked}
+                            saving={savingMaterialComponent}
+                            editing={Boolean(editingMaterialComponentId)}
+                            onCancel={resetMaterialComponentEdit}
+                          />
+                        ) : editingMaterialComponentId ? (
                           <>
                             <div style={{ marginBottom: 14 }}>
                               <Field label="Search Text or Item Code">
@@ -12172,7 +13409,8 @@ export default function HomePage() {
                 itemId={selectedMaterialItemId}
                 regionId={materialRegionId}
                 regionIds={componentCatalogRegionIds}
-                canEdit={canManageMaterials}
+                canEdit={canManageMaterials || canManageExtraItemRa}
+                detailEntry={activeMaster === "extra-item-ra"}
                 inputStyle={inputStyle}
               />
               <MachineryComponentsPanel
@@ -12181,7 +13419,8 @@ export default function HomePage() {
                 itemId={selectedMaterialItemId}
                 regionId={materialRegionId}
                 regionIds={componentCatalogRegionIds}
-                canEdit={canManageMaterials}
+                canEdit={canManageMaterials || canManageExtraItemRa}
+                detailEntry={activeMaster === "extra-item-ra"}
                 inputStyle={inputStyle}
               />
               <RateAnalysisParametersPanel
@@ -12190,7 +13429,7 @@ export default function HomePage() {
                 itemId={selectedMaterialItemId}
                 regionId={materialRegionId}
                 raLogic={materialRALogic}
-                canEdit={canManageMaterials}
+                canEdit={canManageMaterials || canManageExtraItemRa}
                 inputStyle={inputStyle}
               />
               </div>
