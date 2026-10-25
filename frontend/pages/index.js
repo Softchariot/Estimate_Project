@@ -170,7 +170,7 @@ export default function LoginPage() {
               fontWeight: 500,
             }}
           >
-            Trial Version 1.20 Release 24 Oct 26
+            Trial Version 1.20 Release 25 Oct 26
           </p>
           <p style={{ margin: 0, color: "#5d6c7a", fontSize: 15 }}>
             Sign in to your organization
@@ -201,7 +201,7 @@ export default function LoginPage() {
                 Enter your organization code to continue.
               </p>
               <label style={labelStyle}>
-                Organization Code {requiredStar}
+                <span>Organization Code {requiredStar}</span>
                 <input
                   style={inputStyle}
                   value={orgCode}
@@ -266,7 +266,7 @@ export default function LoginPage() {
               </p>
               <div style={{ display: "grid", gap: 14 }}>
                 <label style={labelStyle}>
-                  User Name {requiredStar}
+                  <span>User Name {requiredStar}</span>
                   <input
                     style={inputStyle}
                     value={userLoginName}
@@ -277,7 +277,7 @@ export default function LoginPage() {
                   />
                 </label>
                 <label style={labelStyle}>
-                  Password {requiredStar}
+                  <span>Password {requiredStar}</span>
                   <div style={{ position: "relative" }}>
                     <input
                       style={{ ...inputStyle, paddingRight: 44 }}

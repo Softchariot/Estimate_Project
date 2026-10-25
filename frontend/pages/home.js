@@ -121,6 +121,12 @@ const allUsersMenu = [
     icon: "📑",
   },
   {
+    id: "non-dsr-material",
+    label: "NON DSR Material",
+    status: "active",
+    icon: "🧱",
+  },
+  {
     id: "master-projects",
     label: "Project Master",
     status: "active",
@@ -407,6 +413,27 @@ const initialItemMasterForm = {
   LabourRate: "",
   PageNumber: "",
   EffectiveDate: "",
+};
+
+const initialNonDsrMaterialForm = {
+  MaterialId: "",
+  ItemCode: "",
+  UserId: "",
+  UserName: "",
+  SSRRegionId: "",
+  YearId: "",
+  ItemNumber: "",
+  CategoryId: "",
+  SubCategoryId: "",
+  MaterialDescription: "",
+  MaterialShortDescription: "",
+  MaterialUnitId: "",
+  MaterialLocalUnitId: "",
+  ConversionFactor: "1",
+  MaterialLoadFactor: "0",
+  IsManual: true,
+  MaterialRate: "",
+  Remarks: "",
 };
 
 const MATERIAL_COMPONENT_DESC_MAX = 100;
@@ -1487,6 +1514,7 @@ function ItemComponentsPanel({
     setDraftRows([createItemComponentDraftRow()]);
     setDetailItemId("");
     setDetailLines([createDetailLine()]);
+    setPickerSearch("");
   };
 
   const startEdit = async (row) => {
@@ -2568,6 +2596,7 @@ function LabourComponentsPanel({
     setLabourDraftRows([createLabourDraftRow()]);
     setDetailLabourId("");
     setDetailLines([createDetailLine()]);
+    setLabourPickerSearch("");
   };
 
   const startLabourEdit = async (row) => {
@@ -3420,6 +3449,7 @@ function MachineryComponentsPanel({
     setMachineryDraftRows([createMachineryDraftRow()]);
     setDetailMachineryId("");
     setDetailLines([createDetailLine()]);
+    setMachineryPickerSearch("");
   };
 
   const startMachineryEdit = async (row) => {
@@ -4629,6 +4659,35 @@ export default function HomePage() {
   const [itemMasterListCategories, setItemMasterListCategories] = useState([]);
   const [itemMasterListSubCategories, setItemMasterListSubCategories] =
     useState([]);
+  const [nonDsrMaterialForm, setNonDsrMaterialForm] = useState(
+    initialNonDsrMaterialForm,
+  );
+  const [nonDsrMaterialList, setNonDsrMaterialList] = useState([]);
+  const [loadingNonDsrMaterial, setLoadingNonDsrMaterial] = useState(false);
+  const [savingNonDsrMaterial, setSavingNonDsrMaterial] = useState(false);
+  const [editingNonDsrMaterialId, setEditingNonDsrMaterialId] = useState(null);
+  const [nonDsrMaterialCodeNonce, setNonDsrMaterialCodeNonce] = useState(0);
+  const [nonDsrMaterialYears, setNonDsrMaterialYears] = useState([]);
+  const [nonDsrMaterialCategories, setNonDsrMaterialCategories] = useState([]);
+  const [nonDsrMaterialSubCategories, setNonDsrMaterialSubCategories] =
+    useState([]);
+  const [nonDsrMaterialFilterRegionId, setNonDsrMaterialFilterRegionId] =
+    useState("");
+  const [nonDsrMaterialFilterYearId, setNonDsrMaterialFilterYearId] =
+    useState("");
+  const [nonDsrMaterialFilterCategoryId, setNonDsrMaterialFilterCategoryId] =
+    useState("");
+  const [
+    nonDsrMaterialFilterSubCategoryId,
+    setNonDsrMaterialFilterSubCategoryId,
+  ] = useState("");
+  const [nonDsrMaterialListYears, setNonDsrMaterialListYears] = useState([]);
+  const [nonDsrMaterialListCategories, setNonDsrMaterialListCategories] =
+    useState([]);
+  const [
+    nonDsrMaterialListSubCategories,
+    setNonDsrMaterialListSubCategories,
+  ] = useState([]);
   const [materialRegionId, setMaterialRegionId] = useState("");
   const [materialSsrYearId, setMaterialSsrYearId] = useState("");
   const [materialSsrYears, setMaterialSsrYears] = useState([]);
@@ -5739,6 +5798,7 @@ export default function HomePage() {
     setEditingMaterialComponentId(null);
     setMaterialDetailId("");
     setMaterialDetailLines([createDetailLine()]);
+    setMaterialPickerSearch("");
     if (materialRALogic) {
       persistMaterialRALogic(item.ItemId, materialRALogic).catch((err) => {
         alert(
@@ -5834,6 +5894,7 @@ export default function HomePage() {
     setMaterialDraftRows([createMaterialDraftRow()]);
     setMaterialDetailId("");
     setMaterialDetailLines([createDetailLine()]);
+    setMaterialPickerSearch("");
   };
 
   const startMaterialComponentEdit = async (row) => {
@@ -8367,6 +8428,15 @@ export default function HomePage() {
           loadItemMasterListYears(allowed);
         }
         setItemMasterList([]);
+        setNonDsrMaterialForm({
+          ...initialNonDsrMaterialForm,
+          UserId: user.UserId ? String(user.UserId) : "",
+          UserName: user.UserName || user.UserLoginName || "",
+          SSRRegionId: allowed ? String(allowed) : "",
+        });
+        if (allowed) {
+          setNonDsrMaterialFilterRegionId(String(allowed));
+        }
       }
     } catch {
       sessionStorage.removeItem(SESSION_KEY);
@@ -8413,6 +8483,47 @@ export default function HomePage() {
     itemMasterForm.RegionId,
     editingItemMasterId,
     itemCodePreviewNonce,
+  ]);
+
+  useEffect(() => {
+    if (!currentUser?.UserId || editingNonDsrMaterialId) return;
+    if (!canAccessItemMaster(currentUser)) return;
+    const regionId = Number(nonDsrMaterialForm.SSRRegionId);
+    const auto =
+      isOrgAdminUser(currentUser) ||
+      isIndvUserUser(currentUser) ||
+      regionId === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+      regionId === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (!auto) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/non-dsr-materials/next-number?userId=${encodeURIComponent(currentUser.UserId)}`,
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.message || "Failed to generate Item Code.");
+        }
+        if (cancelled) return;
+        setNonDsrMaterialForm((prev) => {
+          if (prev.MaterialId) return prev;
+          return { ...prev, ItemCode: data.itemCode || "" };
+        });
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(`Item Code could not be generated: ${error.message}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentUser?.UserId,
+    nonDsrMaterialForm.SSRRegionId,
+    editingNonDsrMaterialId,
+    nonDsrMaterialCodeNonce,
   ]);
 
   useEffect(() => {
@@ -9129,6 +9240,366 @@ export default function HomePage() {
     }
   };
 
+  const loadNonDsrMaterialYears = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-years`);
+      setNonDsrMaterialYears(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialYears([]);
+    }
+  };
+
+  const loadNonDsrMaterialCategories = async (regionId) => {
+    if (!regionId) {
+      setNonDsrMaterialCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setNonDsrMaterialCategories(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialCategories([]);
+    }
+  };
+
+  const loadNonDsrMaterialSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setNonDsrMaterialSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setNonDsrMaterialSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialSubCategories([]);
+    }
+  };
+
+  const loadNonDsrMaterialListYears = async (regionId) => {
+    if (!regionId) {
+      setNonDsrMaterialListYears([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-years`, {
+        params: { regionId },
+      });
+      setNonDsrMaterialListYears(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialListYears([]);
+    }
+  };
+
+  const loadNonDsrMaterialListCategories = async (regionId) => {
+    if (!regionId) {
+      setNonDsrMaterialListCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setNonDsrMaterialListCategories(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialListCategories([]);
+    }
+  };
+
+  const loadNonDsrMaterialListSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setNonDsrMaterialListSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setNonDsrMaterialListSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialListSubCategories([]);
+    }
+  };
+
+  const loadNonDsrMaterialList = async (
+    user = currentUser,
+    filters = {
+      regionId: nonDsrMaterialFilterRegionId,
+      ssrYearId: nonDsrMaterialFilterYearId,
+      categoryId: nonDsrMaterialFilterCategoryId,
+      subCategoryId: nonDsrMaterialFilterSubCategoryId,
+    },
+  ) => {
+    if (!user?.UserId || !canAccessItemMaster(user)) {
+      setNonDsrMaterialList([]);
+      return;
+    }
+    if (!filters.regionId) {
+      setNonDsrMaterialList([]);
+      return;
+    }
+    setLoadingNonDsrMaterial(true);
+    try {
+      const params = {
+        userId: user.UserId,
+        regionId: filters.regionId,
+        ssrYearId: filters.ssrYearId,
+      };
+      if (filters.categoryId) params.categoryId = filters.categoryId;
+      if (filters.subCategoryId) params.subCategoryId = filters.subCategoryId;
+      const res = await axios.get(`${API_BASE}/api/non-dsr-materials`, {
+        params,
+      });
+      setNonDsrMaterialList(Array.isArray(res.data?.data) ? res.data.data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialList([]);
+      setMessage(
+        `NON DSR Material load failed: ${err.response?.data?.message || err.message}`,
+      );
+    } finally {
+      setLoadingNonDsrMaterial(false);
+    }
+  };
+
+  const resetNonDsrMaterialEdit = () => {
+    const allowedRegionId = getItemMasterAllowedRegionId(currentUser);
+    setEditingNonDsrMaterialId(null);
+    setNonDsrMaterialForm({
+      ...initialNonDsrMaterialForm,
+      UserId: currentUser?.UserId ? String(currentUser.UserId) : "",
+      UserName: currentUser?.UserName || currentUser?.UserLoginName || "",
+      SSRRegionId: allowedRegionId ? String(allowedRegionId) : "",
+    });
+    setNonDsrMaterialCategories([]);
+    setNonDsrMaterialSubCategories([]);
+    if (allowedRegionId) loadNonDsrMaterialCategories(allowedRegionId);
+    setNonDsrMaterialCodeNonce((n) => n + 1);
+  };
+
+  const onNonDsrMaterialChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    const nextValue = type === "checkbox" ? checked : value;
+    setNonDsrMaterialForm((prev) => {
+      const next = { ...prev, [name]: nextValue };
+      if (name === "SSRRegionId") {
+        next.CategoryId = "";
+        next.SubCategoryId = "";
+        const regionNum = Number(value);
+        const autoRegion =
+          regionNum === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+          regionNum === ITEM_MASTER_INDV_USER_REGION_ID;
+        if (!editingNonDsrMaterialId && !autoRegion) next.ItemCode = "";
+        loadNonDsrMaterialCategories(value);
+        setNonDsrMaterialSubCategories([]);
+      }
+      if (name === "CategoryId") {
+        next.SubCategoryId = "";
+        loadNonDsrMaterialSubCategories(value);
+      }
+      if (name === "MaterialUnitId") {
+        next.MaterialLocalUnitId = value;
+      }
+      return next;
+    });
+  };
+
+  const startNonDsrMaterialEdit = async (row) => {
+    if (!isSuperAdminUser(currentUser)) {
+      const allowed = getItemMasterAllowedRegionId(currentUser);
+      if (!allowed || Number(row.SSRRegionId) !== Number(allowed)) {
+        alert("You can only edit NON SSR materials for your allowed region.");
+        return;
+      }
+    }
+    if (
+      isOrgAdminUser(currentUser) &&
+      Number(row.CreatorOrganizationId) !== Number(currentUser.OrganizationId)
+    ) {
+      alert(
+        "You can only edit NON SSR materials entered by your organization.",
+      );
+      return;
+    }
+    setEditingNonDsrMaterialId(row.MaterialId);
+    const storedNumber = row.ItemNumber || "";
+    const storedCode = row.ItemCode || "";
+    const generatedInNumber = !storedCode && /^.+-MR-\d+$/i.test(storedNumber);
+    setNonDsrMaterialForm({
+      MaterialId: String(row.MaterialId),
+      ItemCode: generatedInNumber ? storedNumber : storedCode,
+      UserId: row.UserId != null ? String(row.UserId) : "",
+      UserName: row.UserName || row.UserLoginName || "",
+      SSRRegionId: row.SSRRegionId != null ? String(row.SSRRegionId) : "",
+      YearId: row.YearId != null ? String(row.YearId) : "",
+      ItemNumber: generatedInNumber ? "" : storedNumber,
+      CategoryId: row.CategoryId != null ? String(row.CategoryId) : "",
+      SubCategoryId: row.SubCategoryId != null ? String(row.SubCategoryId) : "",
+      MaterialDescription: row.MaterialDescription || "",
+      MaterialShortDescription: row.MaterialShortDescription || "",
+      MaterialUnitId:
+        row.MaterialUnitId != null ? String(row.MaterialUnitId) : "",
+      MaterialLocalUnitId:
+        row.MaterialLocalUnitId != null ? String(row.MaterialLocalUnitId) : "",
+      ConversionFactor:
+        row.ConversionFactor === null || row.ConversionFactor === undefined
+          ? "1"
+          : String(row.ConversionFactor),
+      MaterialLoadFactor:
+        row.MaterialLoadFactor === null || row.MaterialLoadFactor === undefined
+          ? "0"
+          : String(row.MaterialLoadFactor),
+      IsManual: Boolean(row.IsManual),
+      MaterialRate:
+        row.MaterialRate === null || row.MaterialRate === undefined
+          ? ""
+          : String(row.MaterialRate),
+      Remarks: row.Remarks || "",
+    });
+    if (row.SSRRegionId) await loadNonDsrMaterialCategories(row.SSRRegionId);
+    if (row.CategoryId) await loadNonDsrMaterialSubCategories(row.CategoryId);
+  };
+
+  const onNonDsrMaterialSubmit = async (e) => {
+    e.preventDefault();
+    if (!currentUser?.UserId || !canAccessItemMaster(currentUser)) {
+      setMessage("NON DSR Material save failed: not authorised.");
+      return;
+    }
+    const isEdit = Boolean(editingNonDsrMaterialId);
+    const enteredItemNumber = String(nonDsrMaterialForm.ItemNumber || "").trim();
+    if (!enteredItemNumber) {
+      alert("Please enter Item Number.");
+      setMessage("Please enter Item Number.");
+      return;
+    }
+    if (!nonDsrMaterialForm.YearId) {
+      alert("Please select SSR Year.");
+      setMessage("Please select SSR Year.");
+      return;
+    }
+    if (!String(nonDsrMaterialForm.MaterialDescription || "").trim()) {
+      alert("Please enter Material Description.");
+      setMessage("Please enter Material Description.");
+      return;
+    }
+    if (!nonDsrMaterialForm.MaterialUnitId) {
+      alert("Please select Unit.");
+      setMessage("Please select Unit.");
+      return;
+    }
+    if (!nonDsrMaterialForm.MaterialLocalUnitId) {
+      alert("Please select Local Unit.");
+      setMessage("Please select Local Unit.");
+      return;
+    }
+    const enteredItemCode = String(nonDsrMaterialForm.ItemCode || "").trim();
+    if (
+      !window.confirm(
+        `Please review the details.\nItem Code: ${enteredItemCode || "(auto)"}\nItem Number: ${enteredItemNumber}\nDo you want to ${isEdit ? "update this material" : "save this new material"}?`,
+      )
+    ) {
+      setMessage("Save canceled. You can continue editing the form.");
+      return;
+    }
+    setSavingNonDsrMaterial(true);
+    setMessage("");
+    const payload = {
+      ...nonDsrMaterialForm,
+      actingUserId: currentUser.UserId,
+      userId: currentUser.UserId,
+    };
+    try {
+      const res = await fetch(
+        isEdit
+          ? `${API_BASE}/api/non-dsr-materials/${editingNonDsrMaterialId}`
+          : `${API_BASE}/api/non-dsr-materials`,
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to save material.");
+      const savedId = data.data?.MaterialId || "";
+      const savedCode = data.data?.ItemCode || "";
+      const savedNumber = data.data?.ItemNumber || "";
+      setMessage(
+        isEdit
+          ? `Material updated successfully. Material Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`
+          : `Material saved successfully. Material Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`,
+      );
+      resetNonDsrMaterialEdit();
+      if (nonDsrMaterialFilterRegionId) {
+        await loadNonDsrMaterialList(currentUser, {
+          regionId: nonDsrMaterialFilterRegionId,
+          ssrYearId: nonDsrMaterialFilterYearId,
+          categoryId: nonDsrMaterialFilterCategoryId,
+          subCategoryId: nonDsrMaterialFilterSubCategoryId,
+        });
+      } else {
+        setNonDsrMaterialList([]);
+      }
+    } catch (error) {
+      setMessage(`NON DSR Material save failed: ${error.message}`);
+    } finally {
+      setSavingNonDsrMaterial(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeMaster !== "non-dsr-material" || !currentUser?.UserId) return;
+    if (!canAccessItemMaster(currentUser)) return;
+    loadNonDsrMaterialYears();
+    const formRegion = nonDsrMaterialForm.SSRRegionId;
+    if (formRegion) loadNonDsrMaterialCategories(formRegion);
+    if (nonDsrMaterialForm.CategoryId) {
+      loadNonDsrMaterialSubCategories(nonDsrMaterialForm.CategoryId);
+    }
+    if (nonDsrMaterialFilterRegionId) {
+      loadNonDsrMaterialListYears(nonDsrMaterialFilterRegionId);
+      loadNonDsrMaterialListCategories(nonDsrMaterialFilterRegionId);
+    }
+    if (nonDsrMaterialFilterCategoryId) {
+      loadNonDsrMaterialListSubCategories(nonDsrMaterialFilterCategoryId);
+    }
+  }, [activeMaster, currentUser?.UserId]);
+
+  useEffect(() => {
+    if (activeMaster !== "non-dsr-material" || !currentUser?.UserId) return;
+    if (!nonDsrMaterialFilterRegionId) {
+      setNonDsrMaterialList([]);
+      return;
+    }
+    loadNonDsrMaterialList(currentUser, {
+      regionId: nonDsrMaterialFilterRegionId,
+      ssrYearId: nonDsrMaterialFilterYearId,
+      categoryId: nonDsrMaterialFilterCategoryId,
+      subCategoryId: nonDsrMaterialFilterSubCategoryId,
+    });
+  }, [
+    activeMaster,
+    currentUser?.UserId,
+    nonDsrMaterialFilterRegionId,
+    nonDsrMaterialFilterYearId,
+    nonDsrMaterialFilterCategoryId,
+    nonDsrMaterialFilterSubCategoryId,
+  ]);
+
   const startRegionEdit = (row) => {
     setActiveMaster("regions");
     setEditingRegionId(row.SSRRegionId);
@@ -9309,6 +9780,15 @@ export default function HomePage() {
     !isSuperAdmin ||
     Number(itemMasterForm.RegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
     Number(itemMasterForm.RegionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+  const nonDsrMaterialCodeIsAuto =
+    !isSuperAdmin ||
+    Number(nonDsrMaterialForm.SSRRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+    Number(nonDsrMaterialForm.SSRRegionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+  const unitOptions = [...unitList].sort((a, b) =>
+    String(a.UnitShortName || a.UnitName || "").localeCompare(
+      String(b.UnitShortName || b.UnitName || ""),
+    ),
+  );
   const canManageMeasurementGroups = canAccessMeasurementGroups(currentUser);
   const itemMasterAllowedRegionId = getItemMasterAllowedRegionId(currentUser);
   const itemMasterRegionOptions = isSuperAdmin
@@ -9320,6 +9800,11 @@ export default function HomePage() {
     ? "Organization Admins can only add, list, and edit NON SSR items entered by their organization"
     : isIndvUser
       ? "Individual Users can only add data for NON SSR items"
+      : "";
+  const nonDsrMaterialRoleBanner = isOrgAdmin
+    ? "Organization Admins can only add, list, and edit NON SSR materials entered by their organization"
+    : isIndvUser
+      ? "Individual Users can only add data for NON SSR materials"
       : "";
   const activeMasterMeta = mastersMenu.find((m) => m.id === activeMaster);
   const isErrorMessage = /failed/i.test(message);
@@ -9686,7 +10171,7 @@ export default function HomePage() {
             {allUsersMenu.map((item) =>
               renderMenuItem(item, {
                 forceDisabled:
-                  item.id === "item-master"
+                  item.id === "item-master" || item.id === "non-dsr-material"
                     ? !canManageItemMaster
                     : item.id === "measurement-groups"
                       ? !canManageMeasurementGroups
@@ -9694,7 +10179,9 @@ export default function HomePage() {
                 disabledTitle:
                   item.id === "measurement-groups"
                     ? "Available for SuperAdmin, OrgAdmin of organizations other than 3, and all users of organization 3"
-                    : "Available only for SuperAdmin",
+                    : item.id === "non-dsr-material"
+                      ? "Available for SuperAdmin, OrgAdmin, and Individual Users"
+                      : "Available only for SuperAdmin",
               }),
             )}
           </div>
@@ -12085,6 +12572,592 @@ export default function HomePage() {
                     ) : (
                       <EmptyRow colSpan={10}>
                         No items found — add one above.
+                      </EmptyRow>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {activeMaster === "non-dsr-material" && canManageItemMaster && (
+            <Card
+              eyebrow="Master · Material"
+              title={
+                editingNonDsrMaterialId
+                  ? `Edit material #${editingNonDsrMaterialId}`
+                  : "NON DSR Material"
+              }
+              subtitle="Add / edit MasterMaterial rows. Item Code follows the NON DSR Item rule."
+            >
+              {nonDsrMaterialRoleBanner && (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: `1px solid ${theme.colors.line}`,
+                    background: "#fff8e8",
+                    color: "#8a5a00",
+                    fontSize: 13.5,
+                    fontWeight: 600,
+                  }}
+                >
+                  {nonDsrMaterialRoleBanner}
+                </div>
+              )}
+
+              <FormShell onSubmit={onNonDsrMaterialSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr))",
+                    gap: 8,
+                  }}
+                >
+                  <Field label="Material Id">
+                    <input
+                      value={nonDsrMaterialForm.MaterialId || "(New)"}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Item Code">
+                    <input
+                      name="ItemCode"
+                      value={nonDsrMaterialForm.ItemCode}
+                      onChange={onNonDsrMaterialChange}
+                      maxLength={20}
+                      readOnly={nonDsrMaterialCodeIsAuto}
+                      disabled={nonDsrMaterialCodeIsAuto}
+                      placeholder={
+                        nonDsrMaterialCodeIsAuto ? "Auto generated" : ""
+                      }
+                      style={
+                        nonDsrMaterialCodeIsAuto
+                          ? {
+                              ...inputStyle,
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : inputStyle
+                      }
+                    />
+                  </Field>
+                  <Field label="User">
+                    <input
+                      value={nonDsrMaterialForm.UserName || ""}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Region" required>
+                    <select
+                      name="SSRRegionId"
+                      value={nonDsrMaterialForm.SSRRegionId}
+                      onChange={onNonDsrMaterialChange}
+                      required
+                      disabled={!isSuperAdmin}
+                      style={{
+                        ...inputStyle,
+                        ...(!isSuperAdmin
+                          ? {
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : null),
+                      }}
+                    >
+                      <option value="">Select Region</option>
+                      {itemMasterRegionOptions.map((r) => (
+                        <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                          {r.SSRRegionShortName || r.SSRRegionName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="SSR Year" required>
+                    <select
+                      name="YearId"
+                      value={nonDsrMaterialForm.YearId}
+                      onChange={onNonDsrMaterialChange}
+                      required
+                      style={inputStyle}
+                    >
+                      <option value="">Select Year</option>
+                      {nonDsrMaterialYears.map((y) => (
+                        <option key={y.YearId} value={y.YearId}>
+                          {y.Year}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Item Number" required>
+                    <input
+                      name="ItemNumber"
+                      value={nonDsrMaterialForm.ItemNumber}
+                      onChange={onNonDsrMaterialChange}
+                      maxLength={50}
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
+                  <Field label="Category">
+                    <select
+                      name="CategoryId"
+                      value={nonDsrMaterialForm.CategoryId}
+                      onChange={onNonDsrMaterialChange}
+                      disabled={!nonDsrMaterialForm.SSRRegionId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Category</option>
+                      {nonDsrMaterialCategories.map((c) => (
+                        <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                          {c.SSRCategoryShortName || c.SSRCategoryName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Sub Category">
+                    <select
+                      name="SubCategoryId"
+                      value={nonDsrMaterialForm.SubCategoryId}
+                      onChange={onNonDsrMaterialChange}
+                      disabled={!nonDsrMaterialForm.CategoryId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Sub Category</option>
+                      {nonDsrMaterialSubCategories.map((sc) => (
+                        <option
+                          key={sc.SSRSubCategoryId}
+                          value={sc.SSRSubCategoryId}
+                        >
+                          {sc.SSRSubCategoryShortName || sc.SSRSubCategoryName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Unit" required>
+                    <select
+                      name="MaterialUnitId"
+                      value={nonDsrMaterialForm.MaterialUnitId}
+                      onChange={onNonDsrMaterialChange}
+                      required
+                      style={inputStyle}
+                    >
+                      <option value="">Select Unit</option>
+                      {unitOptions.map((u) => (
+                        <option key={u.UnitId} value={u.UnitId}>
+                          {u.UnitShortName || u.UnitName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Local Unit" required>
+                    <select
+                      name="MaterialLocalUnitId"
+                      value={nonDsrMaterialForm.MaterialLocalUnitId}
+                      onChange={onNonDsrMaterialChange}
+                      required
+                      style={inputStyle}
+                    >
+                      <option value="">Select Local Unit</option>
+                      {unitOptions.map((u) => (
+                        <option key={`local-${u.UnitId}`} value={u.UnitId}>
+                          {u.UnitShortName || u.UnitName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
+                  <Field label="Material Description" required span>
+                    <textarea
+                      name="MaterialDescription"
+                      value={nonDsrMaterialForm.MaterialDescription}
+                      onChange={onNonDsrMaterialChange}
+                      required
+                      maxLength={500}
+                      rows={4}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 96,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Material Short Description" span>
+                    <input
+                      name="MaterialShortDescription"
+                      value={nonDsrMaterialForm.MaterialShortDescription}
+                      onChange={onNonDsrMaterialChange}
+                      maxLength={110}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Material Rate">
+                    <input
+                      name="MaterialRate"
+                      type="number"
+                      step="any"
+                      value={nonDsrMaterialForm.MaterialRate}
+                      onChange={onNonDsrMaterialChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Conversion Factor">
+                    <input
+                      name="ConversionFactor"
+                      type="number"
+                      step="any"
+                      value={nonDsrMaterialForm.ConversionFactor}
+                      onChange={onNonDsrMaterialChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Load Factor">
+                    <input
+                      name="MaterialLoadFactor"
+                      type="number"
+                      step="any"
+                      value={nonDsrMaterialForm.MaterialLoadFactor}
+                      onChange={onNonDsrMaterialChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Remarks">
+                    <input
+                      name="Remarks"
+                      value={nonDsrMaterialForm.Remarks}
+                      onChange={onNonDsrMaterialChange}
+                      maxLength={100}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Is Manual">
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        minHeight: 38,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        name="IsManual"
+                        checked={Boolean(nonDsrMaterialForm.IsManual)}
+                        onChange={onNonDsrMaterialChange}
+                      />
+                      Manual lead
+                    </label>
+                  </Field>
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                  <PrimaryButton disabled={savingNonDsrMaterial}>
+                    {savingNonDsrMaterial
+                      ? "Saving…"
+                      : editingNonDsrMaterialId
+                        ? "Update material"
+                        : "Save material"}
+                  </PrimaryButton>
+                  {editingNonDsrMaterialId && (
+                    <SecondaryButton onClick={resetNonDsrMaterialEdit}>
+                      Cancel edit
+                    </SecondaryButton>
+                  )}
+                </div>
+              </FormShell>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+                  gap: 12,
+                  alignItems: "end",
+                  marginBottom: 12,
+                }}
+              >
+                <Field label="SSR Region">
+                  <select
+                    value={nonDsrMaterialFilterRegionId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNonDsrMaterialFilterRegionId(value);
+                      setNonDsrMaterialFilterYearId("");
+                      setNonDsrMaterialFilterCategoryId("");
+                      setNonDsrMaterialFilterSubCategoryId("");
+                      setNonDsrMaterialListYears([]);
+                      setNonDsrMaterialListSubCategories([]);
+                      setNonDsrMaterialList([]);
+                      loadNonDsrMaterialListYears(value);
+                      loadNonDsrMaterialListCategories(value);
+                    }}
+                    disabled={!isSuperAdmin}
+                    style={{
+                      ...inputStyle,
+                      ...(!isSuperAdmin
+                        ? {
+                            background: "#EEF1F4",
+                            color: theme.colors.inkSoft,
+                            cursor: "not-allowed",
+                          }
+                        : null),
+                    }}
+                  >
+                    {isSuperAdmin && (
+                      <option value="">Select SSR Region</option>
+                    )}
+                    {(isSuperAdmin ? regions : itemMasterRegionOptions).map(
+                      (r) => (
+                        <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                          {r.SSRRegionShortName || r.SSRRegionName}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </Field>
+                <Field label="SSR Year">
+                  <select
+                    value={nonDsrMaterialFilterYearId}
+                    onChange={(e) =>
+                      setNonDsrMaterialFilterYearId(e.target.value)
+                    }
+                    disabled={!nonDsrMaterialFilterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">
+                      {nonDsrMaterialFilterRegionId
+                        ? "Select SSR Year"
+                        : "Select SSR Region first"}
+                    </option>
+                    {nonDsrMaterialListYears.map((y) => (
+                      <option key={y.YearId} value={y.YearId}>
+                        {y.Year}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Category">
+                  <select
+                    value={nonDsrMaterialFilterCategoryId}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNonDsrMaterialFilterCategoryId(value);
+                      setNonDsrMaterialFilterSubCategoryId("");
+                      setNonDsrMaterialListSubCategories([]);
+                      loadNonDsrMaterialListSubCategories(value);
+                    }}
+                    disabled={!nonDsrMaterialFilterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">All SSR Categories</option>
+                    {nonDsrMaterialListCategories.map((c) => (
+                      <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                        {c.SSRCategoryShortName || c.SSRCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="SSR Sub Category">
+                  <select
+                    value={nonDsrMaterialFilterSubCategoryId}
+                    onChange={(e) =>
+                      setNonDsrMaterialFilterSubCategoryId(e.target.value)
+                    }
+                    disabled={!nonDsrMaterialFilterRegionId}
+                    style={inputStyle}
+                  >
+                    <option value="">All SSR Sub Categories</option>
+                    {nonDsrMaterialListSubCategories.map((sc) => (
+                      <option
+                        key={sc.SSRSubCategoryId}
+                        value={sc.SSRSubCategoryId}
+                      >
+                        {sc.SSRSubCategoryShortName || sc.SSRSubCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <SecondaryButton
+                  type="button"
+                  disabled={!nonDsrMaterialFilterRegionId}
+                  onClick={() =>
+                    loadNonDsrMaterialList(currentUser, {
+                      regionId: nonDsrMaterialFilterRegionId,
+                      ssrYearId: nonDsrMaterialFilterYearId,
+                      categoryId: nonDsrMaterialFilterCategoryId,
+                      subCategoryId: nonDsrMaterialFilterSubCategoryId,
+                    })
+                  }
+                >
+                  Refresh list
+                </SecondaryButton>
+              </div>
+
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: theme.colors.inkSoft,
+                  marginBottom: 8,
+                }}
+              >
+                Select SSR Region to list materials. SSR Year, SSR Category,
+                and SSR Sub Category are optional.
+              </div>
+
+              <div
+                style={{
+                  overflowX: "auto",
+                  border: `1px solid ${theme.colors.line}`,
+                  borderRadius: 10,
+                }}
+              >
+                <table className="wrms-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Category</th>
+                      <th>Sub Category</th>
+                      <th>Item Code</th>
+                      <th>Number</th>
+                      <th style={{ minWidth: 180 }}>
+                        Description
+                      </th>
+                      <th>Unit</th>
+                      <th>Local Unit</th>
+                      <th style={{ whiteSpace: "nowrap" }}>Rate</th>
+                      <th
+                        style={{
+                          position: "sticky",
+                          right: 0,
+                          background: theme.colors.navy,
+                          zIndex: 1,
+                        }}
+                      >
+                        Action
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loadingNonDsrMaterial ? (
+                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
+                    ) : !nonDsrMaterialFilterRegionId ? (
+                      <EmptyRow colSpan={10}>
+                        Select SSR Region above, then click Refresh list.
+                      </EmptyRow>
+                    ) : nonDsrMaterialList.length ? (
+                      nonDsrMaterialList.map((row) => {
+                        const canEditRow =
+                          isSuperAdmin ||
+                          (itemMasterAllowedRegionId &&
+                            Number(row.SSRRegionId) ===
+                              Number(itemMasterAllowedRegionId));
+                        return (
+                          <tr key={row.MaterialId}>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                color: theme.colors.inkSoft,
+                              }}
+                            >
+                              {row.MaterialId}
+                            </td>
+                            <td>
+                              {row.SSRCategoryShortName ||
+                                row.SSRCategoryName ||
+                                "—"}
+                            </td>
+                            <td>
+                              {row.SSRSubCategoryShortName ||
+                                row.SSRSubCategoryName ||
+                                "—"}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.ItemCode || ""}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.ItemNumber || ""}
+                            </td>
+                            <td style={{ minWidth: 180 }}>
+                              {row.MaterialDescription}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.MaterialUnitShortName || ""}
+                            </td>
+                            <td style={{ fontFamily: theme.font.mono }}>
+                              {row.MaterialLocalUnitShortName || ""}
+                            </td>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                textAlign: "right",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {formatRupees(row.MaterialRate)}
+                            </td>
+                            <td
+                              style={{
+                                position: "sticky",
+                                right: 0,
+                                background: "#fff",
+                                whiteSpace: "nowrap",
+                                boxShadow:
+                                  "-6px 0 8px rgba(15, 42, 68, 0.06)",
+                              }}
+                            >
+                              {canEditRow ? (
+                                <GhostIconButton
+                                  tone={theme.colors.accent}
+                                  onClick={() => startNonDsrMaterialEdit(row)}
+                                >
+                                  ✎ Edit
+                                </GhostIconButton>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <EmptyRow colSpan={10}>
+                        No materials found — add one above.
                       </EmptyRow>
                     )}
                   </tbody>

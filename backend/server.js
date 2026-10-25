@@ -4325,6 +4325,38 @@ async function ensureMasterItemUserId() {
   `);
 }
 
+/** Imported MaterialId values can sit ahead of the identity sequence. */
+async function ensureMasterMaterialIdSequence() {
+  const seqRes = await pool.query(`
+    SELECT pg_get_serial_sequence('"MasterMaterial"', 'MaterialId') AS seq
+  `);
+  let seq = seqRes.rows[0]?.seq;
+  if (!seq) {
+    const alt = await pool.query(`
+      SELECT c.relname AS seq
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'S'
+        AND n.nspname = 'public'
+        AND c.relname = 'MasterMaterial_MaterialId_seq'
+      LIMIT 1
+    `);
+    seq = alt.rows[0]?.seq ? `public."${alt.rows[0].seq}"` : null;
+  }
+  if (!seq) {
+    console.warn("MasterMaterial MaterialId sequence not found — skip sync.");
+    return;
+  }
+  const maxRes = await pool.query(
+    `SELECT COALESCE(MAX("MaterialId"), 0)::bigint AS max FROM "MasterMaterial"`,
+  );
+  await pool.query(
+    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
+    [seq, maxRes.rows[0].max],
+  );
+  console.log("MasterMaterial Id sequence ensured.");
+}
+
 /** Imported ItemId values can sit ahead of the identity sequence. */
 async function ensureMasterItemIdSequence() {
   const seqRes = await pool.query(`
@@ -4487,6 +4519,55 @@ async function nextOrgItemNumber(db, organizationId) {
        AND (
          i."ItemNumber" ILIKE $2 ESCAPE '\\'
          OR i."ItemCode" ILIKE $2 ESCAPE '\\'
+       )`,
+    [Number(organizationId), `${escapeLikePattern(prefix)}%`],
+  );
+
+  let max = 0;
+  const prefixLower = prefix.toLowerCase();
+  const consider = (raw) => {
+    const value = String(raw || "").trim();
+    if (!value.toLowerCase().startsWith(prefixLower)) return;
+    const suffix = value.slice(prefix.length);
+    if (!/^\d+$/.test(suffix)) return;
+    const n = Number(suffix);
+    if (n > max) max = n;
+  };
+  for (const row of existing.rows) {
+    consider(row.ItemNumber);
+    consider(row.ItemCode);
+  }
+  return `${prefix}${max + 1}`;
+}
+
+/** Next NON DSR Material Item Code: {OrgCode}-MR-{n}, counted per organization. */
+async function nextOrgMaterialItemCode(db, organizationId) {
+  const orgResult = await db.query(
+    `SELECT "OrgCode" FROM "MasterOrganization" WHERE "OrganizationId" = $1`,
+    [Number(organizationId)],
+  );
+  const orgCode = String(orgResult.rows[0]?.OrgCode || "").trim();
+  if (!orgCode) {
+    const error = new Error(
+      "Organization code is required to generate Item Code.",
+    );
+    error.status = 400;
+    throw error;
+  }
+
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+    `nondsr-material-${Number(organizationId)}`,
+  ]);
+
+  const prefix = `${orgCode}-MR-`;
+  const existing = await db.query(
+    `SELECT m."ItemNumber", m."ItemCode"
+     FROM "MasterMaterial" m
+     INNER JOIN "MasterUser" u ON u."UserId" = m."UserId"
+     WHERE u."OrganizationId" = $1
+       AND (
+         m."ItemNumber" ILIKE $2 ESCAPE '\\'
+         OR m."ItemCode" ILIKE $2 ESCAPE '\\'
        )`,
     [Number(organizationId), `${escapeLikePattern(prefix)}%`],
   );
@@ -4983,6 +5064,480 @@ app.put("/api/master-items/:id", async (req, res) => {
     );
     return res.json({
       message: "Item updated successfully.",
+      data: joined.rows[0],
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+/** OrgAdmin may only access NON SSR materials created by users in their organization. */
+async function assertOrgAdminMaterialOwnership(auth, materialUserId) {
+  if (!auth.isOrgAdmin) return null;
+  const orgId = Number(auth.actor.OrganizationId);
+  if (!orgId) {
+    return {
+      status: 403,
+      message:
+        "Organization is required for Organization Admin material access.",
+    };
+  }
+  if (
+    materialUserId === null ||
+    materialUserId === undefined ||
+    materialUserId === ""
+  ) {
+    return {
+      status: 403,
+      message:
+        "You can only view or edit NON SSR materials entered by your organization.",
+    };
+  }
+  const owner = await pool.query(
+    `SELECT "OrganizationId" FROM "MasterUser" WHERE "UserId" = $1`,
+    [Number(materialUserId)],
+  );
+  if (!owner.rows[0] || Number(owner.rows[0].OrganizationId) !== orgId) {
+    return {
+      status: 403,
+      message:
+        "You can only view or edit NON SSR materials entered by your organization.",
+    };
+  }
+  return null;
+}
+
+function parseMaterialFactor(value, fallback) {
+  if (value === "" || value === null || value === undefined) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+const MASTER_MATERIAL_SELECT = `
+  SELECT m."MaterialId", m."UserId", m."SSRRegionId", m."CategoryId",
+         m."SubCategoryId", m."YearId", m."ItemCode", m."ItemNumber",
+         m."MaterialDescription", m."MaterialShortDescription",
+         m."MaterialUnitId", m."MaterialLocalUnitId",
+         m."ConversionFactor", m."MaterialLoadFactor", m."IsManual",
+         m."MaterialRate", m."Remarks",
+         r."SSRRegionShortName", r."SSRRegionName",
+         c."SSRCategoryShortName", c."SSRCategoryName",
+         sc."SSRSubCategoryShortName", sc."SSRSubCategoryName",
+         y."Year" AS "SSRYear",
+         u."UnitShortName" AS "MaterialUnitShortName",
+         u."UnitName" AS "MaterialUnitName",
+         lu."UnitShortName" AS "MaterialLocalUnitShortName",
+         lu."UnitName" AS "MaterialLocalUnitName",
+         mu."UserName", mu."UserLoginName",
+         mu."OrganizationId" AS "CreatorOrganizationId"
+  FROM "MasterMaterial" m
+  LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = m."SSRRegionId"
+  LEFT JOIN "MasterSSRCategory" c ON c."SSRCategoryId" = m."CategoryId"
+  LEFT JOIN "MasterSSRSubCategory" sc
+    ON sc."SSRSubCategoryId" = m."SubCategoryId"
+  LEFT JOIN "MasterYear" y ON y."YearId" = m."YearId"
+  LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
+  LEFT JOIN "MasterUnit" lu ON lu."UnitId" = m."MaterialLocalUnitId"
+  LEFT JOIN "MasterUser" mu ON mu."UserId" = m."UserId"
+`;
+
+app.get("/api/non-dsr-materials", async (req, res) => {
+  const userId = Number(req.query.userId);
+  const regionIdFilter =
+    req.query.regionId !== undefined &&
+    req.query.regionId !== null &&
+    String(req.query.regionId).trim() !== ""
+      ? Number(req.query.regionId)
+      : null;
+  const categoryIdFilter =
+    req.query.categoryId !== undefined &&
+    req.query.categoryId !== null &&
+    String(req.query.categoryId).trim() !== ""
+      ? Number(req.query.categoryId)
+      : null;
+  const subCategoryIdFilter =
+    req.query.subCategoryId !== undefined &&
+    req.query.subCategoryId !== null &&
+    String(req.query.subCategoryId).trim() !== ""
+      ? Number(req.query.subCategoryId)
+      : null;
+  const ssrYearIdFilter =
+    req.query.ssrYearId !== undefined &&
+    req.query.ssrYearId !== null &&
+    String(req.query.ssrYearId).trim() !== ""
+      ? Number(req.query.ssrYearId)
+      : null;
+
+  const auth = await requireItemMasterAccess(userId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  if (!regionIdFilter) {
+    return res.status(400).json({
+      message: "SSR Region is required to list materials.",
+    });
+  }
+  if (
+    auth.allowedRegionId &&
+    Number(auth.allowedRegionId) !== Number(regionIdFilter)
+  ) {
+    return res.status(403).json({
+      message: "You can only list materials for your allowed NON SSR region.",
+    });
+  }
+
+  try {
+    const params = [regionIdFilter];
+    let filterSql = ` WHERE m."SSRRegionId" = $1`;
+    if (ssrYearIdFilter) {
+      params.push(ssrYearIdFilter);
+      filterSql += ` AND (m."YearId" = $${params.length} OR m."YearId" IS NULL)`;
+    }
+    if (categoryIdFilter) {
+      params.push(categoryIdFilter);
+      filterSql += ` AND m."CategoryId" = $${params.length}`;
+    }
+    if (subCategoryIdFilter) {
+      params.push(subCategoryIdFilter);
+      filterSql += ` AND m."SubCategoryId" = $${params.length}`;
+    }
+    if (auth.isOrgAdmin) {
+      const orgId = Number(auth.actor.OrganizationId);
+      if (!orgId) {
+        return res.status(403).json({
+          message:
+            "Organization is required for Organization Admin material access.",
+        });
+      }
+      params.push(orgId);
+      filterSql += `
+          AND EXISTS (
+            SELECT 1
+            FROM "MasterUser" creator
+            WHERE creator."UserId" = m."UserId"
+              AND creator."OrganizationId" = $${params.length}
+          )`;
+    }
+    const result = await pool.query(
+      MASTER_MATERIAL_SELECT +
+        filterSql +
+        `
+        ORDER BY m."ItemCode" ASC NULLS LAST, m."MaterialId" ASC
+        LIMIT 500`,
+      params,
+    );
+    return res.json({
+      data: result.rows,
+      meta: {
+        isSuperAdmin: auth.isSuperAdmin,
+        isOrgAdmin: auth.isOrgAdmin,
+        isIndvUser: auth.isIndvUser,
+        allowedRegionId: auth.allowedRegionId,
+        organizationId: auth.actor.OrganizationId || null,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: error.message });
+  }
+});
+
+app.get("/api/non-dsr-materials/next-number", async (req, res) => {
+  const auth = await requireItemMasterAccess(Number(req.query.userId));
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+  const orgId = Number(auth.actor.OrganizationId);
+  if (!orgId) {
+    return res.status(400).json({
+      message: "Organization is required to generate Item Code.",
+    });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const itemCode = await nextOrgMaterialItemCode(client, orgId);
+    await client.query("ROLLBACK");
+    return res.json({ itemCode, organizationId: orgId });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* already closed */
+    }
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+function readNonDsrMaterialBody(body) {
+  const description = String(body.MaterialDescription || "").trim();
+  const shortDescription = String(body.MaterialShortDescription || "").trim();
+  const itemNumber = String(body.ItemNumber || "").trim();
+  const remarks = String(body.Remarks || "").trim();
+  const conversionFactor = parseMaterialFactor(body.ConversionFactor, 1);
+  const loadFactor = parseMaterialFactor(body.MaterialLoadFactor, 0);
+  return {
+    description,
+    shortDescription,
+    itemNumber,
+    remarks,
+    conversionFactor,
+    loadFactor,
+    isManual: parseOptionalBool(body.IsManual) === true,
+    materialRate: parseOptionalNumber(body.MaterialRate),
+    unitId: parseOptionalNumber(body.MaterialUnitId),
+    localUnitId: parseOptionalNumber(body.MaterialLocalUnitId),
+    yearId: parseOptionalNumber(body.YearId || body.SSRYearId),
+  };
+}
+
+function validateNonDsrMaterialFields(fields) {
+  if (!fields.description) return "Material Description is required.";
+  if (fields.description.length > 500) {
+    return "Material Description must be at most 500 characters.";
+  }
+  if (fields.shortDescription.length > 110) {
+    return "Material Short Description must be at most 110 characters.";
+  }
+  if (!fields.yearId) return "SSR Year is required.";
+  if (!fields.itemNumber) return "Item Number is required.";
+  if (fields.itemNumber.length > 50) {
+    return "Item Number must be at most 50 characters.";
+  }
+  if (!fields.unitId) return "Unit is required.";
+  if (!fields.localUnitId) return "Local Unit is required.";
+  if (fields.conversionFactor === null) {
+    return "Conversion Factor must be a number.";
+  }
+  if (fields.loadFactor === null) return "Load Factor must be a number.";
+  if (fields.remarks.length > 100) {
+    return "Remarks must be at most 100 characters.";
+  }
+  return "";
+}
+
+app.post("/api/non-dsr-materials", async (req, res) => {
+  const body = req.body || {};
+  const actingUserId = Number(body.actingUserId || body.userId);
+  const auth = await requireItemMasterAccess(actingUserId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  const regionId = Number(body.SSRRegionId || body.RegionId || body.regionId);
+  if (!regionId) {
+    return res.status(400).json({ message: "Region is required." });
+  }
+  if (auth.allowedRegionId && Number(auth.allowedRegionId) !== regionId) {
+    return res.status(403).json({
+      message: auth.isOrgAdmin
+        ? "Organization Admins can only add data for NON SSR materials (Region Id 3)."
+        : "Individual Users can only add data for NON SSR materials (Region Id 4).",
+    });
+  }
+  const fields = readNonDsrMaterialBody(body);
+  const fieldError = validateNonDsrMaterialFields(fields);
+  if (fieldError) return res.status(400).json({ message: fieldError });
+
+  const autoItemCode =
+    isNonDsrRegion(regionId) || auth.isOrgAdmin || auth.isIndvUser;
+  const client = await pool.connect();
+  try {
+    await ensureMasterMaterialIdSequence();
+    await client.query("BEGIN");
+    let itemCode;
+    if (autoItemCode) {
+      const orgId = Number(auth.actor.OrganizationId);
+      if (!orgId) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Organization is required to generate Item Code.",
+        });
+      }
+      itemCode = await nextOrgMaterialItemCode(client, orgId);
+    } else {
+      itemCode = String(body.ItemCode || "").trim();
+    }
+    if (itemCode.length > 20) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: "Item Code must be at most 20 characters.",
+      });
+    }
+    const result = await client.query(
+      `INSERT INTO "MasterMaterial"
+        ("SSRRegionId", "MaterialDescription", "MaterialShortDescription",
+         "MaterialUnitId", "MaterialLocalUnitId", "ConversionFactor",
+         "MaterialLoadFactor", "IsManual", "UserId", "ItemCode", "ItemNumber",
+         "CategoryId", "SubCategoryId", "YearId", "MaterialRate", "Remarks")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       RETURNING "MaterialId"`,
+      [
+        regionId,
+        fields.description,
+        fields.shortDescription,
+        fields.unitId,
+        fields.localUnitId,
+        fields.conversionFactor,
+        fields.loadFactor,
+        fields.isManual,
+        Number(auth.actor.UserId),
+        itemCode || null,
+        fields.itemNumber,
+        parseOptionalNumber(body.CategoryId),
+        parseOptionalNumber(body.SubCategoryId),
+        fields.yearId,
+        fields.materialRate,
+        fields.remarks || null,
+      ],
+    );
+    const createdId = result.rows[0].MaterialId;
+    await client.query("COMMIT");
+    const joined = await pool.query(
+      `${MASTER_MATERIAL_SELECT} WHERE m."MaterialId" = $1`,
+      [createdId],
+    );
+    return res.status(201).json({
+      message: "Material created successfully.",
+      data: joined.rows[0],
+    });
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* already closed */
+    }
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put("/api/non-dsr-materials/:id", async (req, res) => {
+  const materialId = Number(req.params.id);
+  const body = req.body || {};
+  const actingUserId = Number(body.actingUserId || body.userId);
+  if (!materialId) {
+    return res.status(400).json({ message: "Valid MaterialId is required." });
+  }
+  const auth = await requireItemMasterAccess(actingUserId);
+  if (auth.error) {
+    return res.status(auth.error.status).json({ message: auth.error.message });
+  }
+
+  try {
+    const existing = await pool.query(
+      `SELECT "MaterialId", "SSRRegionId", "UserId", "ItemNumber", "ItemCode"
+       FROM "MasterMaterial" WHERE "MaterialId" = $1`,
+      [materialId],
+    );
+    if (!existing.rows[0]) {
+      return res.status(404).json({ message: "Material not found." });
+    }
+    if (
+      auth.allowedRegionId &&
+      Number(existing.rows[0].SSRRegionId) !== Number(auth.allowedRegionId)
+    ) {
+      return res.status(403).json({
+        message:
+          "You can only update NON SSR materials for your allowed region.",
+      });
+    }
+    const ownershipError = await assertOrgAdminMaterialOwnership(
+      auth,
+      existing.rows[0].UserId,
+    );
+    if (ownershipError) {
+      return res
+        .status(ownershipError.status)
+        .json({ message: ownershipError.message });
+    }
+
+    const regionId = Number(body.SSRRegionId || body.RegionId || body.regionId);
+    if (!regionId) {
+      return res.status(400).json({ message: "Region is required." });
+    }
+    if (auth.allowedRegionId && Number(auth.allowedRegionId) !== regionId) {
+      return res.status(403).json({
+        message:
+          "You cannot change Region outside your allowed NON SSR region.",
+      });
+    }
+    const fields = readNonDsrMaterialBody(body);
+    const fieldError = validateNonDsrMaterialFields(fields);
+    if (fieldError) return res.status(400).json({ message: fieldError });
+
+    const keepGeneratedCode =
+      isNonDsrRegion(regionId) ||
+      isNonDsrRegion(existing.rows[0].SSRRegionId) ||
+      auth.isOrgAdmin ||
+      auth.isIndvUser;
+    const existingCode = String(existing.rows[0].ItemCode || "").trim();
+    const existingNumber = String(existing.rows[0].ItemNumber || "").trim();
+    const generatedCode = /^.+-MR-\d+$/i;
+    let itemCode;
+    if (keepGeneratedCode) {
+      if (generatedCode.test(existingCode)) itemCode = existingCode;
+      else if (!existingCode && generatedCode.test(existingNumber)) {
+        itemCode = existingNumber;
+      } else itemCode = existingCode;
+    } else {
+      itemCode = String(body.ItemCode || "").trim();
+    }
+    if (itemCode.length > 20) {
+      return res.status(400).json({
+        message: "Item Code must be at most 20 characters.",
+      });
+    }
+
+    await pool.query(
+      `UPDATE "MasterMaterial"
+       SET "SSRRegionId" = $1,
+           "CategoryId" = $2,
+           "SubCategoryId" = $3,
+           "YearId" = $4,
+           "ItemNumber" = $5,
+           "ItemCode" = $6,
+           "MaterialDescription" = $7,
+           "MaterialShortDescription" = $8,
+           "MaterialUnitId" = $9,
+           "MaterialLocalUnitId" = $10,
+           "ConversionFactor" = $11,
+           "MaterialLoadFactor" = $12,
+           "IsManual" = $13,
+           "MaterialRate" = $14,
+           "Remarks" = $15
+       WHERE "MaterialId" = $16`,
+      [
+        regionId,
+        parseOptionalNumber(body.CategoryId),
+        parseOptionalNumber(body.SubCategoryId),
+        fields.yearId,
+        fields.itemNumber,
+        itemCode || null,
+        fields.description,
+        fields.shortDescription,
+        fields.unitId,
+        fields.localUnitId,
+        fields.conversionFactor,
+        fields.loadFactor,
+        fields.isManual,
+        fields.materialRate,
+        fields.remarks || null,
+        materialId,
+      ],
+    );
+    const joined = await pool.query(
+      `${MASTER_MATERIAL_SELECT} WHERE m."MaterialId" = $1`,
+      [materialId],
+    );
+    return res.json({
+      message: "Material updated successfully.",
       data: joined.rows[0],
     });
   } catch (error) {
@@ -11155,14 +11710,17 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     const right = 555;
     const width = right - left;
     const colCodeW = 48;
-    const colUnitW = Math.round(40 * 0.95 * 0.9);
-    const colQtyW = Math.round(54 * 0.95 * 0.9);
-    const colRateW = Math.round(85 * 0.95 * 0.9);
-    const colAmtW = Math.round(108 * 0.95 * 0.9);
+    // Unit and Quantity sit to the right of the measurement text.
+    // Amount is wide enough for a rupee total such as ₹ 1,04,715.33
+    // on one line, so Rate and Quantity sit just to its left.
+    const colAmtW = 76;
+    const colRateW = 48;
+    const colQtyW = 40;
     const colAmt = right - colAmtW;
     const colRate = colAmt - colRateW;
     const colQty = colRate - colQtyW;
-    const colUnit = colQty - colUnitW;
+    const colUnit = colQty - 36;
+    const colUnitW = colQty - colUnit;
     const colCode = left;
     const colDesc = left + colCodeW;
     const colDescW = Math.max(120, colUnit - colDesc - 4);
@@ -11221,8 +11779,9 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       const math = String(detail.MathString || "").trim();
       const qty = Number(detail.Quantity) || 0;
       const indent = 10;
-      const mathW = Math.min(110, Math.floor(colDescW * 0.38));
-      const descW = Math.max(40, colDescW - indent - mathW - 6);
+      const descW = 108;
+      const mathX = colDesc + indent + descW + 6;
+      const mathW = Math.max(80, colQty - 4 - mathX);
       doc.font("Helvetica").fontSize(8);
       const descHeight = Math.max(
         11,
@@ -11235,9 +11794,9 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       const y = doc.y;
       doc.text(desc, colDesc + indent, y, { width: descW });
       if (math) {
-        doc.text(math, colDesc + indent + descW, y, {
+        doc.text(math, mathX, y, {
           width: mathW,
-          align: "right",
+          align: "left",
         });
       }
       doc.text(formatDetailQty(qty), colQty, y, {
@@ -11511,7 +12070,7 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       const y = doc.y;
       const amtText = rs(amount);
       doc.font(fonts.regular).fontSize(10);
-      const amtWidth = Math.max(colAmtW, doc.widthOfString(amtText) + 2);
+      const amtWidth = Math.max(colAmtW, doc.widthOfString(amtText) + 10);
       doc.font("Helvetica-Bold").fontSize(10);
       const labelText = `${label}   `;
       doc.text(labelText, left, y, {
