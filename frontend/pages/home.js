@@ -496,6 +496,27 @@ function catalogTipPosition(event) {
   return { x: Math.max(8, x), y: Math.max(8, y) };
 }
 
+function DescriptionPreview({ text, emphasize = false }) {
+  return (
+    <div
+      onWheel={(event) => {
+        const el = event.currentTarget;
+        if (el.scrollHeight > el.clientHeight) event.stopPropagation();
+      }}
+      style={{
+        maxHeight: "5.6em",
+        overflowY: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        lineHeight: 1.4,
+        fontWeight: emphasize ? 600 : undefined,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
 function FullDescriptionTip({ tip }) {
   if (!tip?.text) return null;
   return (
@@ -961,7 +982,7 @@ function formatItemComponentLabel(item) {
   if (!item) return "";
   const code = String(item.ItemCode || item.ItemNumber || "").trim();
   const description = String(item.ItemDescription || "").trim();
-  if (code && description) return `${code} ${description}`;
+  if (code && description) return `${code} -- ${description}`;
   return code || description || String(item.ItemId || "");
 }
 
@@ -1419,7 +1440,20 @@ function ItemComponentsPanel({
       })
       .then((res) => {
         if (!cancelled) {
-          setItemMasterList(Array.isArray(res.data) ? res.data : []);
+          const rows = Array.isArray(res.data) ? res.data : [];
+          rows.sort((a, b) => {
+            const codeA = String(a.ItemCode || a.ItemNumber || "");
+            const codeB = String(b.ItemCode || b.ItemNumber || "");
+            if (!codeA && codeB) return 1;
+            if (codeA && !codeB) return -1;
+            const byCode = codeA.localeCompare(codeB, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+            if (byCode !== 0) return byCode;
+            return Number(a.ItemId) - Number(b.ItemId);
+          });
+          setItemMasterList(rows);
         }
       })
       .catch(() => {
@@ -1781,7 +1815,7 @@ function ItemComponentsPanel({
             ? `Item Component for item #${itemId}`
             : "Item Component"
       }
-      subtitle="Add or edit item component rows for the selected item. Selection is from Master Item."
+      subtitle="Select the Item from Item List by searching on Item Code or Text"
     >
       {!itemId ? (
         <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -2855,7 +2889,7 @@ function LabourComponentsPanel({
             ? `Labour components for item #${itemId}`
             : "Labour components"
       }
-      subtitle="Add or edit labour component rows for the selected item."
+      subtitle="Select the Labour from Labour List by searching on Item Code or Text"
     >
       {!itemId ? (
         <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -3723,7 +3757,7 @@ function MachineryComponentsPanel({
             ? `Machinery components for item #${itemId}`
             : "Machinery components"
       }
-      subtitle="Add or edit machinery component rows for the selected item."
+      subtitle="Select the Machinery from Machinery List by searching on Item Code or Text"
     >
       {!itemId ? (
         <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -4700,9 +4734,7 @@ export default function HomePage() {
   const [loadingMaterialItems, setLoadingMaterialItems] = useState(false);
   const [catalogHoverTip, setCatalogHoverTip] = useState(null);
   const [materialItemsViewed, setMaterialItemsViewed] = useState(false);
-  const [materialRALogic, setMaterialRALogic] = useState("");
-  const [materialRALogicPickerOpen, setMaterialRALogicPickerOpen] =
-    useState(false);
+  const [materialRALogic, setMaterialRALogic] = useState("CPWD");
   const [selectedMaterialItemId, setSelectedMaterialItemId] = useState(null);
   const [materialMasterList, setMaterialMasterList] = useState([]);
   const [materialPickerSearch, setMaterialPickerSearch] = useState("");
@@ -5578,8 +5610,7 @@ export default function HomePage() {
   };
 
   const resetMaterialRALogic = () => {
-    setMaterialRALogic("");
-    setMaterialRALogicPickerOpen(false);
+    setMaterialRALogic("CPWD");
     setMaterialItemsViewed(false);
   };
 
@@ -5603,7 +5634,6 @@ export default function HomePage() {
 
   const applyMaterialRALogic = async (logic) => {
     setMaterialRALogic(logic);
-    setMaterialRALogicPickerOpen(false);
     await loadMaterialMasterList(
       getComponentCatalogRegionIds(materialRegionId, logic),
     );
@@ -5726,6 +5756,13 @@ export default function HomePage() {
     try {
       if (!isNonSsrMaterialRegion(materialRegionId)) {
         await loadMaterialMasterList(materialRegionId);
+      } else {
+        await loadMaterialMasterList(
+          getComponentCatalogRegionIds(
+            materialRegionId,
+            materialRALogic || "CPWD",
+          ),
+        );
       }
       const search = String(materialItemSearch || "").trim();
       const params = {
@@ -5742,9 +5779,22 @@ export default function HomePage() {
       const res = await axios.get(`${API_BASE}/api/ssr-items-load`, {
         params,
       });
-      setMaterialItemList(
-        Array.isArray(res.data?.data) ? res.data.data : [],
-      );
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      if (params.listOrder === "itemcode") {
+        rows.sort((a, b) => {
+          const codeA = String(a.ItemCode || "");
+          const codeB = String(b.ItemCode || "");
+          if (!codeA && codeB) return 1;
+          if (codeA && !codeB) return -1;
+          const byCode = codeA.localeCompare(codeB, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          });
+          if (byCode !== 0) return byCode;
+          return Number(a.ItemId) - Number(b.ItemId);
+        });
+      }
+      setMaterialItemList(rows);
       setMaterialItemsViewed(true);
     } catch (err) {
       console.error(err);
@@ -5789,7 +5839,6 @@ export default function HomePage() {
     }
     if (isNonSsrMaterialRegion(materialRegionId) && !materialRALogic) {
       alert("Please select the Logic for R A first.");
-      setMaterialRALogicPickerOpen(true);
       return;
     }
     setSelectedMaterialItemId(item.ItemId);
@@ -7854,8 +7903,7 @@ export default function HomePage() {
     setMaterialItemSearch("");
     setLoadingMaterialItems(false);
     setMaterialItemsViewed(false);
-    setMaterialRALogic("");
-    setMaterialRALogicPickerOpen(false);
+    setMaterialRALogic("CPWD");
     setSelectedMaterialItemId(null);
     setMaterialMasterList([]);
     setMaterialPickerSearch("");
@@ -9015,7 +9063,20 @@ export default function HomePage() {
       const res = await axios.get(`${API_BASE}/api/master-items`, {
         params,
       });
-      setItemMasterList(Array.isArray(res.data?.data) ? res.data.data : []);
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      rows.sort((a, b) => {
+        const codeA = String(a.ItemCode || "");
+        const codeB = String(b.ItemCode || "");
+        if (!codeA && codeB) return 1;
+        if (codeA && !codeB) return -1;
+        const byCode = codeA.localeCompare(codeB, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (byCode !== 0) return byCode;
+        return Number(a.ItemId) - Number(b.ItemId);
+      });
+      setItemMasterList(rows);
     } catch (err) {
       console.error(err);
       setItemMasterList([]);
@@ -12456,22 +12517,18 @@ export default function HomePage() {
                   overflowX: "auto",
                   border: `1px solid ${theme.colors.line}`,
                   borderRadius: 10,
+                  maxHeight: 320,
+                  overflowY: "auto",
                 }}
               >
                 <table className="wrms-table">
                   <thead>
                     <tr>
-                      <th>ID</th>
-                      <th>Region</th>
-                      <th>Category</th>
-                      <th>Sub Category</th>
                       <th>Item Code</th>
-                      <th>Number</th>
-                      <th style={{ minWidth: 360, width: "40%" }}>
-                        Description
-                      </th>
+                      <th>Item Number</th>
+                      <th>Description</th>
                       <th>Unit</th>
-                      <th>Rate</th>
+                      <th>Completed Rate</th>
                       <th
                         style={{
                           position: "sticky",
@@ -12486,10 +12543,10 @@ export default function HomePage() {
                   </thead>
                   <tbody>
                     {loadingItemMaster ? (
-                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={6}>Loading…</EmptyRow>
                     ) : !itemMasterFilterRegionId ||
                       !itemMasterFilterYearId ? (
-                      <EmptyRow colSpan={10}>
+                      <EmptyRow colSpan={6}>
                         Select SSR Region and SSR Year above, then click Refresh
                         list.
                       </EmptyRow>
@@ -12500,48 +12557,38 @@ export default function HomePage() {
                           (itemMasterAllowedRegionId &&
                             Number(row.RegionId) ===
                               Number(itemMasterAllowedRegionId));
+                        const desc = String(row.ItemDescription || "").trim();
                         return (
                           <tr key={row.ItemId}>
                             <td
                               style={{
                                 fontFamily: theme.font.mono,
-                                color: theme.colors.inkSoft,
+                                whiteSpace: "nowrap",
+                                verticalAlign: "top",
                               }}
                             >
-                              {row.ItemId}
-                            </td>
-                            <td>
-                              {row.SSRRegionShortName ||
-                                row.SSRRegionName ||
-                                row.RegionId ||
-                                "—"}
-                            </td>
-                            <td>
-                              {row.SSRCategoryShortName ||
-                                row.SSRCategoryName ||
-                                "—"}
-                            </td>
-                            <td>
-                              {row.SSRSubCategoryShortName ||
-                                row.SSRSubCategoryName ||
-                                "—"}
-                            </td>
-                            <td style={{ fontFamily: theme.font.mono }}>
                               {row.ItemCode || ""}
-                            </td>
-                            <td style={{ fontFamily: theme.font.mono }}>
-                              {row.ItemNumber}
-                            </td>
-                            <td style={{ minWidth: 360, width: "40%" }}>
-                              {row.ItemDescription}
-                            </td>
-                            <td style={{ fontFamily: theme.font.mono }}>
-                              {row.UnitShortName ?? ""}
                             </td>
                             <td
                               style={{
                                 fontFamily: theme.font.mono,
-                                textAlign: "right",
+                                whiteSpace: "nowrap",
+                                verticalAlign: "top",
+                              }}
+                            >
+                              {row.ItemNumber}
+                            </td>
+                            <td style={{ maxWidth: 520, verticalAlign: "top" }}>
+                              <DescriptionPreview text={desc} />
+                            </td>
+                            <td style={{ verticalAlign: "top" }}>
+                              {row.UnitShortName || ""}
+                            </td>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                verticalAlign: "top",
+                                whiteSpace: "nowrap",
                               }}
                             >
                               {formatRupees(row.CompletedRate)}
@@ -12552,6 +12599,7 @@ export default function HomePage() {
                                 right: 0,
                                 background: "#fff",
                                 whiteSpace: "nowrap",
+                                verticalAlign: "top",
                                 boxShadow: "-6px 0 8px rgba(15, 42, 68, 0.06)",
                               }}
                             >
@@ -12570,7 +12618,7 @@ export default function HomePage() {
                         );
                       })
                     ) : (
-                      <EmptyRow colSpan={10}>
+                      <EmptyRow colSpan={6}>
                         No items found — add one above.
                       </EmptyRow>
                     )}
@@ -13463,7 +13511,10 @@ export default function HomePage() {
                         if (!isNonSsrMaterialRegion(regionId)) {
                           loadMaterialMasterList(regionId);
                         } else {
-                          setMaterialMasterList([]);
+                          setMaterialRALogic("CPWD");
+                          loadMaterialMasterList(
+                            getComponentCatalogRegionIds(regionId, "CPWD"),
+                          );
                         }
                       }}
                       style={inputStyle}
@@ -13608,80 +13659,6 @@ export default function HomePage() {
                     {loadingMaterialItems ? "Loading…" : "View Items"}
                   </PrimaryButton>
                 </div>
-                {isNonSsrMaterialRegion(materialRegionId) &&
-                  materialItemsViewed && (
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        marginTop: 14,
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <SecondaryButton
-                        type="button"
-                        onClick={() => setMaterialRALogicPickerOpen(true)}
-                      >
-                        Select the Logic for R A
-                      </SecondaryButton>
-                      {materialRALogic && (
-                        <span
-                          style={{
-                            fontSize: 13,
-                            fontWeight: 600,
-                            color: theme.colors.ink,
-                          }}
-                        >
-                          Selected logic: {materialRALogic}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                {materialRALogicPickerOpen &&
-                  isNonSsrMaterialRegion(materialRegionId) && (
-                    <div
-                      style={{
-                        marginTop: 12,
-                        padding: 14,
-                        border: `1px solid ${theme.colors.line}`,
-                        borderRadius: 10,
-                        background: "#fff",
-                        maxWidth: 420,
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 600,
-                          marginBottom: 10,
-                          color: theme.colors.ink,
-                        }}
-                      >
-                        Select the Logic for R A
-                      </div>
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <PrimaryButton
-                          type="button"
-                          onClick={() => applyMaterialRALogic("PWD")}
-                        >
-                          PWD
-                        </PrimaryButton>
-                        <PrimaryButton
-                          type="button"
-                          onClick={() => applyMaterialRALogic("CPWD")}
-                        >
-                          CPWD
-                        </PrimaryButton>
-                        <SecondaryButton
-                          type="button"
-                          onClick={() => setMaterialRALogicPickerOpen(false)}
-                        >
-                          Cancel
-                        </SecondaryButton>
-                      </div>
-                    </div>
-                  )}
                 <div style={{ marginTop: 14 }}>
                   <Field label="Search">
                     <input
@@ -13701,11 +13678,75 @@ export default function HomePage() {
                 </div>
               </Card>
 
-              <Card
-                eyebrow="Items"
-                title="SSR Items"
-                subtitle="Click a row that has a Unit to load material components for that item."
-              >
+              <Card eyebrow="Items">
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <h2
+                    style={{ margin: 0, fontSize: 20, color: theme.colors.ink }}
+                  >
+                    SSR Items
+                  </h2>
+                  {isNonSsrMaterialRegion(materialRegionId) && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 14,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: theme.colors.ink,
+                        }}
+                      >
+                        Select the Logic for R A
+                      </span>
+                      {["PWD", "CPWD"].map((logic) => (
+                        <label
+                          key={logic}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            fontSize: 14,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          <input
+                            type="radio"
+                            name="material-ra-logic"
+                            value={logic}
+                            checked={materialRALogic === logic}
+                            onChange={() => applyMaterialRALogic(logic)}
+                          />
+                          {logic}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <p
+                  style={{
+                    marginTop: 6,
+                    marginBottom: 18,
+                    color: theme.colors.inkSoft,
+                    fontSize: 13.5,
+                  }}
+                >
+                  Click a row that has a Unit to load material components for
+                  that item.
+                </p>
                 <div
                   style={{
                     overflowX: "auto",
@@ -13736,34 +13777,10 @@ export default function HomePage() {
                             Number(selectedMaterialItemId) ===
                               Number(row.ItemId);
                           const desc = String(row.ItemDescription || "").trim();
-                          const singleLineDesc = desc
-                            .replace(/\s+/g, " ")
-                            .trim();
                           return (
                             <tr
                               key={row.ItemId}
                               onClick={() => selectMaterialItem(row)}
-                              onMouseEnter={(event) => {
-                                const text = fullDescriptionText(
-                                  row.ItemDescription,
-                                );
-                                setCatalogHoverTip(
-                                  text
-                                    ? { text, ...catalogTipPosition(event) }
-                                    : null,
-                                );
-                              }}
-                              onMouseMove={(event) => {
-                                const text = fullDescriptionText(
-                                  row.ItemDescription,
-                                );
-                                if (!text) return;
-                                setCatalogHoverTip({
-                                  text,
-                                  ...catalogTipPosition(event),
-                                });
-                              }}
-                              onMouseLeave={() => setCatalogHoverTip(null)}
                               style={{
                                 cursor: canSelect ? "pointer" : "not-allowed",
                                 opacity: canSelect ? 1 : 0.55,
@@ -13792,26 +13809,11 @@ export default function HomePage() {
                               >
                                 {row.ItemNumber}
                               </td>
-                              <td
-                                style={
-                                  selected
-                                    ? {
-                                        maxWidth: 520,
-                                        whiteSpace: "pre-wrap",
-                                        wordBreak: "break-word",
-                                        verticalAlign: "top",
-                                        fontWeight: 600,
-                                      }
-                                    : {
-                                        maxWidth: 520,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                        verticalAlign: "top",
-                                      }
-                                }
-                              >
-                                {selected ? desc : singleLineDesc}
+                              <td style={{ maxWidth: 520, verticalAlign: "top" }}>
+                                <DescriptionPreview
+                                  text={desc}
+                                  emphasize={selected}
+                                />
                               </td>
                               <td style={{ verticalAlign: "top" }}>
                                 {row.UnitShortName || ""}
@@ -13836,7 +13838,6 @@ export default function HomePage() {
                       )}
                     </tbody>
                   </table>
-                  <FullDescriptionTip tip={catalogHoverTip} />
                 </div>
               </Card>
 
@@ -13871,7 +13872,7 @@ export default function HomePage() {
                       ? `Material components for item #${selectedMaterialItemId}`
                       : "Material components"
                 }
-                subtitle="Add or edit material component rows for the selected item."
+                subtitle="Select the Material from Material List by searching on Item Code or Text"
               >
                 {!selectedMaterialItemId ? (
                   <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -15421,7 +15422,7 @@ export default function HomePage() {
                   <Card
                     eyebrow="Estimate · Work Material"
                     title="Generate Rate Analysis"
-                    subtitle="Deletes existing WorkMaterial for this Work, rebuilds from MasterMaterialComponent + WorkLead, and updates WorkAbstract IsRA / RateString / FinalRate."
+                    subtitle="Deletes existing WorkMaterial for this Work, rebuilds from MasterRAComponent + WorkLead, and updates WorkAbstract IsRA / RateString / FinalRate."
                   >
                     <PrimaryButton
                       type="button"

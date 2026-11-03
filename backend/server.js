@@ -423,31 +423,6 @@ async function ensureWorkAbstractSequence() {
   console.log("WorkAbstract Sequence ensured (SubWork-wise).");
 }
 
-/** Keep MaterialComponentId serial in sync after bulk imports. */
-async function ensureMaterialComponentIdSequence() {
-  const seqRes = await pool.query(`
-    SELECT pg_get_serial_sequence('"MasterMaterialComponent"', 'MaterialComponentId') AS seq
-  `);
-  const seq = seqRes.rows[0]?.seq;
-  if (!seq) return;
-  const maxRes = await pool.query(
-    `SELECT COALESCE(MAX("MaterialComponentId"), 0)::bigint AS max
-     FROM "MasterMaterialComponent"`,
-  );
-  await pool.query(
-    `SELECT setval($1::regclass, GREATEST($2::bigint, 1), true)`,
-    [seq, maxRes.rows[0].max],
-  );
-  console.log("MasterMaterialComponent Id sequence ensured.");
-}
-
-async function ensureMasterMaterialComponentDescription() {
-  await pool.query(`
-    ALTER TABLE public."MasterMaterialComponent"
-      ADD COLUMN IF NOT EXISTS "Description" varchar(200)
-  `);
-  console.log("MasterMaterialComponent Description ensured.");
-}
 
 const RA_COMPONENT_TYPE_MATERIAL = "Ma";
 const RA_COMPONENT_TYPE_LABOUR = "La";
@@ -1163,7 +1138,12 @@ app.get("/api/ssr-items-load", async (req, res) => {
     }
 
     if (String(req.query.listOrder || "") === "itemcode") {
-      query += ` ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemId" ASC`;
+      query += ` ORDER BY
+        CASE WHEN COALESCE(i."ItemCode", '') = '' THEN 1 ELSE 0 END,
+        regexp_replace(COALESCE(i."ItemCode", ''), '\\d+$', '') ASC,
+        COALESCE(substring(i."ItemCode" from '(\\d+)$')::bigint, 0) ASC,
+        i."ItemCode" ASC NULLS LAST,
+        i."ItemId" ASC`;
     } else if (String(req.query.listOrder || "") === "component") {
       query += `
         ORDER BY c."DOrder" ASC NULLS LAST,
@@ -4700,7 +4680,12 @@ app.get("/api/master-items", async (req, res) => {
       MASTER_ITEM_SELECT +
       filterSql +
       `
-        ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemId" ASC
+        ORDER BY
+          CASE WHEN COALESCE(i."ItemCode", '') = '' THEN 1 ELSE 0 END,
+          regexp_replace(COALESCE(i."ItemCode", ''), '\\d+$', '') ASC,
+          COALESCE(substring(i."ItemCode" from '(\\d+)$')::bigint, 0) ASC,
+          i."ItemCode" ASC NULLS LAST,
+          i."ItemId" ASC
         LIMIT 500`;
     const result = await pool.query(sql, params);
     return res.json({
@@ -7128,7 +7113,7 @@ app.get("/api/generate-lead-statement-report", async (req, res) => {
 /**
  * Material Consumption Statement.
  * Materials come from WorkMaterial for the selected work. For each material,
- * every WorkAbstract item on that work is checked against MasterMaterialComponent.
+ * every WorkAbstract item on that work is checked against MasterRAComponent.
  * Matching rows use that component as the rate of consumption.
  */
 app.get("/api/generate-material-consumption-report", async (req, res) => {
@@ -7157,7 +7142,7 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
               MAX(u."UnitShortName") AS "UnitShortName"
        FROM "WorkMaterial" wm
        INNER JOIN "MasterMaterial" m ON m."MaterialId" = wm."MaterialId"
-       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialUnitId"
+       LEFT JOIN "MasterUnit" u ON u."UnitId" = m."MaterialLocalUnitId"
        WHERE wm."WorkId" = $1
        GROUP BY wm."MaterialId"
        ORDER BY "MaterialName" ASC, wm."MaterialId" ASC`,
@@ -7213,13 +7198,15 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
     );
     const componentResult = itemIds.length
       ? await pool.query(
-          `SELECT mc."ItemId", mc."MaterialId",
-                  COALESCE(SUM(mc."MaterialComponent"), 0) AS "MaterialComponent"
-           FROM "MasterMaterialComponent" mc
-           WHERE mc."ItemId" = ANY($1::int[])
-             AND mc."MaterialId" = ANY($2::int[])
-           GROUP BY mc."ItemId", mc."MaterialId"`,
-          [itemIds, materialIds],
+          `SELECT ra."ItemId",
+                  ra."ComponentId" AS "MaterialId",
+                  COALESCE(SUM(ra."Component"), 0) AS "MaterialComponent"
+           FROM "MasterRAComponent" ra
+           WHERE ra."ComponentType" = $3
+             AND ra."ItemId" = ANY($1::int[])
+             AND ra."ComponentId" = ANY($2::int[])
+           GROUP BY ra."ItemId", ra."ComponentId"`,
+          [itemIds, materialIds, RA_COMPONENT_TYPE_MATERIAL],
         )
       : { rows: [] };
     const componentByKey = new Map(
@@ -7312,22 +7299,22 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
     const left = 40;
     const right = 555;
     const contentWidth = right - left;
+    const colW = {
+      sr: 24,
+      sub: 44,
+      qty: 48,
+      rate: 56,
+      cons: 60,
+    };
     const col = {
       sr: left,
-      sub: left + 28,
-      desc: left + 100,
-      qty: left + 318,
-      rate: left + 378,
-      cons: left + 458,
+      sub: left + colW.sr,
+      desc: left + colW.sr + colW.sub,
+      cons: right - colW.cons,
+      rate: right - colW.cons - 4 - colW.rate,
+      qty: right - colW.cons - 4 - colW.rate - 6 - colW.qty,
     };
-    const colW = {
-      sr: 28,
-      sub: 72,
-      desc: col.qty - col.desc - 8,
-      qty: 56,
-      rate: 76,
-      cons: right - col.cons,
-    };
+    colW.desc = col.qty - col.desc - 6;
     const pageBottom = doc.page.height - doc.page.margins.bottom;
     const contentBottom = pageBottom - 18;
 
@@ -7399,7 +7386,7 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
     drawPageHeader();
 
     materialSections.forEach((section, sectionIndex) => {
-      doc.font("Helvetica").fontSize(10);
+      doc.font("Helvetica-Bold").fontSize(10);
       const nameHeight = doc.heightOfString(section.name, {
         width: contentWidth,
         align: "center",
@@ -7408,7 +7395,7 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
       if (ensureSpace(nameHeight + 36)) {
         /* header redrawn */
       }
-      doc.font("Helvetica").fontSize(10);
+      doc.font("Helvetica-Bold").fontSize(10);
       doc.text(section.name, left, doc.y, {
         width: contentWidth,
         align: "center",
@@ -7422,7 +7409,7 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
         });
         const rowHeight = Math.max(descHeight, 12);
         if (ensureSpace(rowHeight + 4)) {
-          doc.font("Helvetica").fontSize(10);
+          doc.font("Helvetica-Bold").fontSize(10);
           doc.text(`${section.name} (contd.)`, left, doc.y, {
             width: contentWidth,
             align: "center",
@@ -7458,10 +7445,10 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
         ? `${fmt3(total)} ${section.unit}`
         : fmt3(total);
       const labelWidth = col.cons - col.desc - 10;
-      doc.font("Helvetica").fontSize(9);
+      doc.font("Helvetica-Bold").fontSize(9);
       const labelHeight = doc.heightOfString(totalLabel, { width: labelWidth });
       if (ensureSpace(labelHeight + 16)) {
-        doc.font("Helvetica").fontSize(10);
+        doc.font("Helvetica-Bold").fontSize(10);
         doc.text(`${section.name} (contd.)`, left, doc.y, {
           width: contentWidth,
           align: "center",
@@ -7469,8 +7456,9 @@ app.get("/api/generate-material-consumption-report", async (req, res) => {
         doc.moveDown(0.35);
       }
       const totalY = doc.y;
-      doc.font("Helvetica").fontSize(9);
+      doc.font("Helvetica-Bold").fontSize(9);
       doc.text(totalLabel, col.desc, totalY, { width: labelWidth });
+      doc.font("Helvetica-Bold").fontSize(9);
       doc.text(totalValue, col.cons, totalY, {
         width: colW.cons,
         align: "right",
@@ -9897,7 +9885,21 @@ app.get("/api/ra-component-items", async (req, res) => {
        WHERE i."RegionId" = ANY($1::int[])
          AND COALESCE(i."MarkForDeletion", false) = false
        ${ownerSql}
-       ORDER BY i."ItemCode" ASC NULLS LAST, i."ItemNumber" ASC, i."ItemId" ASC`,
+       ORDER BY
+         CASE
+           WHEN COALESCE(NULLIF(BTRIM(i."ItemCode"), ''), NULLIF(BTRIM(i."ItemNumber"), '')) IS NULL
+           THEN 1 ELSE 0
+         END,
+         (
+           SELECT COALESCE(array_agg((match)[1]::bigint ORDER BY ord), ARRAY[]::bigint[])
+           FROM regexp_matches(
+             COALESCE(NULLIF(BTRIM(i."ItemCode"), ''), NULLIF(BTRIM(i."ItemNumber"), ''), ''),
+             '[0-9]+',
+             'g'
+           ) WITH ORDINALITY AS parts(match, ord)
+         ),
+         COALESCE(NULLIF(BTRIM(i."ItemCode"), ''), i."ItemNumber") ASC NULLS LAST,
+         i."ItemId" ASC`,
       params,
     );
     return res.json(result.rows);
@@ -11680,7 +11682,11 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
         ? `${itemCode} - Item No: ${itemNumber}`
         : itemCode || (itemNumber ? `Item No: ${itemNumber}` : "—");
     const fullDescription = String(item.ItemDescription || "")
-      .replace(/\s+/g, " ")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
       .trim();
     const regionLabel =
       String(item.SSRRegionShortName || item.SSRRegionName || "").trim();
@@ -11710,15 +11716,16 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     const right = 555;
     const width = right - left;
     const colCodeW = 48;
-    // Unit and Quantity sit to the right of the measurement text.
-    // Amount is wide enough for a rupee total such as ₹ 1,04,715.33
-    // on one line, so Rate and Quantity sit just to its left.
-    const colAmtW = 76;
-    const colRateW = 48;
-    const colQtyW = 40;
+    // Quantity sits left of Rate, with a gap so the component quantity
+    // lines up with the detail quantity and the rate stays clear of it.
+    // Footer cost lines measure their own amount width.
+    const colAmtW = 62;
+    const colRateW = 64;
+    const colQtyW = 46;
+    const qtyRateGap = 14;
     const colAmt = right - colAmtW;
     const colRate = colAmt - colRateW;
-    const colQty = colRate - colQtyW;
+    const colQty = colRate - qtyRateGap - colQtyW;
     const colUnit = colQty - 36;
     const colUnitW = colQty - colUnit;
     const colCode = left;
@@ -11802,6 +11809,7 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       doc.text(formatDetailQty(qty), colQty, y, {
         width: colQtyW,
         align: "right",
+        lineBreak: false,
       });
       doc.y = Math.max(doc.y, y + descHeight + 2);
     };
@@ -11839,8 +11847,12 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
         doc.text(combinedText, colDesc, y, { width: colDescW });
       }
       doc.font("Helvetica").fontSize(9);
-      doc.text(unit, colUnit, y, { width: colUnitW });
-      doc.text(formatQty(qty), colQty, y, { width: colQtyW, align: "right" });
+      doc.text(unit, colUnit, y, { width: colUnitW, lineBreak: false });
+      doc.text(formatQty(qty), colQty, y, {
+        width: colQtyW,
+        align: "right",
+        lineBreak: false,
+      });
       drawAmount(rate, colRate, y, colRateW);
       drawAmount(amount, colAmt, y, colAmtW);
       doc.y = y + descHeight + 4;
@@ -12819,11 +12831,9 @@ app.listen(port, async () => {
     await ensureWorkMeasurementGroupId();
     await ensureQuantityColumnScale3("MasterRAComponent", "Component");
     await ensureQuantityColumnScale3("MasterRADetail", "Quantity");
-    await ensureMaterialComponentIdSequence();
     await ensureRAComponentIdSequence();
     await ensureRAComponentYearIdNullable();
     await ensureRAComponentTypeItem();
-    await ensureMasterMaterialComponentDescription();
     await ensureWorkStandardAdditionSchema();
     await ensureMasterItemUserId();
     await ensureMasterItemIdSequence();
