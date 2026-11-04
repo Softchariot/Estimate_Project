@@ -807,7 +807,7 @@ function FormShell({ children, onSubmit }) {
   );
 }
 
-function Field({ label, required, children, span }) {
+function Field({ label, required, children, span, note }) {
   return (
     <label
       style={{
@@ -819,9 +819,22 @@ function Field({ label, required, children, span }) {
       }}
     >
       <span
-        style={{ fontSize: 12.5, fontWeight: 600, color: theme.colors.inkSoft }}
+        style={{
+          display: "flex",
+          justifyContent: "flex-start",
+          alignItems: "baseline",
+          gap: 8,
+          fontSize: 12.5,
+          fontWeight: 600,
+          color: theme.colors.inkSoft,
+        }}
       >
-        {required ? <RequiredLabel>{label}</RequiredLabel> : label}
+        <span>
+          {required ? <RequiredLabel>{label}</RequiredLabel> : label}
+        </span>
+        {note ? (
+          <span style={{ fontWeight: 500, whiteSpace: "nowrap" }}>{note}</span>
+        ) : null}
       </span>
       {children}
     </label>
@@ -4240,6 +4253,7 @@ function RateAnalysisParametersPanel({
   raLogic,
   canEdit,
   inputStyle,
+  onCompletedRate,
 }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(createRAParameterForm);
@@ -4364,11 +4378,16 @@ function RateAnalysisParametersPanel({
         payload[field.key] =
           form[field.key] === "" ? field.defaultValue : form[field.key];
       });
-      await axios.put(`${apiBase}/api/ra-parameters`, payload);
+      const saved = await axios.put(`${apiBase}/api/ra-parameters`, payload);
+      const completedRate = saved.data?.completedRate;
+      if (typeof onCompletedRate === "function") {
+        onCompletedRate(itemId, completedRate);
+      }
+      const completedRateText = formatRupees(completedRate);
       setMessage(
         exists
-          ? "Rate analysis parameters updated."
-          : "Rate analysis parameters saved.",
+          ? `Rate analysis parameters updated. Completed Rate ${completedRateText}.`
+          : `Rate analysis parameters saved. Completed Rate ${completedRateText}.`,
       );
       await loadParameters(itemId);
     } catch (err) {
@@ -4655,6 +4674,30 @@ export default function HomePage() {
     useState([]);
   const [ssrItemMasterRows, setSsrItemMasterRows] = useState([]);
   const [ssrItemMasterOriginal, setSsrItemMasterOriginal] = useState([]);
+  const [ssrItemForm, setSsrItemForm] = useState(initialItemMasterForm);
+  const [editingSsrItemId, setEditingSsrItemId] = useState(null);
+  const [savingSsrItem, setSavingSsrItem] = useState(false);
+  const [ssrItemList, setSsrItemList] = useState([]);
+  const [loadingSsrItemList, setLoadingSsrItemList] = useState(false);
+  const [ssrItemFormCategories, setSsrItemFormCategories] = useState([]);
+  const [ssrItemFormSubCategories, setSsrItemFormSubCategories] = useState([]);
+  const [ssrItemFilterRegionId, setSsrItemFilterRegionId] = useState("");
+  const [ssrItemFilterYearId, setSsrItemFilterYearId] = useState("");
+  const [ssrItemFilterCategoryId, setSsrItemFilterCategoryId] = useState("");
+  const [ssrItemFilterSubCategoryId, setSsrItemFilterSubCategoryId] =
+    useState("");
+  const [ssrItemListYears, setSsrItemListYears] = useState([]);
+  const [ssrItemListCategories, setSsrItemListCategories] = useState([]);
+  const [ssrItemListSubCategories, setSsrItemListSubCategories] = useState([]);
+  const [ssrItemDescriptionSearch, setSsrItemDescriptionSearch] = useState("");
+  const ssrItemDescriptionQuery = ssrItemDescriptionSearch.trim().toLowerCase();
+  const visibleSsrItemList = ssrItemDescriptionQuery
+    ? ssrItemList.filter((row) =>
+        String(row.ItemDescription || "")
+          .toLowerCase()
+          .includes(ssrItemDescriptionQuery),
+      )
+    : ssrItemList;
   const [loadingSsrItemMaster, setLoadingSsrItemMaster] = useState(false);
   const [savingSsrItemMaster, setSavingSsrItemMaster] = useState(false);
   const [categories, setCategories] = useState([]);
@@ -4689,6 +4732,18 @@ export default function HomePage() {
     useState("");
   const [itemMasterFilterSubCategoryId, setItemMasterFilterSubCategoryId] =
     useState("");
+  const [itemMasterDescriptionSearch, setItemMasterDescriptionSearch] =
+    useState("");
+  const itemMasterDescriptionQuery = itemMasterDescriptionSearch
+    .trim()
+    .toLowerCase();
+  const visibleItemMasterList = itemMasterDescriptionQuery
+    ? itemMasterList.filter((row) =>
+        String(row.ItemDescription || "")
+          .toLowerCase()
+          .includes(itemMasterDescriptionQuery),
+      )
+    : itemMasterList;
   const [itemMasterListYears, setItemMasterListYears] = useState([]);
   const [itemMasterListCategories, setItemMasterListCategories] = useState([]);
   const [itemMasterListSubCategories, setItemMasterListSubCategories] =
@@ -4715,6 +4770,18 @@ export default function HomePage() {
     nonDsrMaterialFilterSubCategoryId,
     setNonDsrMaterialFilterSubCategoryId,
   ] = useState("");
+  const [nonDsrMaterialDescriptionSearch, setNonDsrMaterialDescriptionSearch] =
+    useState("");
+  const nonDsrMaterialDescriptionQuery = nonDsrMaterialDescriptionSearch
+    .trim()
+    .toLowerCase();
+  const visibleNonDsrMaterials = nonDsrMaterialDescriptionQuery
+    ? nonDsrMaterialList.filter((row) =>
+        String(row.MaterialDescription || "")
+          .toLowerCase()
+          .includes(nonDsrMaterialDescriptionQuery),
+      )
+    : nonDsrMaterialList;
   const [nonDsrMaterialListYears, setNonDsrMaterialListYears] = useState([]);
   const [nonDsrMaterialListCategories, setNonDsrMaterialListCategories] =
     useState([]);
@@ -5124,6 +5191,294 @@ export default function HomePage() {
       );
     } finally {
       setSavingSsrItemMaster(false);
+    }
+  };
+
+  const isSsrItemRegion = (regionId) => {
+    const id = Number(regionId);
+    return (
+      id &&
+      id !== ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+      id !== ITEM_MASTER_INDV_USER_REGION_ID
+    );
+  };
+
+  const loadSsrItemFormCategories = async (regionId) => {
+    if (!regionId) {
+      setSsrItemFormCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setSsrItemFormCategories(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error(error);
+      setSsrItemFormCategories([]);
+    }
+  };
+
+  const loadSsrItemFormSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setSsrItemFormSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setSsrItemFormSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (error) {
+      console.error(error);
+      setSsrItemFormSubCategories([]);
+    }
+  };
+
+  const loadSsrItemListYears = async (regionId) => {
+    if (!regionId) {
+      setSsrItemListYears([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/master-years`, {
+        params: { regionId },
+      });
+      setSsrItemListYears(Array.isArray(res.data) ? res.data : []);
+    } catch (error) {
+      console.error(error);
+      setSsrItemListYears([]);
+    }
+  };
+
+  const loadSsrItemListCategories = async (regionId) => {
+    if (!regionId) {
+      setSsrItemListCategories([]);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/ssr-categories/${regionId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to load categories.");
+      setSsrItemListCategories(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error(error);
+      setSsrItemListCategories([]);
+    }
+  };
+
+  const loadSsrItemListSubCategories = async (categoryId) => {
+    if (!categoryId) {
+      setSsrItemListSubCategories([]);
+      return;
+    }
+    try {
+      const res = await axios.get(
+        `${API_BASE}/api/ssr-sub-categories/${categoryId}`,
+      );
+      setSsrItemListSubCategories(
+        Array.isArray(res.data?.data) ? res.data.data : [],
+      );
+    } catch (error) {
+      console.error(error);
+      setSsrItemListSubCategories([]);
+    }
+  };
+
+  const loadSsrItemList = async (
+    user = currentUser,
+    filters = {
+      regionId: ssrItemFilterRegionId,
+      ssrYearId: ssrItemFilterYearId,
+      categoryId: ssrItemFilterCategoryId,
+      subCategoryId: ssrItemFilterSubCategoryId,
+    },
+  ) => {
+    if (!user?.UserId || !isSuperAdminUser(user)) {
+      setSsrItemList([]);
+      return;
+    }
+    if (!filters.regionId || !filters.ssrYearId) {
+      setSsrItemList([]);
+      return;
+    }
+    setLoadingSsrItemList(true);
+    try {
+      const params = {
+        userId: user.UserId,
+        regionId: filters.regionId,
+        ssrYearId: filters.ssrYearId,
+      };
+      if (filters.categoryId) params.categoryId = filters.categoryId;
+      if (filters.subCategoryId) params.subCategoryId = filters.subCategoryId;
+      const res = await axios.get(`${API_BASE}/api/master-items`, {
+        params,
+      });
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      rows.sort((a, b) => {
+        const numA = String(a.ItemNumber || "");
+        const numB = String(b.ItemNumber || "");
+        if (!numA && numB) return 1;
+        if (numA && !numB) return -1;
+        const byNumber = numA.localeCompare(numB, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (byNumber !== 0) return byNumber;
+        return Number(a.ItemId) - Number(b.ItemId);
+      });
+      setSsrItemList(rows);
+    } catch (error) {
+      console.error(error);
+      setSsrItemList([]);
+      setMessage(
+        `SSR Item Master load failed: ${error.response?.data?.message || error.message}`,
+      );
+    } finally {
+      setLoadingSsrItemList(false);
+    }
+  };
+
+  const resetSsrItemEdit = () => {
+    setEditingSsrItemId(null);
+    setSsrItemForm({
+      ...initialItemMasterForm,
+      UserId: currentUser?.UserId ? String(currentUser.UserId) : "",
+      UserName: currentUser?.UserName || currentUser?.UserLoginName || "",
+      EffectiveDate: todayIsoDate(),
+    });
+    setSsrItemFormCategories([]);
+    setSsrItemFormSubCategories([]);
+  };
+
+  const onSsrItemChange = (e) => {
+    const { name, value } = e.target;
+    setSsrItemForm((prev) => {
+      const next = { ...prev, [name]: value };
+      if (name === "ItemShortDescription") {
+        next.ItemShortDescription = String(value || "").slice(0, 150);
+      }
+      if (name === "RegionId") {
+        next.CategoryId = "";
+        next.SubCategoryId = "";
+        loadSsrItemFormCategories(value);
+        setSsrItemFormSubCategories([]);
+      }
+      if (name === "CategoryId") {
+        next.SubCategoryId = "";
+        loadSsrItemFormSubCategories(value);
+      }
+      return next;
+    });
+  };
+
+  const startSsrItemEdit = async (row) => {
+    setEditingSsrItemId(row.ItemId);
+    setSsrItemForm({
+      ItemId: String(row.ItemId),
+      ItemCode: row.ItemCode || "",
+      UserId: row.UserId != null ? String(row.UserId) : "",
+      UserName: row.UserName || row.UserLoginName || "",
+      RegionId: row.RegionId != null ? String(row.RegionId) : "",
+      CategoryId: row.CategoryId != null ? String(row.CategoryId) : "",
+      SubCategoryId:
+        row.SubCategoryId != null ? String(row.SubCategoryId) : "",
+      SSRYearId: row.SSRYearId != null ? String(row.SSRYearId) : "",
+      UnitId: row.UnitId != null ? String(row.UnitId) : "",
+      ItemNumber: row.ItemNumber || "",
+      ItemDescription: row.ItemDescription || "",
+      ItemShortDescription: String(row.ItemShortDescription || "").slice(0, 150),
+      CompletedRate:
+        row.CompletedRate === null || row.CompletedRate === undefined
+          ? ""
+          : String(row.CompletedRate),
+      LabourRate:
+        row.LabourRate === null || row.LabourRate === undefined
+          ? ""
+          : String(row.LabourRate),
+      PageNumber: row.PageNumber != null ? String(row.PageNumber) : "",
+      EffectiveDate:
+        String(row.EffectiveDate || "").slice(0, 10) || todayIsoDate(),
+    });
+    if (row.RegionId) await loadSsrItemFormCategories(row.RegionId);
+    if (row.CategoryId) await loadSsrItemFormSubCategories(row.CategoryId);
+  };
+
+  const onSsrItemSubmit = async (e) => {
+    e.preventDefault();
+    if (!currentUser?.UserId || !isSuperAdminUser(currentUser)) {
+      setMessage("SSR Item Master save failed: not authorised.");
+      return;
+    }
+    if (!isSsrItemRegion(ssrItemForm.RegionId)) {
+      alert("Select an SSR region. NON DSR regions are not used here.");
+      return;
+    }
+    const enteredItemNumber = String(ssrItemForm.ItemNumber || "").trim();
+    if (!enteredItemNumber) {
+      alert("Please enter Item Number.");
+      return;
+    }
+    if (!String(ssrItemForm.ItemDescription || "").trim()) {
+      alert("Please enter Item Description.");
+      return;
+    }
+    const isEdit = Boolean(editingSsrItemId);
+    const enteredItemCode = String(ssrItemForm.ItemCode || "").trim();
+    if (
+      !window.confirm(
+        `Please review the details.\nItem Code: ${enteredItemCode || "(blank)"}\nItem Number: ${enteredItemNumber}\nDo you want to ${isEdit ? "update this item" : "save this new item"}?`,
+      )
+    ) {
+      return;
+    }
+    setSavingSsrItem(true);
+    setMessage("");
+    const payload = {
+      ...ssrItemForm,
+      ItemShortDescription: String(ssrItemForm.ItemShortDescription || "").slice(
+        0,
+        150,
+      ),
+      actingUserId: currentUser.UserId,
+      userId: currentUser.UserId,
+    };
+    try {
+      const res = await fetch(
+        isEdit
+          ? `${API_BASE}/api/master-items/${editingSsrItemId}`
+          : `${API_BASE}/api/master-items`,
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Failed to save item.");
+      const savedId = data.data?.ItemId || "";
+      const savedCode = data.data?.ItemCode || "";
+      const savedNumber = data.data?.ItemNumber || "";
+      setMessage(
+        isEdit
+          ? `SSR item updated. Item Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`
+          : `SSR item saved. Item Id ${savedId}, Item Code ${savedCode}, Item Number ${savedNumber}.`,
+      );
+      resetSsrItemEdit();
+      if (ssrItemFilterRegionId && ssrItemFilterYearId) {
+        await loadSsrItemList(currentUser, {
+          regionId: ssrItemFilterRegionId,
+          ssrYearId: ssrItemFilterYearId,
+          categoryId: ssrItemFilterCategoryId,
+          subCategoryId: ssrItemFilterSubCategoryId,
+        });
+      }
+    } catch (error) {
+      setMessage(`SSR Item Master save failed: ${error.message}`);
+    } finally {
+      setSavingSsrItem(false);
     }
   };
 
@@ -8469,6 +8824,14 @@ export default function HomePage() {
           EffectiveDate: todayIsoDate(),
         });
         loadItemMasterYears();
+        if (isSuperAdminUser(user)) {
+          setSsrItemForm({
+            ...initialItemMasterForm,
+            UserId: user.UserId ? String(user.UserId) : "",
+            UserName: user.UserName || user.UserLoginName || "",
+            EffectiveDate: todayIsoDate(),
+          });
+        }
         if (allowed) {
           setItemMasterFilterRegionId(String(allowed));
           loadItemMasterCategories(allowed);
@@ -9161,6 +9524,9 @@ export default function HomePage() {
     const nextValue = type === "checkbox" ? checked : value;
     setItemMasterForm((prev) => {
       const next = { ...prev, [name]: nextValue };
+      if (name === "ItemShortDescription") {
+        next.ItemShortDescription = String(nextValue || "").slice(0, 150);
+      }
       if (name === "RegionId") {
         next.CategoryId = "";
         next.SubCategoryId = "";
@@ -9217,7 +9583,7 @@ export default function HomePage() {
       UnitId: row.UnitId != null ? String(row.UnitId) : "",
       ItemNumber: generatedInNumber ? "" : storedNumber,
       ItemDescription: row.ItemDescription || "",
-      ItemShortDescription: row.ItemShortDescription || "",
+      ItemShortDescription: String(row.ItemShortDescription || "").slice(0, 150),
       CompletedRate:
         row.CompletedRate === null || row.CompletedRate === undefined
           ? ""
@@ -9424,7 +9790,20 @@ export default function HomePage() {
       const res = await axios.get(`${API_BASE}/api/non-dsr-materials`, {
         params,
       });
-      setNonDsrMaterialList(Array.isArray(res.data?.data) ? res.data.data : []);
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      rows.sort((a, b) => {
+        const codeA = String(a.ItemCode || "");
+        const codeB = String(b.ItemCode || "");
+        if (!codeA && codeB) return 1;
+        if (codeA && !codeB) return -1;
+        const byCode = codeA.localeCompare(codeB, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (byCode !== 0) return byCode;
+        return Number(a.MaterialId) - Number(b.MaterialId);
+      });
+      setNonDsrMaterialList(rows);
     } catch (err) {
       console.error(err);
       setNonDsrMaterialList([]);
@@ -9857,6 +10236,11 @@ export default function HomePage() {
     : regions.filter(
         (r) => Number(r.SSRRegionId) === Number(itemMasterAllowedRegionId),
       );
+  const ssrItemRegionOptions = regions.filter(
+    (r) =>
+      Number(r.SSRRegionId) !== ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+      Number(r.SSRRegionId) !== ITEM_MASTER_INDV_USER_REGION_ID,
+  );
   const itemMasterRoleBanner = isOrgAdmin
     ? "Organization Admins can only add, list, and edit NON SSR items entered by their organization"
     : isIndvUser
@@ -11890,126 +12274,429 @@ export default function HomePage() {
           {activeMaster === "ssr-item-master" && isSuperAdmin && (
             <Card
               eyebrow="Master · SSR Item"
-              title="SSR Item Master"
-              subtitle="Select region, category, and sub category. Edit Completed Rate and Labour Rate, then save the changed rows together."
+              title={
+                editingSsrItemId
+                  ? `Edit item #${editingSsrItemId}`
+                  : "SSR Item Master"
+              }
+              subtitle="Add or edit SSR items. Item Code is entered here. Completed Rate and Labour Rate stay editable."
             >
+              <FormShell onSubmit={onSsrItemSubmit}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr))",
+                    gap: 8,
+                  }}
+                >
+                  <Field label="Item Id">
+                    <input
+                      value={ssrItemForm.ItemId || "(New)"}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Item Code">
+                    <input
+                      name="ItemCode"
+                      value={ssrItemForm.ItemCode}
+                      onChange={onSsrItemChange}
+                      maxLength={20}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="User">
+                    <input
+                      value={ssrItemForm.UserName || ""}
+                      disabled
+                      readOnly
+                      style={{
+                        ...inputStyle,
+                        background: "#EEF1F4",
+                        color: theme.colors.inkSoft,
+                        cursor: "not-allowed",
+                      }}
+                    />
+                  </Field>
+                  <Field label="Region" required>
+                    <select
+                      name="RegionId"
+                      value={ssrItemForm.RegionId}
+                      onChange={onSsrItemChange}
+                      required
+                      style={inputStyle}
+                    >
+                      <option value="">Select Region</option>
+                      {ssrItemRegionOptions.map((r) => (
+                        <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                          {r.SSRRegionShortName || r.SSRRegionName}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="SSR Year">
+                    <select
+                      name="SSRYearId"
+                      value={ssrItemForm.SSRYearId}
+                      onChange={onSsrItemChange}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Year</option>
+                      {itemMasterYears.map((y) => (
+                        <option key={y.YearId} value={y.YearId}>
+                          {y.Year}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Item Number" required>
+                    <input
+                      name="ItemNumber"
+                      value={ssrItemForm.ItemNumber}
+                      onChange={onSsrItemChange}
+                      maxLength={50}
+                      required
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
+                  <Field label="Effective Date">
+                    <input
+                      type="date"
+                      name="EffectiveDate"
+                      value={ssrItemForm.EffectiveDate}
+                      onChange={onSsrItemChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Category">
+                    <select
+                      name="CategoryId"
+                      value={ssrItemForm.CategoryId}
+                      onChange={onSsrItemChange}
+                      disabled={!ssrItemForm.RegionId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Category</option>
+                      {ssrItemFormCategories.map((c) => (
+                        <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                          {c.SSRCategoryShortName || c.SSRCategoryName}
+                          {c.SSRCategoryShortName && c.SSRCategoryName
+                            ? ` — ${c.SSRCategoryName}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Sub Category">
+                    <select
+                      name="SubCategoryId"
+                      value={ssrItemForm.SubCategoryId}
+                      onChange={onSsrItemChange}
+                      disabled={!ssrItemForm.CategoryId}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Sub Category</option>
+                      {ssrItemFormSubCategories.map((sc) => (
+                        <option
+                          key={sc.SSRSubCategoryId}
+                          value={sc.SSRSubCategoryId}
+                        >
+                          {sc.SSRSubCategoryShortName || sc.SSRSubCategoryName}
+                          {sc.SSRSubCategoryShortName && sc.SSRSubCategoryName
+                            ? ` — ${sc.SSRSubCategoryName}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 14,
+                    marginTop: 14,
+                  }}
+                >
+                  <Field label="Item Description" required span>
+                    <textarea
+                      name="ItemDescription"
+                      value={ssrItemForm.ItemDescription}
+                      onChange={onSsrItemChange}
+                      required
+                      rows={4}
+                      style={{
+                        ...inputStyle,
+                        width: "100%",
+                        minHeight: 96,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                      }}
+                    />
+                  </Field>
+                  <Field
+                    label="Item Short Description"
+                    span
+                    note={`Max ${Math.max(
+                      0,
+                      150 -
+                        String(ssrItemForm.ItemShortDescription || "").length,
+                    )} characters`}
+                  >
+                    <input
+                      name="ItemShortDescription"
+                      value={ssrItemForm.ItemShortDescription}
+                      onChange={onSsrItemChange}
+                      maxLength={150}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Unit">
+                    <select
+                      name="UnitId"
+                      value={ssrItemForm.UnitId}
+                      onChange={onSsrItemChange}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Unit</option>
+                      {[...unitList]
+                        .sort((a, b) =>
+                          String(a.UnitShortName || a.UnitName || "").localeCompare(
+                            String(b.UnitShortName || b.UnitName || ""),
+                          ),
+                        )
+                        .map((u) => (
+                          <option key={u.UnitId} value={u.UnitId}>
+                            {u.UnitShortName || u.UnitName}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                  <Field label="Completed Rate">
+                    <input
+                      name="CompletedRate"
+                      type="number"
+                      step="any"
+                      value={ssrItemForm.CompletedRate}
+                      onChange={onSsrItemChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                  <Field label="Labour Rate">
+                    <input
+                      name="LabourRate"
+                      type="number"
+                      step="any"
+                      value={ssrItemForm.LabourRate}
+                      onChange={onSsrItemChange}
+                      style={inputStyle}
+                    />
+                  </Field>
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                  <PrimaryButton disabled={savingSsrItem}>
+                    {savingSsrItem
+                      ? "Saving…"
+                      : editingSsrItemId
+                        ? "Update item"
+                        : "Save item"}
+                  </PrimaryButton>
+                  {editingSsrItemId && (
+                    <SecondaryButton type="button" onClick={resetSsrItemEdit}>
+                      Cancel edit
+                    </SecondaryButton>
+                  )}
+                </div>
+              </FormShell>
+
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "1fr 1fr 1fr auto",
-                  gap: 14,
+                  gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+                  gap: 12,
                   alignItems: "end",
+                  marginTop: 22,
+                  marginBottom: 12,
                 }}
               >
-                <Field label="SSR Region" required>
+                <Field label="SSR Region">
                   <select
-                    value={ssrItemMasterRegionId}
+                    value={ssrItemFilterRegionId}
                     onChange={(e) => {
-                      const regionId = e.target.value;
-                      setSsrItemMasterRegionId(regionId);
-                      setSsrItemMasterCategoryId("");
-                      setSsrItemMasterSubCategoryId("");
-                      setSsrItemMasterSubCategories([]);
-                      setSsrItemMasterRows([]);
-                      setSsrItemMasterOriginal([]);
-                      loadSsrItemMasterCategories(regionId);
+                      const value = e.target.value;
+                      setSsrItemFilterRegionId(value);
+                      setSsrItemFilterYearId("");
+                      setSsrItemFilterCategoryId("");
+                      setSsrItemFilterSubCategoryId("");
+                      setSsrItemListYears([]);
+                      setSsrItemListCategories([]);
+                      setSsrItemListSubCategories([]);
+                      setSsrItemList([]);
+                      loadSsrItemListYears(value);
+                      loadSsrItemListCategories(value);
                     }}
                     style={inputStyle}
                   >
                     <option value="">Select SSR Region</option>
-                    {regions.map((region) => (
-                      <option key={region.SSRRegionId} value={region.SSRRegionId}>
-                        {region.SSRRegionName}
+                    {ssrItemRegionOptions.map((r) => (
+                      <option key={r.SSRRegionId} value={r.SSRRegionId}>
+                        {r.SSRRegionShortName || r.SSRRegionName}
                       </option>
                     ))}
                   </select>
                 </Field>
-                <Field label="SSR Category" required>
+                <Field label="SSR Year">
                   <select
-                    value={ssrItemMasterCategoryId}
-                    onChange={(e) => {
-                      const categoryId = e.target.value;
-                      setSsrItemMasterCategoryId(categoryId);
-                      setSsrItemMasterSubCategoryId("");
-                      setSsrItemMasterRows([]);
-                      setSsrItemMasterOriginal([]);
-                      loadSsrItemMasterSubCategories(categoryId);
-                    }}
-                    disabled={!ssrItemMasterRegionId}
+                    value={ssrItemFilterYearId}
+                    onChange={(e) => setSsrItemFilterYearId(e.target.value)}
+                    disabled={!ssrItemFilterRegionId}
                     style={inputStyle}
                   >
                     <option value="">
-                      {ssrItemMasterRegionId
-                        ? "Select SSR Category"
+                      {ssrItemFilterRegionId
+                        ? "Select SSR Year"
                         : "Select SSR Region first"}
                     </option>
-                    {ssrItemMasterCategories.map((category) => (
-                      <option
-                        key={category.SSRCategoryId}
-                        value={category.SSRCategoryId}
-                      >
-                        {category.SSRCategoryShortName || category.SSRCategoryName}
+                    {ssrItemListYears.map((y) => (
+                      <option key={y.YearId} value={y.YearId}>
+                        {y.Year}
                       </option>
                     ))}
                   </select>
                 </Field>
-                <Field label="SSR Sub Category" required>
+                <Field label="SSR Category">
                   <select
-                    value={ssrItemMasterSubCategoryId}
+                    value={ssrItemFilterCategoryId}
                     onChange={(e) => {
-                      setSsrItemMasterSubCategoryId(e.target.value);
-                      setSsrItemMasterRows([]);
-                      setSsrItemMasterOriginal([]);
+                      const value = e.target.value;
+                      setSsrItemFilterCategoryId(value);
+                      setSsrItemFilterSubCategoryId("");
+                      setSsrItemListSubCategories([]);
+                      loadSsrItemListSubCategories(value);
                     }}
-                    disabled={!ssrItemMasterCategoryId}
+                    disabled={!ssrItemFilterRegionId}
                     style={inputStyle}
                   >
-                    <option value="">
-                      {ssrItemMasterCategoryId
-                        ? "Select SSR Sub Category"
-                        : "Select SSR Category first"}
-                    </option>
-                    {ssrItemMasterSubCategories.map((sub) => (
-                      <option key={sub.SSRSubCategoryId} value={sub.SSRSubCategoryId}>
-                        {sub.SSRSubCategoryShortName || sub.SSRSubCategoryName}
+                    <option value="">All SSR Categories</option>
+                    {ssrItemListCategories.map((c) => (
+                      <option key={c.SSRCategoryId} value={c.SSRCategoryId}>
+                        {c.SSRCategoryShortName || c.SSRCategoryName}
                       </option>
                     ))}
                   </select>
                 </Field>
-                <PrimaryButton
+                <Field label="SSR Sub Category">
+                  <select
+                    value={ssrItemFilterSubCategoryId}
+                    onChange={(e) =>
+                      setSsrItemFilterSubCategoryId(e.target.value)
+                    }
+                    disabled={!ssrItemFilterCategoryId}
+                    style={inputStyle}
+                  >
+                    <option value="">All SSR Sub Categories</option>
+                    {ssrItemListSubCategories.map((sc) => (
+                      <option
+                        key={sc.SSRSubCategoryId}
+                        value={sc.SSRSubCategoryId}
+                      >
+                        {sc.SSRSubCategoryShortName || sc.SSRSubCategoryName}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <SecondaryButton
                   type="button"
-                  onClick={loadSsrItemMaster}
-                  disabled={loadingSsrItemMaster}
+                  disabled={!ssrItemFilterRegionId || !ssrItemFilterYearId}
+                  onClick={() =>
+                    loadSsrItemList(currentUser, {
+                      regionId: ssrItemFilterRegionId,
+                      ssrYearId: ssrItemFilterYearId,
+                      categoryId: ssrItemFilterCategoryId,
+                      subCategoryId: ssrItemFilterSubCategoryId,
+                    })
+                  }
                 >
-                  {loadingSsrItemMaster ? "Loading…" : "List Items"}
-                </PrimaryButton>
+                  Refresh list
+                </SecondaryButton>
               </div>
-
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: theme.colors.inkSoft,
+                  marginBottom: 8,
+                }}
+              >
+                Select SSR Region and SSR Year to list items. SSR Category and
+                SSR Sub Category are optional.
+              </div>
+              <div style={{ maxWidth: 480, marginBottom: 12 }}>
+                <Field label="Search description">
+                  <input
+                    type="search"
+                    value={ssrItemDescriptionSearch}
+                    onChange={(e) => setSsrItemDescriptionSearch(e.target.value)}
+                    placeholder="Type text from the item description"
+                    style={inputStyle}
+                  />
+                </Field>
+              </div>
               <div
                 style={{
                   overflowX: "auto",
                   border: `1px solid ${theme.colors.line}`,
                   borderRadius: 10,
-                  marginTop: 18,
-                  maxHeight: 520,
+                  maxHeight: 320,
                   overflowY: "auto",
                 }}
               >
                 <table className="wrms-table">
                   <thead>
                     <tr>
+                      <th>Item Code</th>
                       <th>Item Number</th>
-                      <th>Item Description</th>
+                      <th>Description</th>
                       <th>Unit</th>
                       <th>Completed Rate</th>
                       <th>Labour Rate</th>
+                      <th
+                        style={{
+                          position: "sticky",
+                          right: 0,
+                          background: theme.colors.navy,
+                          zIndex: 1,
+                        }}
+                      >
+                        Action
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {loadingSsrItemMaster ? (
-                      <EmptyRow colSpan={5}>Loading…</EmptyRow>
-                    ) : ssrItemMasterRows.length ? (
-                      ssrItemMasterRows.map((row) => (
+                    {loadingSsrItemList ? (
+                      <EmptyRow colSpan={7}>Loading…</EmptyRow>
+                    ) : !ssrItemFilterRegionId || !ssrItemFilterYearId ? (
+                      <EmptyRow colSpan={7}>
+                        Select SSR Region and SSR Year above, then click Refresh
+                        list.
+                      </EmptyRow>
+                    ) : visibleSsrItemList.length ? (
+                      visibleSsrItemList.map((row) => (
                         <tr key={row.ItemId}>
                           <td
                             style={{
@@ -12018,66 +12705,72 @@ export default function HomePage() {
                               verticalAlign: "top",
                             }}
                           >
-                            {row.ItemNumber}
+                            {row.ItemCode || ""}
+                          </td>
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              whiteSpace: "nowrap",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {row.ItemNumber || ""}
                           </td>
                           <td style={{ minWidth: 280, verticalAlign: "top" }}>
-                            {row.ItemDescription}
+                            <DescriptionPreview
+                              text={String(row.ItemDescription || "").trim()}
+                            />
                           </td>
                           <td style={{ whiteSpace: "nowrap", verticalAlign: "top" }}>
                             {row.UnitShortName || ""}
                           </td>
-                          <td style={{ verticalAlign: "top" }}>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={row.CompletedRate}
-                              onChange={(e) =>
-                                onSsrItemMasterRateChange(
-                                  row.ItemId,
-                                  "CompletedRate",
-                                  e.target.value,
-                                )
-                              }
-                              style={{ ...inputStyle, width: 120 }}
-                            />
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              whiteSpace: "nowrap",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {formatRupees(row.CompletedRate)}
                           </td>
-                          <td style={{ verticalAlign: "top" }}>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={row.LabourRate}
-                              onChange={(e) =>
-                                onSsrItemMasterRateChange(
-                                  row.ItemId,
-                                  "LabourRate",
-                                  e.target.value,
-                                )
-                              }
-                              style={{ ...inputStyle, width: 120 }}
-                            />
+                          <td
+                            style={{
+                              fontFamily: theme.font.mono,
+                              whiteSpace: "nowrap",
+                              verticalAlign: "top",
+                            }}
+                          >
+                            {formatRupees(row.LabourRate)}
+                          </td>
+                          <td
+                            style={{
+                              position: "sticky",
+                              right: 0,
+                              background: "#fff",
+                              whiteSpace: "nowrap",
+                              verticalAlign: "top",
+                              boxShadow: "-6px 0 8px rgba(15, 42, 68, 0.06)",
+                            }}
+                          >
+                            <GhostIconButton
+                              tone={theme.colors.accent}
+                              onClick={() => startSsrItemEdit(row)}
+                            >
+                              ✎ Edit
+                            </GhostIconButton>
                           </td>
                         </tr>
                       ))
                     ) : (
-                      <EmptyRow colSpan={5}>
-                        Select SSR Region, Category, and Sub Category, then list
-                        items.
+                      <EmptyRow colSpan={7}>
+                        {ssrItemList.length
+                          ? "No items match that description."
+                          : "No items found — add one above."}
                       </EmptyRow>
                     )}
                   </tbody>
                 </table>
               </div>
-              {ssrItemMasterRows.length > 0 && (
-                <div style={{ marginTop: 14 }}>
-                  <PrimaryButton
-                    type="button"
-                    onClick={saveSsrItemMaster}
-                    disabled={savingSsrItemMaster}
-                  >
-                    {savingSsrItemMaster ? "Saving…" : "Save Changes"}
-                  </PrimaryButton>
-                </div>
-              )}
             </Card>
           )}
 
@@ -12305,11 +12998,21 @@ export default function HomePage() {
                       }}
                     />
                   </Field>
-                  <Field label="Item Short Description" span>
+                  <Field
+                    label="Item Short Description"
+                    span
+                    note={`Max ${Math.max(
+                      0,
+                      150 -
+                        String(itemMasterForm.ItemShortDescription || "")
+                          .length,
+                    )} characters`}
+                  >
                     <input
                       name="ItemShortDescription"
                       value={itemMasterForm.ItemShortDescription}
                       onChange={onItemMasterChange}
+                      maxLength={150}
                       style={inputStyle}
                     />
                   </Field>
@@ -12343,7 +13046,23 @@ export default function HomePage() {
                       step="any"
                       value={itemMasterForm.CompletedRate}
                       onChange={onItemMasterChange}
-                      style={inputStyle}
+                      readOnly={Boolean(editingItemMasterId)}
+                      disabled={Boolean(editingItemMasterId)}
+                      title={
+                        editingItemMasterId
+                          ? "Completed Rate is set from Rate Analysis."
+                          : undefined
+                      }
+                      style={{
+                        ...inputStyle,
+                        ...(editingItemMasterId
+                          ? {
+                              background: "#EEF1F4",
+                              color: theme.colors.inkSoft,
+                              cursor: "not-allowed",
+                            }
+                          : null),
+                      }}
                     />
                   </Field>
                   <Field label="Labour Rate">
@@ -12512,6 +13231,20 @@ export default function HomePage() {
                 and SSR Sub Category are optional.
               </div>
 
+              <div style={{ maxWidth: 480, marginBottom: 12 }}>
+                <Field label="Search description">
+                  <input
+                    type="search"
+                    value={itemMasterDescriptionSearch}
+                    onChange={(e) =>
+                      setItemMasterDescriptionSearch(e.target.value)
+                    }
+                    placeholder="Type text from the item description"
+                    style={inputStyle}
+                  />
+                </Field>
+              </div>
+
               <div
                 style={{
                   overflowX: "auto",
@@ -12550,8 +13283,8 @@ export default function HomePage() {
                         Select SSR Region and SSR Year above, then click Refresh
                         list.
                       </EmptyRow>
-                    ) : itemMasterList.length ? (
-                      itemMasterList.map((row) => {
+                    ) : visibleItemMasterList.length ? (
+                      visibleItemMasterList.map((row) => {
                         const canEditRow =
                           isSuperAdmin ||
                           (itemMasterAllowedRegionId &&
@@ -12619,7 +13352,9 @@ export default function HomePage() {
                       })
                     ) : (
                       <EmptyRow colSpan={6}>
-                        No items found — add one above.
+                        {itemMasterList.length
+                          ? "No items match that description."
+                          : "No items found — add one above."}
                       </EmptyRow>
                     )}
                   </tbody>
@@ -13088,6 +13823,20 @@ export default function HomePage() {
                 and SSR Sub Category are optional.
               </div>
 
+              <div style={{ maxWidth: 480, marginBottom: 12 }}>
+                <Field label="Search description">
+                  <input
+                    type="search"
+                    value={nonDsrMaterialDescriptionSearch}
+                    onChange={(e) =>
+                      setNonDsrMaterialDescriptionSearch(e.target.value)
+                    }
+                    placeholder="Type text from the material description"
+                    style={inputStyle}
+                  />
+                </Field>
+              </div>
+
               <div
                 style={{
                   overflowX: "auto",
@@ -13099,13 +13848,11 @@ export default function HomePage() {
                   <thead>
                     <tr>
                       <th>ID</th>
-                      <th>Category</th>
-                      <th>Sub Category</th>
-                      <th>Item Code</th>
-                      <th>Number</th>
-                      <th style={{ minWidth: 180 }}>
-                        Description
+                      <th style={{ minWidth: 130, whiteSpace: "nowrap" }}>
+                        Item Code
                       </th>
+                      <th>Number</th>
+                      <th style={{ minWidth: 360 }}>Description</th>
                       <th>Unit</th>
                       <th>Local Unit</th>
                       <th style={{ whiteSpace: "nowrap" }}>Rate</th>
@@ -13123,13 +13870,13 @@ export default function HomePage() {
                   </thead>
                   <tbody>
                     {loadingNonDsrMaterial ? (
-                      <EmptyRow colSpan={10}>Loading…</EmptyRow>
+                      <EmptyRow colSpan={8}>Loading…</EmptyRow>
                     ) : !nonDsrMaterialFilterRegionId ? (
-                      <EmptyRow colSpan={10}>
+                      <EmptyRow colSpan={8}>
                         Select SSR Region above, then click Refresh list.
                       </EmptyRow>
-                    ) : nonDsrMaterialList.length ? (
-                      nonDsrMaterialList.map((row) => {
+                    ) : visibleNonDsrMaterials.length ? (
+                      visibleNonDsrMaterials.map((row) => {
                         const canEditRow =
                           isSuperAdmin ||
                           (itemMasterAllowedRegionId &&
@@ -13145,23 +13892,19 @@ export default function HomePage() {
                             >
                               {row.MaterialId}
                             </td>
-                            <td>
-                              {row.SSRCategoryShortName ||
-                                row.SSRCategoryName ||
-                                "—"}
-                            </td>
-                            <td>
-                              {row.SSRSubCategoryShortName ||
-                                row.SSRSubCategoryName ||
-                                "—"}
-                            </td>
-                            <td style={{ fontFamily: theme.font.mono }}>
+                            <td
+                              style={{
+                                fontFamily: theme.font.mono,
+                                minWidth: 130,
+                                whiteSpace: "nowrap",
+                              }}
+                            >
                               {row.ItemCode || ""}
                             </td>
                             <td style={{ fontFamily: theme.font.mono }}>
                               {row.ItemNumber || ""}
                             </td>
-                            <td style={{ minWidth: 180 }}>
+                            <td style={{ minWidth: 360 }}>
                               {row.MaterialDescription}
                             </td>
                             <td style={{ fontFamily: theme.font.mono }}>
@@ -13204,8 +13947,10 @@ export default function HomePage() {
                         );
                       })
                     ) : (
-                      <EmptyRow colSpan={10}>
-                        No materials found — add one above.
+                      <EmptyRow colSpan={8}>
+                        {nonDsrMaterialList.length
+                          ? "No materials match that description."
+                          : "No materials found — add one above."}
                       </EmptyRow>
                     )}
                   </tbody>
@@ -14505,6 +15250,15 @@ export default function HomePage() {
                 raLogic={materialRALogic}
                 canEdit={canManageMaterials || canManageExtraItemRa}
                 inputStyle={inputStyle}
+                onCompletedRate={(savedItemId, completedRate) => {
+                  setMaterialItemList((rows) =>
+                    rows.map((row) =>
+                      Number(row.ItemId) === Number(savedItemId)
+                        ? { ...row, CompletedRate: completedRate }
+                        : row,
+                    ),
+                  );
+                }}
               />
               </div>
             </>

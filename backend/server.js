@@ -4828,6 +4828,11 @@ app.post("/api/master-items", async (req, res) => {
   if (!body.ItemDescription || !String(body.ItemDescription).trim()) {
     return res.status(400).json({ message: "Item Description is required." });
   }
+  if (String(body.ItemShortDescription || "").trim().length > 150) {
+    return res.status(400).json({
+      message: "Item Short Description must be at most 150 characters.",
+    });
+  }
   const autoItemNumber =
     isNonDsrRegion(regionId) || auth.isOrgAdmin || auth.isIndvUser;
   const typedItemNumber = String(body.ItemNumber || "").trim();
@@ -4972,6 +4977,11 @@ app.put("/api/master-items/:id", async (req, res) => {
     if (!body.ItemDescription || !String(body.ItemDescription).trim()) {
       return res.status(400).json({ message: "Item Description is required." });
     }
+    if (String(body.ItemShortDescription || "").trim().length > 150) {
+      return res.status(400).json({
+        message: "Item Short Description must be at most 150 characters.",
+      });
+    }
     const keepGeneratedCode =
       isNonDsrRegion(regionId) ||
       isNonDsrRegion(existing.rows[0].RegionId) ||
@@ -5019,11 +5029,18 @@ app.put("/api/master-items/:id", async (req, res) => {
            "ItemCode" = $7,
            "ItemDescription" = $8,
            "ItemShortDescription" = $9,
-           "CompletedRate" = $10,
+           ${
+             isNonDsrRegion(regionId)
+               ? `"LabourRate" = $10,
+           "EffectiveDate" = $11,
+           "MarkForDeletion" = false
+       WHERE "ItemId" = $12`
+               : `"CompletedRate" = $10,
            "LabourRate" = $11,
            "EffectiveDate" = $12,
            "MarkForDeletion" = false
-       WHERE "ItemId" = $13`,
+       WHERE "ItemId" = $13`
+           }`,
       [
         regionId,
         parseOptionalNumber(body.CategoryId),
@@ -5036,7 +5053,9 @@ app.put("/api/master-items/:id", async (req, res) => {
         body.ItemShortDescription
           ? String(body.ItemShortDescription).trim()
           : null,
-        parseOptionalNumber(body.CompletedRate),
+        ...(isNonDsrRegion(regionId)
+          ? []
+          : [parseOptionalNumber(body.CompletedRate)]),
         parseOptionalNumber(body.LabourRate),
         parseItemEffectiveDate(body.EffectiveDate),
         itemId,
@@ -5208,7 +5227,12 @@ app.get("/api/non-dsr-materials", async (req, res) => {
       MASTER_MATERIAL_SELECT +
         filterSql +
         `
-        ORDER BY m."ItemCode" ASC NULLS LAST, m."MaterialId" ASC
+        ORDER BY
+          CASE WHEN COALESCE(m."ItemCode", '') = '' THEN 1 ELSE 0 END,
+          regexp_replace(COALESCE(m."ItemCode", ''), '\\d+$', '') ASC,
+          COALESCE(substring(m."ItemCode" from '(\\d+)$')::bigint, 0) ASC,
+          m."ItemCode" ASC NULLS LAST,
+          m."MaterialId" ASC
         LIMIT 500`,
       params,
     );
@@ -11423,9 +11447,19 @@ app.put("/api/ra-parameters", async (req, res) => {
     const data = mapRAParameterRow(result.rows[0]);
     data.UnitName = itemResult.rows[0]?.UnitName || "";
     data.RALogic = result.rows[0]?.RALogic || raLogic;
+    const completedRate = await calculateItemFinalRate(Number(ItemId));
+    if (completedRate !== null) {
+      await pool.query(
+        `UPDATE "MasterItem"
+         SET "CompletedRate" = $1
+         WHERE "ItemId" = $2`,
+        [completedRate, Number(ItemId)],
+      );
+    }
     return res.json({
       data,
       exists: true,
+      completedRate,
     });
   } catch (error) {
     console.error(error);
@@ -11513,6 +11547,110 @@ function roundMoney(n) {
 
 function roundToFivePaise(n) {
   return Math.round((Number(n) || 0) * 20) / 20;
+}
+
+function sumRateAnalysisAmounts(rows) {
+  return roundMoney(
+    (rows || []).reduce(
+      (sum, row) =>
+        sum +
+        roundMoney((Number(row.Quantity) || 0) * (Number(row.Rate) || 0)),
+      0,
+    ),
+  );
+}
+
+/** Same final rate the item rate-analysis PDF prints as Say. */
+async function calculateItemFinalRate(itemId) {
+  const itemResult = await pool.query(
+    `SELECT "RegionId" FROM "MasterItem" WHERE "ItemId" = $1`,
+    [Number(itemId)],
+  );
+  const item = itemResult.rows[0];
+  if (!item) return null;
+
+  const paramResult = await pool.query(
+    `SELECT *
+     FROM "RAParameter"
+     WHERE "ItemId" = $1
+     ORDER BY "RAParameterId" ASC
+     LIMIT 1`,
+    [Number(itemId)],
+  );
+  if (!paramResult.rows[0]) return null;
+  const params = mapRAParameterRow(paramResult.rows[0]);
+  const cpwdAnalysis =
+    Number(item.RegionId) === 2 ||
+    String(paramResult.rows[0].RALogic || "").trim().toUpperCase() === "CPWD";
+
+  const materials = await pool.query(
+    `SELECT ra."Component" AS "Quantity",
+            (m."MaterialRate" * COALESCE(m."ConversionFactor", 1)) AS "Rate"
+     FROM "MasterRAComponent" ra
+     INNER JOIN "MasterMaterial" m ON m."MaterialId" = ra."ComponentId"
+     WHERE ra."ItemId" = $1
+       AND ra."ComponentType" = $2`,
+    [Number(itemId), RA_COMPONENT_TYPE_MATERIAL],
+  );
+  const labours = await pool.query(
+    `SELECT ra."Component" AS "Quantity", l."LabourRate" AS "Rate"
+     FROM "MasterRAComponent" ra
+     INNER JOIN "MasterLabour" l ON l."LabourId" = ra."ComponentId"
+     WHERE ra."ItemId" = $1
+       AND ra."ComponentType" = $2`,
+    [Number(itemId), RA_COMPONENT_TYPE_LABOUR],
+  );
+  const machineries = await pool.query(
+    `SELECT ra."Component" AS "Quantity", m."MachineryRate" AS "Rate"
+     FROM "MasterRAComponent" ra
+     INNER JOIN "MasterMachinery" m ON m."MachineryId" = ra."ComponentId"
+     WHERE ra."ItemId" = $1
+       AND ra."ComponentType" = $2`,
+    [Number(itemId), RA_COMPONENT_TYPE_MACHINERY],
+  );
+  const itemComponents = await pool.query(
+    `SELECT ra."Component" AS "Quantity", src."CompletedRate" AS "Rate"
+     FROM "MasterRAComponent" ra
+     INNER JOIN "MasterItem" src ON src."ItemId" = ra."ComponentId"
+     WHERE ra."ItemId" = $1
+       AND ra."ComponentType" = $2`,
+    [Number(itemId), RA_COMPONENT_TYPE_ITEM],
+  );
+
+  const totalItem = itemComponents.rows.length
+    ? sumRateAnalysisAmounts(itemComponents.rows)
+    : 0;
+  let additions = roundMoney(
+    sumRateAnalysisAmounts(materials.rows) +
+      sumRateAnalysisAmounts(labours.rows) +
+      sumRateAnalysisAmounts(machineries.rows),
+  );
+  const addPercentage = (pct) => {
+    const extra = roundMoney(additions * (Number(pct) / 100));
+    additions = roundMoney(additions + extra);
+  };
+  if (!cpwdAnalysis) {
+    for (const key of [
+      "Scaffolding",
+      "Sundries",
+      "WaterCharges",
+      "QCCharges",
+      "Formwork",
+      "LabourAmenities",
+    ]) {
+      const pct = Number(params[key]) || 0;
+      if (!pct) continue;
+      addPercentage(pct);
+    }
+  }
+  addPercentage(Number(params.WCharges) || 0);
+  addPercentage(Number(params.CPOHCharges) || 0);
+  addPercentage(Number(params.LabourCess) || 0);
+  addPercentage(Number(params.GSTCharges) || 0);
+  const running = roundMoney(totalItem + additions);
+  const raQty = Number(params.RAQuantity) || 0;
+  const perUnit = raQty ? roundMoney(running / raQty) : 0;
+  return roundToFivePaise(perUnit);
 }
 
 function formatQty(n) {
@@ -11731,6 +11869,9 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
     const colCode = left;
     const colDesc = left + colCodeW;
     const colDescW = Math.max(120, colUnit - colDesc - 4);
+    // Parent and detail-heading text has no unit on that line, so it can
+    // use the blank space up to the Quantity column.
+    const colDescToQtyW = Math.max(colDescW, colQty - colDesc - 6);
     const pageBottom = doc.page.height - doc.page.margins.bottom;
 
     const rs = (n) => formatInrAmount(roundMoney(n));
@@ -11825,39 +11966,90 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       const qty = Number(row.Quantity) || 0;
       const rate = Number(row.Rate) || 0;
       const amount = roundMoney(qty * rate);
+      const details = detailsByComponent.get(Number(row.RAComponentId)) || [];
+      const descWidth = details.length ? colDescToQtyW : colDescW;
       doc.font("Helvetica-Bold").fontSize(9);
       const descHeight = Math.max(
         12,
-        doc.heightOfString(combinedText || " ", { width: colDescW }),
+        doc.heightOfString(combinedText || " ", {
+          width: descWidth,
+          align: "justify",
+        }),
       );
+      const drawCodeAndDescription = (y) => {
+        doc.font("Helvetica").fontSize(9);
+        doc.text(code, colCode, y, { width: colCodeW });
+        if (componentName && extraDesc) {
+          doc.font("Helvetica-Bold").fontSize(9);
+          doc.text(componentName, colDesc, y, {
+            width: descWidth,
+            align: "justify",
+            continued: true,
+          });
+          doc.font("Helvetica").fontSize(9);
+          doc.text(` -- ${extraDesc}`, { width: descWidth, align: "justify" });
+        } else {
+          doc.font(componentName ? "Helvetica-Bold" : "Helvetica").fontSize(9);
+          doc.text(combinedText, colDesc, y, {
+            width: descWidth,
+            align: "justify",
+          });
+        }
+      };
+      const drawFigures = (y) => {
+        doc.font("Helvetica").fontSize(9);
+        doc.text(unit, colUnit, y, { width: colUnitW, lineBreak: false });
+        doc.text(formatQty(qty), colQty, y, {
+          width: colQtyW,
+          align: "right",
+          lineBreak: false,
+        });
+        drawAmount(rate, colRate, y, colRateW);
+        drawAmount(amount, colAmt, y, colAmtW);
+      };
       ensureSpace(descHeight + 8);
       const y = doc.y;
-      doc.font("Helvetica").fontSize(9);
-      doc.text(code, colCode, y, { width: colCodeW });
-      if (componentName && extraDesc) {
-        doc.font("Helvetica-Bold").fontSize(9);
-        doc.text(componentName, colDesc, y, {
-          width: colDescW,
-          continued: true,
-        });
-        doc.font("Helvetica").fontSize(9);
-        doc.text(` -- ${extraDesc}`, { width: colDescW });
-      } else {
-        doc.font(componentName ? "Helvetica-Bold" : "Helvetica").fontSize(9);
-        doc.text(combinedText, colDesc, y, { width: colDescW });
+      drawCodeAndDescription(y);
+      if (!details.length) {
+        drawFigures(y);
+        doc.y = y + descHeight + 4;
+        return amount;
       }
-      doc.font("Helvetica").fontSize(9);
-      doc.text(unit, colUnit, y, { width: colUnitW, lineBreak: false });
-      doc.text(formatQty(qty), colQty, y, {
+      doc.y = y + descHeight + 2;
+      for (const detail of details) drawDetailLine(detail);
+      ensureSpace(28);
+      doc.y += 2;
+      doc
+        .moveTo(left, doc.y)
+        .lineTo(colQty + colQtyW, doc.y)
+        .strokeColor("#333333")
+        .lineWidth(0.6)
+        .stroke();
+      doc.moveDown(0.25);
+      const figuresY = doc.y;
+      doc.font("Helvetica-Bold").fontSize(9);
+      const totalText = unit ? `TOTAL  ${unit}` : "TOTAL";
+      const totalTextW = doc.widthOfString(totalText);
+      doc.text(totalText, colQty - 8 - totalTextW, figuresY, {
+        lineBreak: false,
+      });
+      doc.text(formatQty(qty), colQty, figuresY, {
         width: colQtyW,
         align: "right",
         lineBreak: false,
       });
-      drawAmount(rate, colRate, y, colRateW);
-      drawAmount(amount, colAmt, y, colAmtW);
-      doc.y = y + descHeight + 4;
-      const details = detailsByComponent.get(Number(row.RAComponentId)) || [];
-      for (const detail of details) drawDetailLine(detail);
+      doc.font(fonts.bold).fontSize(9);
+      doc.text(rs(rate), colRate, figuresY, {
+        width: colRateW,
+        align: "right",
+        lineBreak: false,
+      });
+      doc.text(rs(amount), colAmt, figuresY, {
+        width: colAmtW,
+        align: "right",
+        lineBreak: false,
+      });
+      doc.y = figuresY + 14;
       return amount;
     };
 
@@ -11907,12 +12099,18 @@ app.get("/api/generate-item-rate-analysis-report", async (req, res) => {
       doc.font("Helvetica-Bold").fontSize(9);
       const descHeight = Math.max(
         12,
-        doc.heightOfString(text || " ", { width: colDescW }),
+        doc.heightOfString(text || " ", {
+          width: colDescToQtyW,
+          align: "justify",
+        }),
       );
       ensureSpace(descHeight + 8);
       const y = doc.y;
       doc.text(String(code || ""), colCode, y, { width: colCodeW });
-      doc.text(text, colDesc, y, { width: colDescW });
+      doc.text(text, colDesc, y, {
+        width: colDescToQtyW,
+        align: "justify",
+      });
       doc.y = y + descHeight + 4;
     };
 
