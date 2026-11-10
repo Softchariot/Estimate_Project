@@ -14,10 +14,13 @@ export default function ImportCivilEstimateModal({
   onClose,
   works,
   API_BASE,
+  userId,
 }) {
   const [workCode, setWorkCode] = useState("");
   const [selecting, setSelecting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [selection, setSelection] = useState(null);
+  const [importResult, setImportResult] = useState(null);
 
   useEffect(() => {
     if (!open) return;
@@ -26,7 +29,9 @@ export default function ImportCivilEstimateModal({
     );
     setWorkCode(first ? String(first.WorkCode) : "");
     setSelection(null);
+    setImportResult(null);
     setSelecting(false);
+    setImporting(false);
   }, [open, works]);
 
   const handleSelectWork = async () => {
@@ -44,6 +49,28 @@ export default function ImportCivilEstimateModal({
       );
     } finally {
       setSelecting(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!workCode || importing || !selection) return;
+    if (!userId) {
+      window.alert("Please sign in again before importing.");
+      return;
+    }
+    setImporting(true);
+    try {
+      const res = await axios.post(`${API_BASE}/api/civil-estimate/import`, {
+        userId,
+        workCode: Number(workCode),
+      });
+      setImportResult(res.data || null);
+    } catch (err) {
+      window.alert(
+        err.response?.data?.message || "Could not import the selected work.",
+      );
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -68,6 +95,7 @@ export default function ImportCivilEstimateModal({
           onChange={(event) => {
             setWorkCode(event.target.value);
             setSelection(null);
+            setImportResult(null);
           }}
           disabled={!works?.length || selecting}
           style={{
@@ -111,15 +139,42 @@ export default function ImportCivilEstimateModal({
             for importing to Online Software
           </Typography>
         ) : null}
-        <Button
-          variant="solid"
-          loading={selecting}
-          disabled={!workCode}
-          sx={{ mt: 2 }}
-          onClick={handleSelectWork}
-        >
-          Click to Proceed
-        </Button>
+        {importResult ? (
+          <>
+            <Typography level="body-sm" sx={{ mt: 1.5, color: "neutral.800" }}>
+              Imported the Work and Sub Works with following issues.
+              {Array.isArray(importResult.issues) && importResult.issues.length
+                ? importResult.issues.map((issue) => (
+                    <span key={issue.itemNo}>
+                      <br />
+                      The <strong>Item No {issue.itemCode || issue.itemNo}</strong>
+                      {" -- "}
+                      {issue.itemDescription ? `${issue.itemDescription} ` : ""}
+                      is <strong>not found in the online Software.</strong>
+                    </span>
+                  ))
+                : (
+                    <>
+                      <br />
+                      No Issues, Import Successful
+                    </>
+                  )}
+            </Typography>
+            <Button variant="solid" sx={{ mt: 2 }} onClick={onClose}>
+              Close
+            </Button>
+          </>
+        ) : (
+          <Button
+            variant="solid"
+            loading={selecting || importing}
+            disabled={!workCode}
+            sx={{ mt: 2 }}
+            onClick={selection ? handleImport : handleSelectWork}
+          >
+            {selection ? "Import" : "Click to Proceed"}
+          </Button>
+        )}
       </ModalDialog>
     </Modal>
   );

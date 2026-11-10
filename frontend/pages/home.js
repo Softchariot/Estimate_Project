@@ -14281,7 +14281,6 @@ export default function HomePage() {
                         setMaterialItemList([]);
                         resetMaterialSelection();
                         setMaterialItemsViewed(false);
-                        setMaterialRALogicPickerOpen(false);
                       }}
                       disabled={!materialRegionId}
                       style={inputStyle}
@@ -14314,7 +14313,6 @@ export default function HomePage() {
                         setMaterialItemList([]);
                         resetMaterialSelection();
                         setMaterialItemsViewed(false);
-                        setMaterialRALogicPickerOpen(false);
                         if (
                           categoryId ||
                           isMaterialCategoryOptional(
@@ -14365,7 +14363,6 @@ export default function HomePage() {
                         setMaterialItemList([]);
                         resetMaterialSelection();
                         setMaterialItemsViewed(false);
-                        setMaterialRALogicPickerOpen(false);
                       }}
                       disabled={
                         !materialRegionId ||
@@ -15557,6 +15554,8 @@ export default function HomePage() {
                         alignItems: "center",
                       }}
                     >
+                    {(isSuperAdminUser(currentUser) ||
+                      isOrgAdminUser(currentUser)) && (
                     <Button
                       type="button"
                       color="primary"
@@ -15570,6 +15569,7 @@ export default function HomePage() {
                     >
                       IMPORT
                     </Button>
+                    )}
                     <Dropdown>
                       <MenuButton
                         type="button"
@@ -17997,6 +17997,7 @@ export default function HomePage() {
         onClose={() => setImportCivilEstimateOpen(false)}
         works={civilEstimateWorks}
         API_BASE={API_BASE}
+        userId={currentUser?.UserId}
       />
       <UserProfileModal
         open={profileOpen}

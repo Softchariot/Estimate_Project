@@ -43,7 +43,6 @@ app.set("trust proxy", true);
 
 app.use(cors());
 app.use(express.json());
-registerCivilEstimateImportRoutes(app);
 
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
 const connectionString =
@@ -68,6 +67,8 @@ const pool = new Pool({
   connectionString,
   ssl: needsSsl ? { rejectUnauthorized: false } : false,
 });
+
+registerCivilEstimateImportRoutes(app, pool);
 
 registerMeasurementGroupRoutes(app, pool);
 registerWorkMeasurementGroupRoutes(app, pool);
