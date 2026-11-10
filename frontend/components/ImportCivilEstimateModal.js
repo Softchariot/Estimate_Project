@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
 import {
   Modal,
   ModalDialog,
@@ -8,6 +7,10 @@ import {
   Button,
   FormLabel,
 } from "@mui/joy";
+import {
+  selectionFromDatabase,
+  sourceFromDatabase,
+} from "../lib/readCivilEstimateMdb";
 
 export default function ImportCivilEstimateModal({
   open,
@@ -15,7 +18,7 @@ export default function ImportCivilEstimateModal({
   works,
   API_BASE,
   userId,
-  uploadId,
+  database,
 }) {
   const [workCode, setWorkCode] = useState("");
   const [selecting, setSelecting] = useState(false);
@@ -40,16 +43,12 @@ export default function ImportCivilEstimateModal({
     setSelecting(true);
     setSelection(null);
     try {
-      const res = await axios.get(
-        `${API_BASE}/api/civil-estimate/aemwork/${encodeURIComponent(workCode)}/selection`,
-        { params: { uploadId } },
-      );
-      setSelection(res.data || null);
-    } catch (err) {
-      window.alert(
-        err.response?.data?.message ||
-          "Could not read the selected work. Keep this PC's application running, then try again.",
-      );
+      const data = selectionFromDatabase(database, workCode);
+      if (!data.workDescription) {
+        window.alert("The selected work has no description.");
+        return;
+      }
+      setSelection(data);
     } finally {
       setSelecting(false);
     }
@@ -63,16 +62,26 @@ export default function ImportCivilEstimateModal({
     }
     setImporting(true);
     try {
-      const res = await axios.post(`${API_BASE}/api/civil-estimate/import`, {
-        userId,
-        workCode: Number(workCode),
-        uploadId,
+      const res = await fetch(`${API_BASE}/api/civil-estimate/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          workCode: Number(workCode),
+          source: sourceFromDatabase(database, workCode),
+        }),
       });
-      setImportResult(res.data || null);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const error = new Error(data.message || "Could not import the selected work.");
+        error.response = { data };
+        throw error;
+      }
+      setImportResult(data || null);
     } catch (err) {
       window.alert(
         err.response?.data?.message ||
-          "Could not import the selected work. Keep this PC's application running, then try again.",
+          "Could not import the selected work.",
       );
     } finally {
       setImporting(false);

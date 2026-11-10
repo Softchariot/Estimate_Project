@@ -23,8 +23,6 @@ const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
-// IMPORT reads Civil Estimate on this PC. The website calls the local server.
-const CIVIL_ESTIMATE_API = "http://127.0.0.1:4000";
 
 const SESSION_IDLE_SECONDS = 300;
 const SESSION_WARNING_SECONDS = 285;
@@ -4904,7 +4902,7 @@ export default function HomePage() {
   const [generateReportType, setGenerateReportType] = useState("abstract");
   const [importCivilEstimateOpen, setImportCivilEstimateOpen] = useState(false);
   const [civilEstimateWorks, setCivilEstimateWorks] = useState([]);
-  const [civilEstimateUploadId, setCivilEstimateUploadId] = useState("");
+  const [civilEstimateDb, setCivilEstimateDb] = useState(null);
   const [importingCivilEstimate, setImportingCivilEstimate] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
@@ -8186,42 +8184,59 @@ export default function HomePage() {
     }
   };
 
-  const handleImportCivilEstimate = () => {
+  const handleImportCivilEstimate = async () => {
     if (importingCivilEstimate) return;
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".mdb";
-    input.onchange = async () => {
-      const file = input.files && input.files[0];
-      if (!file) return;
-      if (file.name.toLowerCase() !== "estimate2223a.mdb") {
-        window.alert(
-          "Select Estimate2223A.mdb from C:\\Program Files (x86)\\Civil Estimate 1",
-        );
+    let file;
+    try {
+      const { pickCivilEstimateFile } = await import("../lib/civilEstimateFile");
+      file = await pickCivilEstimateFile();
+    } catch (err) {
+      if (err?.name === "AbortError") return;
+      window.alert(
+        "Select Estimate2223A.mdb from C:\\Program Files (x86)\\Civil Estimate 1",
+      );
+      return;
+    }
+    if (!file) return;
+    if (file.name.toLowerCase() !== "estimate2223a.mdb") {
+      window.alert(
+        "Select Estimate2223A.mdb from C:\\Program Files (x86)\\Civil Estimate 1",
+      );
+      return;
+    }
+    if (!currentUser?.UserId) {
+      window.alert("Please sign in again before importing.");
+      return;
+    }
+    setImportingCivilEstimate(true);
+    try {
+      const keyRes = await fetch(
+        `${API_BASE}/api/civil-estimate/database-key?userId=${encodeURIComponent(currentUser.UserId)}`,
+      );
+      const keyData = await keyRes.json().catch(() => ({}));
+      if (!keyRes.ok || !keyData.key) {
+        window.alert(keyData.message || "Could not open the Civil Estimate database.");
         return;
       }
-      setImportingCivilEstimate(true);
-      try {
-        const body = new FormData();
-        body.append("database", file, file.name);
-        const res = await axios.post(
-          `${CIVIL_ESTIMATE_API}/api/civil-estimate/aemwork`,
-          body,
-        );
-        setCivilEstimateWorks(Array.isArray(res.data?.data) ? res.data.data : []);
-        setCivilEstimateUploadId(res.data?.uploadId || "");
-        setImportCivilEstimateOpen(true);
-      } catch (err) {
-        setImportCivilEstimateOpen(false);
-        window.alert(
-          err.response?.data?.message ||
-            "Could not open Civil Estimate on this computer. Keep this PC's application running, then try IMPORT again.",
-        );
-      } finally {
-        setImportingCivilEstimate(false);
-      }
-    };
-    input.click();
+      const { readCivilEstimateDatabase } = await import(
+        "../lib/readCivilEstimateMdb"
+      );
+      const database = readCivilEstimateDatabase(
+        await file.arrayBuffer(),
+        keyData.key,
+      );
+      setCivilEstimateDb(database);
+      setCivilEstimateWorks(database.works);
+      setImportCivilEstimateOpen(true);
+    } catch (err) {
+      setImportCivilEstimateOpen(false);
+      window.alert(
+        err?.message ||
+          "Could not read Estimate2223A.mdb. Select that file from C:\\Program Files (x86)\\Civil Estimate 1.",
+      );
+    } finally {
+      setImportingCivilEstimate(false);
+    }
   };
 
   const clearEstimatePanel = () => {
@@ -18019,12 +18034,12 @@ export default function HomePage() {
         open={importCivilEstimateOpen}
         onClose={() => {
           setImportCivilEstimateOpen(false);
-          setCivilEstimateUploadId("");
+          setCivilEstimateDb(null);
         }}
         works={civilEstimateWorks}
-        API_BASE={CIVIL_ESTIMATE_API}
+        API_BASE={API_BASE}
         userId={currentUser?.UserId}
-        uploadId={civilEstimateUploadId}
+        database={civilEstimateDb}
       />
       <UserProfileModal
         open={profileOpen}

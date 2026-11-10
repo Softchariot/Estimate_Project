@@ -645,14 +645,9 @@ function parseMathString(raw) {
   };
 }
 
-async function importSelectedWork(pool, { workCode, userId, uploadId }) {
+async function assertCanImport(pool, userId) {
   const actorId = Number(userId);
   if (!actorId) throw fail("User is required.", 400);
-  const source = await readWorkImportSource(workCode, mdbPathFor(uploadId));
-  if (!source.workDescription) {
-    throw fail("The selected work has no description.", 400);
-  }
-
   const user = await pool.query(
     `SELECT u."UserId", uc."UserCategoryName"
      FROM "MasterUser" u
@@ -668,6 +663,26 @@ async function importSelectedWork(pool, { workCode, userId, uploadId }) {
     .replace(/\s+/g, "");
   if (actorCategory !== "superadmin" && actorCategory !== "orgadmin") {
     throw fail("Only SuperAdmin or OrgAdmin can import.", 403);
+  }
+  return actorId;
+}
+
+function clientSource(raw) {
+  if (!raw || typeof raw !== "object") throw fail(MSG_SELECT_MDB, 400);
+  return {
+    workDescription: String(raw.workDescription || "").trim(),
+    subWorks: Array.isArray(raw.subWorks) ? raw.subWorks : [],
+    measurements: Array.isArray(raw.measurements) ? raw.measurements : [],
+    details: Array.isArray(raw.details) ? raw.details : [],
+    items: Array.isArray(raw.items) ? raw.items : [],
+  };
+}
+
+async function importSelectedWork(pool, { workCode, userId, source: rawSource }) {
+  const actorId = await assertCanImport(pool, userId);
+  const source = clientSource(rawSource);
+  if (!source.workDescription) {
+    throw fail("The selected work has no description.", 400);
   }
 
   const itemNos = [
@@ -946,12 +961,24 @@ function registerCivilEstimateImportRoutes(app, pool) {
     }
   });
 
+  app.get("/api/civil-estimate/database-key", async (req, res) => {
+    try {
+      await assertCanImport(pool, req.query.userId);
+      res.json({ key: DB_PASSWORD });
+    } catch (err) {
+      console.error("Civil Estimate key request failed:", scrub(err.message));
+      res.status(err.status || 500).json({
+        message: scrub(err.message) || "Could not open the Civil Estimate database.",
+      });
+    }
+  });
+
   app.post("/api/civil-estimate/import", async (req, res) => {
     try {
       const data = await importSelectedWork(pool, {
         workCode: req.body?.workCode,
         userId: req.body?.userId,
-        uploadId: req.body?.uploadId,
+        source: req.body?.source,
       });
       res.json({
         message: data.issues.length

@@ -45,8 +45,8 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Private-Network", "true");
   next();
 });
-app.use(cors());
-app.use(express.json());
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: "4mb" }));
 
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
 const connectionString =
