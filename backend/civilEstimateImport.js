@@ -1,17 +1,20 @@
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const INSTALL_DIR = "C:\\Program Files (x86)\\Civil Estimate 1";
-const EXE_NAME = "Estimate2223A-01F.exe";
 const MDB_NAME = "Estimate2223A.mdb";
+const MDB_FOLDER = "C:\\Program Files (x86)\\Civil Estimate 1";
 const DB_PASSWORD = "MHALSAKANTw0059hbm";
 
 const MSG_NOT_UPDATED =
   "You are NOT using Updated Version of Software, Please get it updated first";
 const MSG_MDB_MISSING =
   "MS Access Database File missing, Contact Administrator";
+const MSG_SELECT_MDB = `Select ${MDB_NAME} from ${MDB_FOLDER}`;
+
+const uploads = new Map();
 
 function scrub(message) {
   return String(message || "")
@@ -35,12 +38,90 @@ function cscriptPath() {
   return path.join(win, "System32", "cscript.exe");
 }
 
-function assertInstall() {
-  const exePath = path.join(INSTALL_DIR, EXE_NAME);
-  const mdbPath = path.join(INSTALL_DIR, MDB_NAME);
-  if (!fs.existsSync(exePath)) throw fail(MSG_NOT_UPDATED, 409);
-  if (!fs.existsSync(mdbPath)) throw fail(MSG_MDB_MISSING, 404);
-  return mdbPath;
+function assertWindows() {
+  if (process.platform !== "win32") {
+    throw fail(
+      "Import can be used only on the computer where Civil Estimate is installed.",
+      409,
+    );
+  }
+}
+
+function sweepUploads() {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [id, row] of uploads) {
+    if (row.at < cutoff) {
+      fs.rmSync(row.path, { force: true });
+      uploads.delete(id);
+    }
+  }
+}
+
+function mdbPathFor(uploadId) {
+  assertWindows();
+  const row = uploads.get(String(uploadId || ""));
+  if (!row || !fs.existsSync(row.path)) throw fail(MSG_SELECT_MDB, 400);
+  return row.path;
+}
+
+function saveUploadedDatabase(buffer, filename) {
+  assertWindows();
+  const name = path.basename(String(filename || ""));
+  if (name.toLowerCase() !== MDB_NAME.toLowerCase()) throw fail(MSG_SELECT_MDB, 400);
+  if (!buffer || !buffer.length) throw fail(MSG_MDB_MISSING, 404);
+  sweepUploads();
+  const id = crypto.randomBytes(16).toString("hex");
+  const filePath = path.join(os.tmpdir(), `ce-${id}.mdb`);
+  fs.writeFileSync(filePath, buffer);
+  uploads.set(id, { path: filePath, at: Date.now() });
+  return id;
+}
+
+function readMultipartDatabase(req) {
+  const type = String(req.headers["content-type"] || "");
+  const match = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!match) return Promise.reject(fail(MSG_SELECT_MDB, 400));
+  const boundary = (match[1] || match[2] || "").trim();
+  const maxBytes = 256 * 1024 * 1024;
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let failed = false;
+    req.on("data", (chunk) => {
+      if (failed) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        failed = true;
+        reject(fail("The selected database is too large.", 413));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("error", (error) => {
+      if (!failed) reject(fail(error.message || MSG_SELECT_MDB, 400));
+    });
+    req.on("end", () => {
+      if (failed) return;
+      try {
+        const body = Buffer.concat(chunks);
+        const headerEnd = body.indexOf("\r\n\r\n");
+        if (headerEnd < 0) {
+          reject(fail(MSG_SELECT_MDB, 400));
+          return;
+        }
+        const header = body.slice(0, headerEnd).toString("latin1");
+        const nameMatch = header.match(/filename="([^"]*)"/i);
+        const filename = nameMatch ? nameMatch[1] : "";
+        const start = headerEnd + 4;
+        let end = body.indexOf(`\r\n--${boundary}`, start);
+        if (end < 0) end = body.length;
+        resolve({ filename, buffer: body.slice(start, end) });
+      } catch (error) {
+        reject(fail(error.message || MSG_SELECT_MDB, 400));
+      }
+    });
+  });
 }
 
 const READER_VBS = `
@@ -511,12 +592,11 @@ function runReader(extraEnv) {
   });
 }
 
-async function readWorkImportSource(workCode) {
+async function readWorkImportSource(workCode, mdbPath) {
   const code = Number(workCode);
   if (!Number.isInteger(code) || code <= 0) {
     throw fail("Please select a work.", 400);
   }
-  const mdbPath = assertInstall();
   const parsed = await runReader({
     mdbPath,
     action: "import",
@@ -565,10 +645,10 @@ function parseMathString(raw) {
   };
 }
 
-async function importSelectedWork(pool, { workCode, userId }) {
+async function importSelectedWork(pool, { workCode, userId, uploadId }) {
   const actorId = Number(userId);
   if (!actorId) throw fail("User is required.", 400);
-  const source = await readWorkImportSource(workCode);
+  const source = await readWorkImportSource(workCode, mdbPathFor(uploadId));
   if (!source.workDescription) {
     throw fail("The selected work has no description.", 400);
   }
@@ -791,8 +871,7 @@ async function importSelectedWork(pool, { workCode, userId }) {
   }
 }
 
-async function listAemWorkDescriptions() {
-  const mdbPath = assertInstall();
+async function listAemWorkDescriptions(mdbPath) {
   const parsed = await runReader({ mdbPath, action: "works" });
   const works = Array.isArray(parsed.works) ? parsed.works : [];
   works.sort((a, b) => Number(a.WorkCode) - Number(b.WorkCode));
@@ -811,12 +890,11 @@ function importMessage(userName, userAddress, workDescription, subWorks) {
   );
 }
 
-async function readWorkForImport(workCode) {
+async function readWorkForImport(workCode, mdbPath) {
   const code = Number(workCode);
   if (!Number.isInteger(code) || code <= 0) {
     throw fail("Please select a work.", 400);
   }
-  const mdbPath = assertInstall();
   const parsed = await runReader({
     mdbPath,
     action: "select",
@@ -839,28 +917,31 @@ async function readWorkForImport(workCode) {
 }
 
 function registerCivilEstimateImportRoutes(app, pool) {
-  app.get("/api/civil-estimate/aemwork", async (_req, res) => {
+  app.post("/api/civil-estimate/aemwork", async (req, res) => {
     try {
-      const data = await listAemWorkDescriptions();
-      res.json({ data });
+      const file = await readMultipartDatabase(req);
+      const uploadId = saveUploadedDatabase(file.buffer, file.filename);
+      const data = await listAemWorkDescriptions(mdbPathFor(uploadId));
+      res.json({ uploadId, data });
     } catch (err) {
       console.error("Civil Estimate import failed:", scrub(err.message));
       res.status(err.status || 500).json({
-        message:
-          scrub(err.message) || "Could not open the Civil Estimate database.",
+        message: scrub(err.message) || "Could not open the Civil Estimate database.",
       });
     }
   });
 
   app.get("/api/civil-estimate/aemwork/:workCode/selection", async (req, res) => {
     try {
-      const data = await readWorkForImport(req.params.workCode);
+      const data = await readWorkForImport(
+        req.params.workCode,
+        mdbPathFor(req.query.uploadId),
+      );
       res.json(data);
     } catch (err) {
       console.error("Civil Estimate work selection failed:", scrub(err.message));
       res.status(err.status || 500).json({
-        message:
-          scrub(err.message) || "Could not read the selected work.",
+        message: scrub(err.message) || "Could not read the selected work.",
       });
     }
   });
@@ -870,6 +951,7 @@ function registerCivilEstimateImportRoutes(app, pool) {
       const data = await importSelectedWork(pool, {
         workCode: req.body?.workCode,
         userId: req.body?.userId,
+        uploadId: req.body?.uploadId,
       });
       res.json({
         message: data.issues.length

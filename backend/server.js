@@ -41,6 +41,10 @@ app.set("trust proxy", true);
 //   .map((origin) => origin.trim())
 //   .filter(Boolean);
 
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
+  next();
+});
 app.use(cors());
 app.use(express.json());
 

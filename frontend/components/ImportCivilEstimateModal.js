@@ -15,6 +15,7 @@ export default function ImportCivilEstimateModal({
   works,
   API_BASE,
   userId,
+  uploadId,
 }) {
   const [workCode, setWorkCode] = useState("");
   const [selecting, setSelecting] = useState(false);
@@ -41,11 +42,13 @@ export default function ImportCivilEstimateModal({
     try {
       const res = await axios.get(
         `${API_BASE}/api/civil-estimate/aemwork/${encodeURIComponent(workCode)}/selection`,
+        { params: { uploadId } },
       );
       setSelection(res.data || null);
     } catch (err) {
       window.alert(
-        err.response?.data?.message || "Could not read the selected work.",
+        err.response?.data?.message ||
+          "Could not read the selected work. Keep this PC's application running, then try again.",
       );
     } finally {
       setSelecting(false);
@@ -63,11 +66,13 @@ export default function ImportCivilEstimateModal({
       const res = await axios.post(`${API_BASE}/api/civil-estimate/import`, {
         userId,
         workCode: Number(workCode),
+        uploadId,
       });
       setImportResult(res.data || null);
     } catch (err) {
       window.alert(
-        err.response?.data?.message || "Could not import the selected work.",
+        err.response?.data?.message ||
+          "Could not import the selected work. Keep this PC's application running, then try again.",
       );
     } finally {
       setImporting(false);

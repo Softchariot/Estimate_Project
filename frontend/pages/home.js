@@ -23,6 +23,8 @@ const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
 // const API_BASE = "http://localhost:4000";
+// IMPORT reads Civil Estimate on this PC. The website calls the local server.
+const CIVIL_ESTIMATE_API = "http://127.0.0.1:4000";
 
 const SESSION_IDLE_SECONDS = 300;
 const SESSION_WARNING_SECONDS = 285;
@@ -4902,6 +4904,7 @@ export default function HomePage() {
   const [generateReportType, setGenerateReportType] = useState("abstract");
   const [importCivilEstimateOpen, setImportCivilEstimateOpen] = useState(false);
   const [civilEstimateWorks, setCivilEstimateWorks] = useState([]);
+  const [civilEstimateUploadId, setCivilEstimateUploadId] = useState("");
   const [importingCivilEstimate, setImportingCivilEstimate] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
@@ -8183,22 +8186,42 @@ export default function HomePage() {
     }
   };
 
-  const handleImportCivilEstimate = async () => {
+  const handleImportCivilEstimate = () => {
     if (importingCivilEstimate) return;
-    setImportingCivilEstimate(true);
-    try {
-      const res = await axios.get(`${API_BASE}/api/civil-estimate/aemwork`);
-      setCivilEstimateWorks(Array.isArray(res.data?.data) ? res.data.data : []);
-      setImportCivilEstimateOpen(true);
-    } catch (err) {
-      setImportCivilEstimateOpen(false);
-      window.alert(
-        err.response?.data?.message ||
-          "Could not open the Civil Estimate database.",
-      );
-    } finally {
-      setImportingCivilEstimate(false);
-    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".mdb";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      if (file.name.toLowerCase() !== "estimate2223a.mdb") {
+        window.alert(
+          "Select Estimate2223A.mdb from C:\\Program Files (x86)\\Civil Estimate 1",
+        );
+        return;
+      }
+      setImportingCivilEstimate(true);
+      try {
+        const body = new FormData();
+        body.append("database", file, file.name);
+        const res = await axios.post(
+          `${CIVIL_ESTIMATE_API}/api/civil-estimate/aemwork`,
+          body,
+        );
+        setCivilEstimateWorks(Array.isArray(res.data?.data) ? res.data.data : []);
+        setCivilEstimateUploadId(res.data?.uploadId || "");
+        setImportCivilEstimateOpen(true);
+      } catch (err) {
+        setImportCivilEstimateOpen(false);
+        window.alert(
+          err.response?.data?.message ||
+            "Could not open Civil Estimate on this computer. Keep this PC's application running, then try IMPORT again.",
+        );
+      } finally {
+        setImportingCivilEstimate(false);
+      }
+    };
+    input.click();
   };
 
   const clearEstimatePanel = () => {
@@ -17994,10 +18017,14 @@ export default function HomePage() {
       />
       <ImportCivilEstimateModal
         open={importCivilEstimateOpen}
-        onClose={() => setImportCivilEstimateOpen(false)}
+        onClose={() => {
+          setImportCivilEstimateOpen(false);
+          setCivilEstimateUploadId("");
+        }}
         works={civilEstimateWorks}
-        API_BASE={API_BASE}
+        API_BASE={CIVIL_ESTIMATE_API}
         userId={currentUser?.UserId}
+        uploadId={civilEstimateUploadId}
       />
       <UserProfileModal
         open={profileOpen}
