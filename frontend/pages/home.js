@@ -18130,7 +18130,8 @@ export default function HomePage() {
               {(importEstimateNotice.issues || []).map((issue) => (
                 <Typography key={issue.itemNo} level="body-md" sx={{ mt: 0.75 }}>
                   The <strong>ITEMNO {issue.itemNo}</strong>
-                  {issue.itemCode ? ` -- ${issue.itemCode}` : ""} could NOT be
+                  {issue.itemCode ? ` -- ${issue.itemCode}` : ""}
+                  {issue.itemDescription ? ` ${issue.itemDescription}` : ""} could NOT be
                   imported since this item does not exist in the online Software.
                 </Typography>
               ))}

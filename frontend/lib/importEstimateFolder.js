@@ -53,14 +53,42 @@ function subWorkRows(text) {
     .filter((row) => row.subWorkName || row.subWorkCode);
 }
 
-function measurementRows(text) {
+function measurementKeyFromAbstract(value) {
+  const match = String(value || "").match(/INo\s*([^,]+?)\s*,\s*PgNo\s*(\S+)/i);
+  if (!match) return "";
+  const itemPart = match[1].replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  const page = match[2].replace(/[^0-9A-Za-z]/g, "");
+  if (!itemPart || !page) return "";
+  return `${page}/${itemPart}`.toLowerCase();
+}
+
+function normalizeItemCode(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function abstractDescriptions(text) {
+  const descriptions = new Map();
+  for (const fields of dataLines(text)) {
+    const key = measurementKeyFromAbstract(fields[3] || "");
+    const description = fields[4] || "";
+    if (!key || !description || descriptions.has(key)) continue;
+    descriptions.set(key, description);
+  }
+  return descriptions;
+}
+
+function measurementRows(text, descriptions) {
   return dataLines(text)
-    .map((fields) => ({
-      workCode: fields[1] || "",
-      subWorkCode: fields[2] || "",
-      itemCode: fields[3] || "",
-      itemNo: fields[4] || "",
-    }))
+    .map((fields) => {
+      const itemCode = fields[3] || "";
+      return {
+        workCode: fields[1] || "",
+        subWorkCode: fields[2] || "",
+        itemCode,
+        itemNo: fields[4] || "",
+        itemDescription: descriptions.get(normalizeItemCode(itemCode)) || "",
+      };
+    })
     .filter((row) => row.workCode && row.subWorkCode && row.itemNo);
 }
 
@@ -95,7 +123,7 @@ function headerIdentity(text) {
   };
 }
 
-function folderContents(workText, subWorkText, measurementText, detailText, headerText) {
+function folderContents(workText, subWorkText, measurementText, detailText, headerText, abstractText) {
   const works = workRows(workText);
   const subWorks = subWorkRows(subWorkText);
   const header = headerIdentity(headerText);
@@ -104,7 +132,7 @@ function folderContents(workText, subWorkText, measurementText, detailText, head
     subWorks: subWorks.map((row) => row.subWorkName).filter(Boolean),
     works,
     subWorkRows: subWorks,
-    measurements: measurementRows(measurementText),
+    measurements: measurementRows(measurementText, abstractDescriptions(abstractText)),
     details: detailRows(detailText),
     userName: header.userName,
     organisationName: header.organisationName,
@@ -127,12 +155,14 @@ async function readDirectoryHandle(dir) {
   const measurementFile = await files.get("aemmeasurement.txt").getFile();
   const detailFile = await files.get("aedmeasurement.txt").getFile();
   const headerFile = await files.get("header.txt").getFile();
+  const abstractFile = await files.get("abstract.txt").getFile();
   return folderContents(
     await workFile.text(),
     await subWorkFile.text(),
     await measurementFile.text(),
     await detailFile.text(),
     await headerFile.text(),
+    await abstractFile.text(),
   );
 }
 
@@ -145,6 +175,7 @@ function readInputFolder(fileList) {
   let measurementFile = null;
   let detailFile = null;
   let headerFile = null;
+  let abstractFile = null;
   for (const file of files) {
     const parts = String(file.webkitRelativePath || file.name).split("/");
     if (parts.length !== 2) continue;
@@ -155,6 +186,7 @@ function readInputFolder(fileList) {
     if (name === "aemmeasurement.txt") measurementFile = file;
     if (name === "aedmeasurement.txt") detailFile = file;
     if (name === "header.txt") headerFile = file;
+    if (name === "abstract.txt") abstractFile = file;
   }
   const missing = REQUIRED_FILES.filter((name) => !present.has(name.toLowerCase()));
   return {
@@ -165,6 +197,7 @@ function readInputFolder(fileList) {
     measurementFile,
     detailFile,
     headerFile,
+    abstractFile,
   };
 }
 
@@ -201,6 +234,7 @@ export async function readImportedWorkFolder() {
     measurementFile,
     detailFile,
     headerFile,
+    abstractFile,
   } = readInputFolder(fileList);
   if (!isExportedWorksFolderName(folderName)) {
     throw new Error(
@@ -213,7 +247,8 @@ export async function readImportedWorkFolder() {
     !subWorkFile ||
     !measurementFile ||
     !detailFile ||
-    !headerFile
+    !headerFile ||
+    !abstractFile
   ) {
     throw new Error("Unable to proceed, the Folder has incomplete Files");
   }
@@ -223,5 +258,6 @@ export async function readImportedWorkFolder() {
     await measurementFile.text(),
     await detailFile.text(),
     await headerFile.text(),
+    await abstractFile.text(),
   );
 }

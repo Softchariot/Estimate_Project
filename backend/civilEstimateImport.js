@@ -752,8 +752,8 @@ async function importSelectedWork(pool, { workCode, userId, source: rawSource })
         `Sub Work ${subWorkCode}`;
       const inserted = await client.query(
         `INSERT INTO "MasterSubWork"
-          ("WorkId", "MasterWorkId", "SubWorkName", "Sequence", "MarkForDeletion")
-         VALUES ($1, $1, $2, $3, false)
+          ("WorkId", "SubWorkName", "Sequence", "MarkForDeletion")
+         VALUES ($1, $2, $3, false)
          RETURNING "SubWorkId"`,
         [masterWorkId, name, subWorkSequence],
       );
@@ -1287,6 +1287,7 @@ async function writeImportedAbstracts(client, {
     issues.push({
       itemNo,
       itemCode: String(row.itemCode || "").trim(),
+      itemDescription: String(row.itemDescription || "").trim(),
     });
   }
   for (const row of measurements) {
@@ -1415,8 +1416,8 @@ async function importTextFiles(pool, { userId, works, subWorks, measurements, de
       sequenceByWork.set(masterWorkId, sequence);
       const createdSub = await client.query(
         `INSERT INTO "MasterSubWork"
-          ("WorkId", "MasterWorkId", "SubWorkName", "Sequence", "MarkForDeletion")
-         VALUES ($1, $1, $2, $3, false)
+          ("WorkId", "SubWorkName", "Sequence", "MarkForDeletion")
+         VALUES ($1, $2, $3, false)
          RETURNING "SubWorkId"`,
         [masterWorkId, subWorkName, sequence],
       );
