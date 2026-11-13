@@ -12,6 +12,10 @@ import {
   Menu,
   MenuButton,
   MenuItem,
+  Box,
+  Modal,
+  ModalDialog,
+  Typography,
 } from "@mui/joy";
 import MeasurementPanel from "../components/MeasurementPanel";
 import WorkMeasurementGroupsPanel from "../components/WorkMeasurementGroupsPanel";
@@ -271,6 +275,14 @@ function isSuperAdminUser(user) {
     .trim()
     .toLowerCase();
   return category === "superadmin" || category === "super admin";
+}
+
+function canImportEstimate(user) {
+  return (
+    isSuperAdminUser(user) ||
+    isOrgAdminUser(user) ||
+    Number(user?.UserCategoryId) === 3
+  );
 }
 
 function isOrgAdminUser(user) {
@@ -4903,6 +4915,8 @@ export default function HomePage() {
   const [importCivilEstimateOpen, setImportCivilEstimateOpen] = useState(false);
   const [civilEstimateWorks, setCivilEstimateWorks] = useState([]);
   const [civilEstimateDb, setCivilEstimateDb] = useState(null);
+  const [importEstimateNotice, setImportEstimateNotice] = useState(null);
+  const [importEstimateProceeding, setImportEstimateProceeding] = useState(false);
   const [importingCivilEstimate, setImportingCivilEstimate] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
@@ -8236,6 +8250,39 @@ export default function HomePage() {
       );
     } finally {
       setImportingCivilEstimate(false);
+    }
+  };
+
+  const handleImportEstimateFolder = async () => {
+    if (!canImportEstimate(currentUser)) return;
+    window.alert("Select the Folder to be Imported …..");
+    try {
+      const { readImportedWorkFolder } = await import(
+        "../lib/importEstimateFolder"
+      );
+      const imported = await readImportedWorkFolder();
+      if (imported == null) return;
+      if (!currentUser?.UserId) {
+        window.alert("Please sign in again before importing.");
+        return;
+      }
+      setImportEstimateNotice({
+        phase: "confirm",
+        headerLine: [imported.userName, "Of", imported.organisationName, "From", imported.cityName]
+          .filter(Boolean)
+          .join(" "),
+        workName: imported.workName,
+        subWorkNames: imported.subWorks,
+        measurements: imported.measurements,
+        details: imported.details,
+        works: imported.works,
+        subWorkRows: imported.subWorkRows,
+      });
+    } catch (err) {
+      if (err?.name === "AbortError") return;
+      window.alert(
+        err?.message || "Unable to proceed, the Folder has incomplete Files",
+      );
     }
   };
 
@@ -15592,14 +15639,20 @@ export default function HomePage() {
                         alignItems: "center",
                       }}
                     >
-                    {(isSuperAdminUser(currentUser) ||
-                      isOrgAdminUser(currentUser)) && (
                     <Button
                       type="button"
                       color="primary"
                       variant="solid"
-                      loading={importingCivilEstimate}
+                      disabled={!isSuperAdminUser(currentUser)}
+                      loading={
+                        isSuperAdminUser(currentUser) && importingCivilEstimate
+                      }
                       onClick={handleImportCivilEstimate}
+                      title={
+                        isSuperAdminUser(currentUser)
+                          ? "Import Civil Estimate"
+                          : "IMPORT is available to SuperAdmin only"
+                      }
                       sx={{
                         fontSize: 13,
                         textTransform: "none",
@@ -15607,7 +15660,24 @@ export default function HomePage() {
                     >
                       IMPORT
                     </Button>
-                    )}
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant="solid"
+                      disabled={!canImportEstimate(currentUser)}
+                      onClick={handleImportEstimateFolder}
+                      title={
+                        canImportEstimate(currentUser)
+                          ? "Import an ExportedWorks folder"
+                          : "IMPORT Estimate is available to SuperAdmin, OrgAdmin, and user category 3"
+                      }
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      IMPORT Estimate
+                    </Button>
                     <Dropdown>
                       <MenuButton
                         type="button"
@@ -18041,6 +18111,113 @@ export default function HomePage() {
         userId={currentUser?.UserId}
         database={civilEstimateDb}
       />
+      <Modal
+        open={Boolean(importEstimateNotice)}
+        onClose={(_, reason) => {
+          if (importEstimateProceeding) return;
+          if (reason === "backdropClick" || reason === "escapeKeyDown") return;
+        }}
+      >
+        <ModalDialog sx={{ width: 560, maxWidth: "94vw" }}>
+          {importEstimateNotice?.phase === "done" ? (
+            <>
+              <Typography level="body-md">
+                Works and Sub Works are Created and Items - Measurements inserted in respective tables{" "}
+                {(importEstimateNotice.issues || []).length
+                  ? "With Following Issues,"
+                  : "With NO Issues,"}
+              </Typography>
+              {(importEstimateNotice.issues || []).map((issue) => (
+                <Typography key={issue.itemNo} level="body-md" sx={{ mt: 0.75 }}>
+                  The <strong>ITEMNO {issue.itemNo}</strong>
+                  {issue.itemCode ? ` -- ${issue.itemCode}` : ""} could NOT be
+                  imported since this item does not exist in the online Software.
+                </Typography>
+              ))}
+              <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>
+                <Button
+                  variant="solid"
+                  onClick={() => setImportEstimateNotice(null)}
+                >
+                  OK
+                </Button>
+              </Box>
+            </>
+          ) : (
+            <>
+          <Typography level="body-md">
+            <strong>{importEstimateNotice?.headerLine}</strong>
+            {" have decided to IMPORT the work"}
+          </Typography>
+          <Typography level="body-md" sx={{ mt: 1.25 }}>
+            <strong>Name Of Work</strong>
+          </Typography>
+          <Typography level="body-md">
+            {importEstimateNotice?.workName}
+          </Typography>
+          <Typography level="body-md" sx={{ mt: 1.5 }}>
+            <strong>Name of Sub-Work</strong>
+          </Typography>
+          {(importEstimateNotice?.subWorkNames || []).map((name, index) => (
+            <Typography key={`${name}-${index}`} level="body-md">
+              {name}
+            </Typography>
+          ))}
+          <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end", gap: 1 }}>
+          <Button
+            variant="outlined"
+            disabled={importEstimateProceeding}
+            onClick={() => {
+              if (importEstimateProceeding) return;
+              window.alert("You have decided to Quit the IMPORT");
+              setImportEstimateNotice(null);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="solid"
+            loading={importEstimateProceeding}
+            onClick={async () => {
+              if (!importEstimateNotice || importEstimateProceeding) return;
+              setImportEstimateProceeding(true);
+              try {
+                const res = await fetch(`${API_BASE}/api/civil-estimate/import-text`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    userId: currentUser?.UserId,
+                    works: importEstimateNotice.works,
+                    subWorks: importEstimateNotice.subWorkRows,
+                    measurements: importEstimateNotice.measurements,
+                    details: importEstimateNotice.details,
+                    headerLine: importEstimateNotice.headerLine,
+                  }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                  window.alert(data.message || "Could not import the selected work.");
+                  return;
+                }
+                setImportEstimateNotice((current) =>
+                  current
+                    ? { ...current, phase: "done", issues: data.issues || [] }
+                    : current,
+                );
+              } catch (err) {
+                window.alert(err?.message || "Could not import the selected work.");
+              } finally {
+                setImportEstimateProceeding(false);
+              }
+            }}
+          >
+            OK
+          </Button>
+          </Box>
+            </>
+          )}
+        </ModalDialog>
+      </Modal>
       <UserProfileModal
         open={profileOpen}
         onClose={() => setProfileOpen(false)}
