@@ -340,6 +340,15 @@ function isMaterialCategoryOptional(user, regionId) {
   );
 }
 
+/** Estimation item search: category and sub category are optional for regions 3 and 4. */
+function isEstimationCategoryOptional(regionId) {
+  const region = Number(regionId);
+  return (
+    region === ITEM_MASTER_ORG_ADMIN_REGION_ID ||
+    region === ITEM_MASTER_INDV_USER_REGION_ID
+  );
+}
+
 /** Holding org for individual users (MasterOrganization.OrganizationId = 3). */
 const INDIVIDUAL_ORGANIZATION_ID = 3;
 const MEASUREMENT_GROUP_NAME_MAX = 50;
@@ -4917,6 +4926,11 @@ export default function HomePage() {
   const [civilEstimateDb, setCivilEstimateDb] = useState(null);
   const [importEstimateNotice, setImportEstimateNotice] = useState(null);
   const [importEstimateProceeding, setImportEstimateProceeding] = useState(false);
+  const [deleteWorkOpen, setDeleteWorkOpen] = useState(false);
+  const [deleteWorkOrgId, setDeleteWorkOrgId] = useState("");
+  const [deleteWorkList, setDeleteWorkList] = useState([]);
+  const [loadingDeleteWorks, setLoadingDeleteWorks] = useState(false);
+  const [purgingWorkId, setPurgingWorkId] = useState(0);
   const [importingCivilEstimate, setImportingCivilEstimate] = useState(false);
   const [estimatePanelOpen, setEstimatePanelOpen] = useState(false);
   const [measurementGroupsOpen, setMeasurementGroupsOpen] = useState(false);
@@ -5934,8 +5948,13 @@ export default function HomePage() {
 
   const loadItems = (e) => {
     e.preventDefault();
-    if (!itemRegion || !itemCategoryId || !itemSsrYearId) {
-      alert("Please select SSR Region, SSR Year, and SSR Category.");
+    const categoryOptional = isEstimationCategoryOptional(itemRegion);
+    if (!itemRegion || !itemSsrYearId || (!categoryOptional && !itemCategoryId)) {
+      alert(
+        categoryOptional
+          ? "Please select SSR Region and SSR Year."
+          : "Please select SSR Region, SSR Year, and SSR Category.",
+      );
       return;
     }
     clearEstimationOutputs();
@@ -5944,9 +5963,9 @@ export default function HomePage() {
     getCheckedItems();
     const params = {
       regionId: itemRegion,
-      categoryId: itemCategoryId,
       ssrYearId: itemSsrYearId,
     };
+    if (itemCategoryId) params.categoryId = itemCategoryId;
     if (subCategoryItemId) {
       params.subCategoryId = subCategoryItemId;
     }
@@ -8010,6 +8029,73 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, selectedSubWorkId]);
 
+  const handleExportEstimateExcel = async () => {
+    clearEstimationOutputs();
+    if (!selectedProjectId) {
+      alert("Please select a Work first.");
+      return;
+    }
+
+    try {
+      const res = await axios.get(`${API_BASE}/api/export-estimate-excel`, {
+        params: { projectId: selectedProjectId },
+        responseType: "blob",
+      });
+
+      const stampParts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        day: "2-digit",
+        month: "short",
+        year: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(new Date());
+      const stampPart = (type) =>
+        stampParts.find((part) => part.type === type)?.value || "";
+      const exportStamp = [
+        stampPart("day"),
+        stampPart("month").replace(".", ""),
+        stampPart("year"),
+        stampPart("hour"),
+        stampPart("minute"),
+        stampPart("second"),
+      ].join("-");
+      const disposition = res.headers["content-disposition"];
+      let filename = `EstimateFor${selectedProjectId}On-${exportStamp}.xlsx`;
+      const headerName = disposition?.match(/filename="([^"]+)"/)?.[1];
+      if (headerName) filename = headerName;
+
+      const blob = new Blob([res.data], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export estimate excel:", err);
+      let message = "Failed to export the estimate to Excel.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) message = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        message = err.response.data.message;
+      }
+      alert(message);
+    }
+  };
+
   const handleGenerateRecapReport = async () => {
     clearEstimationOutputs();
     if (!selectedProjectId) {
@@ -8195,6 +8281,75 @@ export default function HomePage() {
         message = err.response.data.message;
       }
       alert(message);
+    }
+  };
+
+  const openDeleteWork = () => {
+    if (!isSuperAdminUser(currentUser)) return;
+    setDeleteWorkOpen(true);
+    setDeleteWorkOrgId("");
+    setDeleteWorkList([]);
+    loadOrganizations();
+  };
+
+  const loadWorksForDelete = async (organizationId) => {
+    setDeleteWorkOrgId(organizationId);
+    setDeleteWorkList([]);
+    if (!organizationId) return;
+    setLoadingDeleteWorks(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/works-for-delete?userId=${currentUser?.UserId}&organizationId=${organizationId}`,
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(data.message || "Could not load works.");
+        return;
+      }
+      setDeleteWorkList(Array.isArray(data.data) ? data.data : []);
+    } catch (err) {
+      window.alert(err?.message || "Could not load works.");
+    } finally {
+      setLoadingDeleteWorks(false);
+    }
+  };
+
+  const purgeSelectedWork = async (work) => {
+    if (!work?.MasterWorkId || purgingWorkId) return;
+    const label = `(${work.UserName || "Unknown"}) ${work.WorkName || ""}`.trim();
+    const confirmed = window.confirm(
+      `Warning: Delete ${label}?\n\nAll sub-works, items, measurements, materials, leads, and standard additions for this work will be permanently deleted.`,
+    );
+    if (!confirmed) return;
+    setPurgingWorkId(Number(work.MasterWorkId));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/master-works/${work.MasterWorkId}/purge`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: currentUser?.UserId }),
+        },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(data.message || "Could not delete the work.");
+        return;
+      }
+      if (Number(selectedProjectId) === Number(work.MasterWorkId)) {
+        setSelectedProjectId(0);
+        setSelectedSubWorkId(0);
+        setSubWorks([]);
+      }
+      setDeleteWorkList((current) =>
+        current.filter((row) => Number(row.MasterWorkId) !== Number(work.MasterWorkId)),
+      );
+      await loadWorksMaster();
+      window.alert(`${label} has been deleted.`);
+    } catch (err) {
+      window.alert(err?.message || "Could not delete the work.");
+    } finally {
+      setPurgingWorkId(0);
     }
   };
 
@@ -10848,7 +11003,7 @@ export default function HomePage() {
             </h1>
             <p style={{ margin: 0, color: theme.colors.inkSoft, fontSize: 14 }}>
               {activeMaster === "items"
-                ? "The user needs to select Work, Sub Work, SSR Year / Region / Category / Sub Category to proceed with creating an abstract of items for the selected Sub Work."
+                ? "Select Work, Sub Work, SSR Region and SSR Year. SSR Category and SSR Sub Category are also required, except when SSR Region 3 or 4 is selected."
                 : "Manage the reference data behind your estimates — regions, categories, items, works and sub-works."}
             </p>
           </div>
@@ -15352,7 +15507,7 @@ export default function HomePage() {
               <Card
                 eyebrow="Master · SSR Item"
                 title="Find SSR Items"
-                subtitle="Filter by work, region, year and category (sub-category optional), then view matching items."
+                subtitle="Filter by work, region and year. SSR Category and SSR Sub Category are required, except for SSR Region 3 or 4."
               >
                 <FormShell onSubmit={loadItems}>
                   <div
@@ -15517,7 +15672,10 @@ export default function HomePage() {
                       </select>
                     </Field>
 
-                    <Field label="SSR Category" required>
+                    <Field
+                      label="SSR Category"
+                      required={!isEstimationCategoryOptional(itemRegion)}
+                    >
                       <select
                         name="SSRCategoryId"
                         value={itemCategoryId}
@@ -15528,7 +15686,7 @@ export default function HomePage() {
                           setItemList([]);
                           loadCategoryBasedSubCategories(categoryId);
                         }}
-                        required
+                        required={!isEstimationCategoryOptional(itemRegion)}
                         disabled={!itemRegion}
                         style={inputStyle}
                       >
@@ -15641,6 +15799,24 @@ export default function HomePage() {
                     >
                     <Button
                       type="button"
+                      color="danger"
+                      variant="solid"
+                      disabled={!isSuperAdminUser(currentUser)}
+                      onClick={openDeleteWork}
+                      title={
+                        isSuperAdminUser(currentUser)
+                          ? "Delete a work and its records"
+                          : "DELETE WORK is available to SuperAdmin only"
+                      }
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      DELETE WORK
+                    </Button>
+                    <Button
+                      type="button"
                       color="primary"
                       variant="solid"
                       disabled={!isSuperAdminUser(currentUser)}
@@ -15711,6 +15887,9 @@ export default function HomePage() {
                           }}
                         >
                           Generate Abstract Report
+                        </MenuItem>
+                        <MenuItem onClick={() => handleExportEstimateExcel()}>
+                          Export To Excel
                         </MenuItem>
                         <MenuItem onClick={() => handleGenerateRecapReport()}>
                           Generate Recap Report
@@ -18111,6 +18290,68 @@ export default function HomePage() {
         userId={currentUser?.UserId}
         database={civilEstimateDb}
       />
+      <Modal
+        open={deleteWorkOpen}
+        onClose={() => {
+          if (purgingWorkId) return;
+          setDeleteWorkOpen(false);
+        }}
+      >
+        <ModalDialog sx={{ width: 640, maxWidth: "94vw" }}>
+          <Typography level="title-md">Delete Work</Typography>
+          <Typography level="body-sm" sx={{ mt: 0.5 }}>
+            Select an organisation, then select a work. The user name is shown in brackets.
+          </Typography>
+          <select
+            value={deleteWorkOrgId}
+            onChange={(event) => loadWorksForDelete(event.target.value)}
+            style={{ marginTop: 12, width: "100%", padding: "8px 10px" }}
+          >
+            <option value="">Select Organisation</option>
+            {organizations.map((org) => (
+              <option key={org.OrganizationId} value={org.OrganizationId}>
+                {org.OrgName || org.OrgCode}
+              </option>
+            ))}
+          </select>
+          <div style={{ marginTop: 12, maxHeight: 320, overflowY: "auto" }}>
+            {!deleteWorkOrgId ? null : loadingDeleteWorks ? (
+              <Typography level="body-sm">Loading works…</Typography>
+            ) : deleteWorkList.length === 0 ? (
+              <Typography level="body-sm">No works found for this organisation.</Typography>
+            ) : (
+              deleteWorkList.map((work) => (
+                <Button
+                  key={work.MasterWorkId}
+                  type="button"
+                  variant="outlined"
+                  color="danger"
+                  loading={purgingWorkId === Number(work.MasterWorkId)}
+                  disabled={Boolean(purgingWorkId)}
+                  onClick={() => purgeSelectedWork(work)}
+                  sx={{
+                    mt: 0.75,
+                    width: "100%",
+                    justifyContent: "flex-start",
+                    textTransform: "none",
+                  }}
+                >
+                  {`(${work.UserName || "Unknown"}) ${work.WorkName || ""}`}
+                </Button>
+              ))
+            )}
+          </div>
+          <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>
+            <Button
+              variant="outlined"
+              disabled={Boolean(purgingWorkId)}
+              onClick={() => setDeleteWorkOpen(false)}
+            >
+              Close
+            </Button>
+          </Box>
+        </ModalDialog>
+      </Modal>
       <Modal
         open={Boolean(importEstimateNotice)}
         onClose={(_, reason) => {

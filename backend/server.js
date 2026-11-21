@@ -5,6 +5,7 @@ const path = require("path");
 const { Pool, Client } = require("pg");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const PDFDocument = require("pdfkit");
+const ExcelJS = require("exceljs");
 const {
   TERMS_VERSION,
   TERMS_OF_USE_TEXT,
@@ -45,7 +46,12 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Private-Network", "true");
   next();
 });
-app.use(cors({ origin: true }));
+app.use(
+  cors({
+    origin: true,
+    exposedHeaders: ["Content-Disposition"],
+  }),
+);
 app.use(express.json({ limit: "4mb" }));
 
 const useSsl = String(process.env.DB_SSL || "false").toLowerCase() === "true";
@@ -1158,7 +1164,25 @@ app.get("/api/ssr-items-load", async (req, res) => {
                  i."ItemCode" ASC NULLS LAST,
                  i."ItemId" ASC`;
     } else {
-      query += ` ORDER BY i."ItemNumber" ASC`;
+      // Numeric by each dot-separated part, so 4.2 comes before 4.10.
+      // A letter suffix (4.1.10A) stays with that number, after the plain one.
+      query += ` ORDER BY (
+        SELECT COALESCE(array_agg(
+          COALESCE(NULLIF(substring(part FROM '^[0-9]+'), '')::integer, 0)
+          ORDER BY ord
+        ), ARRAY[]::integer[])
+        FROM unnest(string_to_array(COALESCE(i."ItemNumber", ''), '.'))
+          WITH ORDINALITY AS segs(part, ord)
+      ) ASC,
+      (
+        SELECT COALESCE(string_agg(
+          lower(COALESCE(substring(part FROM '^[0-9]*([A-Za-z].*)$'), '')),
+          '.' ORDER BY ord
+        ), '')
+        FROM unnest(string_to_array(COALESCE(i."ItemNumber", ''), '.'))
+          WITH ORDINALITY AS segs(part, ord)
+      ) ASC,
+      i."ItemId" ASC`;
     }
 
     const result = await pool.query(query, params);
@@ -1948,18 +1972,29 @@ app.post("/api/insert-work-abstract", async (req, res) => {
     );
     let nextSequence = Number(maxSeq.rows[0]?.MaxSequence || 0) + 1;
 
+    const itemRates = await client.query(
+      `SELECT "ItemId", "CompletedRate"
+       FROM "MasterItem"
+       WHERE "ItemId" = ANY($1::int[])`,
+      [toInsert],
+    );
+    const rateByItem = new Map(
+      itemRates.rows.map((row) => [Number(row.ItemId), row.CompletedRate]),
+    );
+
     let inserted = 0;
     for (const itemId of toInsert) {
       await client.query(
         `INSERT INTO "WorkAbstract"
-        ("ProjectId", "WorkId", "SubWorkId", "ItemId", "Sequence")
-        VALUES ($1, $2, $3, $4, $5);`,
+        ("ProjectId", "WorkId", "SubWorkId", "ItemId", "Sequence", "FinalRate")
+        VALUES ($1, $2, $3, $4, $5, $6);`,
         [
           linkedProjectId,
           resolvedWorkId,
           resolvedSubWorkId,
           itemId,
           nextSequence,
+          rateByItem.has(itemId) ? rateByItem.get(itemId) : null,
         ],
       );
       nextSequence += 1;
@@ -2033,6 +2068,116 @@ app.post("/api/insert-work", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: err.message });
+  }
+});
+
+async function assertSuperAdminActor(userId) {
+  const actorId = Number(userId);
+  if (!actorId) {
+    const error = new Error("User is required.");
+    error.status = 400;
+    throw error;
+  }
+  const user = await pool.query(
+    `SELECT uc."UserCategoryName"
+     FROM "MasterUser" u
+     LEFT JOIN "MasterUserCategory" uc
+       ON uc."UserCategoryId" = u."UserCategoryId"
+     WHERE u."UserId" = $1
+       AND COALESCE(u."MarkForDeletion", false) = false`,
+    [actorId],
+  );
+  const category = String(user.rows[0]?.UserCategoryName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (category !== "superadmin") {
+    const error = new Error("Only SuperAdmin can delete a work.");
+    error.status = 403;
+    throw error;
+  }
+  return actorId;
+}
+
+app.get("/api/works-for-delete", async (req, res) => {
+  const organizationId = Number(req.query.organizationId);
+  try {
+    await assertSuperAdminActor(req.query.userId);
+    if (!organizationId) {
+      return res.status(400).json({ message: "Organisation is required." });
+    }
+    const result = await pool.query(
+      `SELECT w."MasterWorkId", w."WorkName", u."UserName"
+       FROM "MasterWork" w
+       LEFT JOIN "MasterUser" u ON u."UserId" = w."UserId"
+       WHERE u."OrganizationId" = $1
+       ORDER BY u."UserName" ASC NULLS LAST,
+                w."WorkName" ASC,
+                w."MasterWorkId" ASC`,
+      [organizationId],
+    );
+    return res.json({ data: result.rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(err.status || 500).json({
+      message: err.message || "Could not load works.",
+    });
+  }
+});
+
+app.post("/api/master-works/:id/purge", async (req, res) => {
+  const workId = Number(req.params.id);
+  if (!workId) {
+    return res.status(400).json({ message: "A work is required." });
+  }
+  const client = await pool.connect();
+  try {
+    await assertSuperAdminActor(req.body?.userId);
+    await client.query("BEGIN");
+    const work = await client.query(
+      `SELECT "MasterWorkId", "WorkName" FROM "MasterWork" WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    if (!work.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Work was not found." });
+    }
+    await client.query(`DELETE FROM "WorkMeasurementGroup" WHERE "WorkId" = $1`, [
+      workId,
+    ]);
+    await client.query(
+      `DELETE FROM "WorkMeasurement"
+       WHERE "WorkAbstractId" IN (
+         SELECT "WorkAbstractId" FROM "WorkAbstract" WHERE "WorkId" = $1
+       )`,
+      [workId],
+    );
+    await client.query(`DELETE FROM "WorkMaterial" WHERE "WorkId" = $1`, [workId]);
+    await client.query(`DELETE FROM "WorkLead" WHERE "MasterWorkId" = $1`, [workId]);
+    await client.query(
+      `DELETE FROM "WorkStandardAddition" WHERE "MasterWorkId" = $1`,
+      [workId],
+    );
+    await client.query(`DELETE FROM "WorkAbstract" WHERE "WorkId" = $1`, [workId]);
+    await client.query(`DELETE FROM "MasterSubWork" WHERE "WorkId" = $1`, [workId]);
+    await client.query(`DELETE FROM "MasterWork" WHERE "MasterWorkId" = $1`, [workId]);
+    await client.query("COMMIT");
+    return res.json({
+      message: "Work deleted.",
+      workName: work.rows[0].WorkName,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(err);
+    return res.status(err.status || 500).json({
+      message: err.message || "Could not delete the work.",
+    });
+  } finally {
+    client.release();
   }
 });
 
@@ -5688,6 +5833,304 @@ app.get("/api/get-work-abstract-report", async (req, res) => {
   }
 });
 
+function ancestorItemNumbers(itemNumber) {
+  if (!itemNumber) return [];
+  const segments = String(itemNumber).split(".");
+  const ancestors = [];
+  for (let i = segments.length - 1; i >= 2; i -= 1) {
+    ancestors.push(segments.slice(0, i).join("."));
+  }
+  return ancestors.reverse();
+}
+
+function assignAbstractItemNumbers(items, startSerial = 0) {
+  const mainParentKey = (itemNumber) => {
+    const segments = String(itemNumber || "")
+      .split(".")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (segments.length >= 2) return segments.slice(0, 2).join(".");
+    return segments.join(".");
+  };
+  const letterFor = (n) => {
+    let value = n;
+    let suffix = "";
+    while (value > 0) {
+      value -= 1;
+      suffix = String.fromCharCode(65 + (value % 26)) + suffix;
+      value = Math.floor(value / 26);
+    }
+    return suffix;
+  };
+  const lowerLetter = (n) => {
+    let value = n;
+    let suffix = "";
+    while (value > 0) {
+      value -= 1;
+      suffix = String.fromCharCode(97 + (value % 26)) + suffix;
+      value = Math.floor(value / 26);
+    }
+    return suffix;
+  };
+
+  const headingKeys = new Set(
+    items
+      .filter((item) => item.isParentHeading)
+      .map((item) => String(item.ItemNumber || "")),
+  );
+  const parentOrder = [];
+  const rowsByParent = new Map();
+  for (const item of items) {
+    if (item.isParentHeading) continue;
+    const key = mainParentKey(item.ItemNumber) || `item:${item.ItemId}`;
+    if (!rowsByParent.has(key)) {
+      rowsByParent.set(key, []);
+      parentOrder.push(key);
+    }
+    rowsByParent.get(key).push(item);
+  }
+
+  const serialByParent = new Map();
+  const childLetter = new Map();
+  let serialNo = Number(startSerial) || 0;
+  for (const key of parentOrder) {
+    serialNo += 1;
+    serialByParent.set(key, String(serialNo));
+    if (!headingKeys.has(key)) continue;
+    const distinctIds = [];
+    for (const row of rowsByParent.get(key)) {
+      if (!distinctIds.includes(row.ItemId)) distinctIds.push(row.ItemId);
+    }
+    if (distinctIds.length > 1) {
+      distinctIds.forEach((id, index) => {
+        childLetter.set(`${key}|${id}`, letterFor(index + 1));
+      });
+    }
+  }
+
+  const shown = new Set();
+  const groupCount = new Map();
+  for (const item of items) {
+    item.reportSerial = "";
+    item.groupLabel = "";
+    if (item.isParentHeading) {
+      const key = String(item.ItemNumber || "");
+      if (mainParentKey(key) === key && serialByParent.has(key)) {
+        item.reportSerial = serialByParent.get(key);
+      }
+      continue;
+    }
+    const key = mainParentKey(item.ItemNumber) || `item:${item.ItemId}`;
+    const idKey = `${key}|${item.ItemId}`;
+    if (!shown.has(idKey)) {
+      shown.add(idKey);
+      if (headingKeys.has(key)) {
+        const letter = childLetter.get(idKey) || "";
+        item.reportSerial = letter
+          ? `${serialByParent.get(key) || ""}${letter}`
+          : "";
+      } else if (item.GroupId == null) {
+        item.reportSerial = serialByParent.get(key) || "";
+      }
+    }
+    if (item.GroupId != null) {
+      const next = (groupCount.get(idKey) || 0) + 1;
+      groupCount.set(idKey, next);
+      const serial = serialByParent.get(key) || "";
+      item.groupLabel = `${serial}-${lowerLetter(next)}`;
+    }
+  }
+  return serialNo;
+}
+
+async function loadAbstractReportModel(projectId, subWorkId) {
+  const workResult = await pool.query(
+    `SELECT "WorkName" FROM "MasterWork" WHERE "MasterWorkId" = $1`,
+    [projectId],
+  );
+  const projectName = workResult.rows[0]?.WorkName || "Untitled Work";
+
+  const params = [projectId];
+  let subWorkFilter = "";
+  const subWorkIdNum = Number(subWorkId);
+  const isSingleSubWork =
+    Boolean(subWorkId) && subWorkId !== "all" && subWorkIdNum > 0;
+  if (isSingleSubWork) {
+    subWorkFilter = `AND sw."SubWorkId" = $2`;
+    params.push(subWorkIdNum);
+  }
+
+  const query = `
+      SELECT
+        sw."SubWorkId",
+        sw."SubWorkName",
+        wa."WorkAbstractId",
+        wa."Sequence",
+        wa."FinalRate",
+        wa."RateString",
+        wa."IsRA",
+        wa."GroupId",
+        mg."GroupName",
+        i."ItemId",
+        i."ItemNumber",
+        i."ItemDescription",
+        i."RegionId",
+        i."CategoryId",
+        u."UnitShortName",
+        r."SSRRegionShortName",
+        y."Year" AS "SSRYear",
+        COALESCE((
+          SELECT SUM(wm."Quantity")
+          FROM "WorkMeasurement" wm
+          INNER JOIN "WorkAbstract" owner
+            ON owner."WorkAbstractId" = wm."WorkAbstractId"
+          WHERE owner."WorkId" = wa."WorkId"
+            AND owner."SubWorkId" = wa."SubWorkId"
+            AND owner."ItemId" = wa."ItemId"
+            AND (
+              wm."GroupId" IS NOT DISTINCT FROM wa."GroupId"
+              OR (
+                wa."GroupId" IS NULL
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "WorkAbstract" sib
+                  WHERE sib."WorkId" = wa."WorkId"
+                    AND sib."SubWorkId" = wa."SubWorkId"
+                    AND sib."ItemId" = wa."ItemId"
+                    AND sib."GroupId" IS NOT NULL
+                )
+              )
+            )
+        ), 0) AS "Quantity"
+      FROM "WorkAbstract" wa
+      INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+      INNER JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
+      LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
+      LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
+      LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
+      LEFT JOIN "MasterMeasurementGroup" mg ON mg."GroupId" = wa."GroupId"
+      WHERE wa."WorkId" = $1
+      ${subWorkFilter}
+      ORDER BY
+        COALESCE(sw."Sequence", 999999) ASC,
+        sw."SubWorkName" ASC,
+        COALESCE(wa."Sequence", 999999) ASC,
+        wa."WorkAbstractId" ASC
+    `;
+
+  const { rows } = await pool.query(query, params);
+  if (rows.length === 0) {
+    return {
+      error: { status: 404, message: "No items found for this selection." },
+    };
+  }
+
+  const neededParents = new Set();
+  for (const row of rows) {
+    for (const ancestor of ancestorItemNumbers(row.ItemNumber)) {
+      neededParents.add(ancestor);
+    }
+  }
+
+  const parentByKey = new Map();
+  if (neededParents.size > 0) {
+    const parentResult = await pool.query(
+      `SELECT "ItemNumber", "ItemDescription", "RegionId", "CategoryId"
+       FROM "MasterItem"
+       WHERE "ItemNumber" = ANY($1::text[])`,
+      [Array.from(neededParents)],
+    );
+    for (const p of parentResult.rows) {
+      const key = `${p.RegionId}|${p.CategoryId}|${p.ItemNumber}`;
+      if (!parentByKey.has(key)) {
+        parentByKey.set(key, p.ItemDescription || "");
+      }
+      if (!parentByKey.has(p.ItemNumber)) {
+        parentByKey.set(p.ItemNumber, p.ItemDescription || "");
+      }
+    }
+  }
+
+  const resolveParentDescription = (row, ancestorNumber) => {
+    const scoped = parentByKey.get(
+      `${row.RegionId}|${row.CategoryId}|${ancestorNumber}`,
+    );
+    if (scoped !== undefined) return scoped;
+    return parentByKey.get(ancestorNumber) || "";
+  };
+
+  const formatSsrItemNo = (itemNumber, regionShortName, year) => {
+    const number = String(itemNumber || "").trim();
+    const shortName = String(regionShortName || "").trim();
+    const yearText = String(year || "").trim();
+    const yearPart = yearText ? `(${yearText})` : "";
+    const lines = [shortName, yearPart, number].filter(Boolean);
+    return lines.join("\n");
+  };
+
+  const subWorkGroups = [];
+  const groupIndexBySubWorkId = new Map();
+  for (const row of rows) {
+    if (!groupIndexBySubWorkId.has(row.SubWorkId)) {
+      groupIndexBySubWorkId.set(row.SubWorkId, subWorkGroups.length);
+      subWorkGroups.push({
+        subWorkName: row.SubWorkName,
+        items: [],
+        printedParents: new Set(),
+      });
+    }
+    const group = subWorkGroups[groupIndexBySubWorkId.get(row.SubWorkId)];
+    const regionShortName = row.SSRRegionShortName || "";
+    const ssrYear = row.SSRYear || "";
+
+    for (const ancestor of ancestorItemNumbers(row.ItemNumber)) {
+      if (group.printedParents.has(ancestor)) continue;
+      group.printedParents.add(ancestor);
+      const parentDesc = resolveParentDescription(row, ancestor);
+      if (!parentDesc) continue;
+      group.items.push({
+        isParentHeading: true,
+        ItemNumber: ancestor,
+        DisplayItemNo: formatSsrItemNo(ancestor, regionShortName, ssrYear),
+        ItemDescription: parentDesc,
+      });
+    }
+
+    group.items.push({
+      isParentHeading: false,
+      ItemId: row.ItemId,
+      GroupId: row.GroupId == null ? null : Number(row.GroupId),
+      GroupName: row.GroupName || "",
+      ItemNumber: row.ItemNumber,
+      DisplayItemNo: formatSsrItemNo(row.ItemNumber, regionShortName, ssrYear),
+      ItemDescription: row.ItemDescription,
+      UnitShortName: row.UnitShortName,
+      FinalRate: Number(row.FinalRate || 0),
+      RateString: row.RateString || "",
+      IsRA: Boolean(row.IsRA),
+      Quantity: row.Quantity,
+    });
+  }
+
+  return { projectName, subWorkGroups, isSingleSubWork, subWorkIdNum };
+}
+
+function estimateExportStamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  const month = get("month").replace(".", "");
+  return `${get("day")}-${month}-${get("year")}-${get("hour")}-${get("minute")}-${get("second")}`;
+}
+
 app.get("/api/generate-report", async (req, res) => {
   const { projectId, subWorkId } = req.query;
 
@@ -5695,196 +6138,15 @@ app.get("/api/generate-report", async (req, res) => {
     return res.status(400).json({ message: "projectId is required." });
   }
 
-  // ItemNumber: chapter.parent.child... — ancestor prefixes for parent wording
-  const ancestorItemNumbers = (itemNumber) => {
-    if (!itemNumber) return [];
-    const segments = String(itemNumber).split(".");
-    const ancestors = [];
-    for (let i = segments.length - 1; i >= 2; i -= 1) {
-      ancestors.push(segments.slice(0, i).join("."));
-    }
-    return ancestors.reverse();
-  };
-
   try {
-    // WorkAbstract."ProjectId" stores MasterWorkId (Estimation "Select Work")
-    const workResult = await pool.query(
-      `SELECT "WorkName" FROM "MasterWork" WHERE "MasterWorkId" = $1`,
-      [projectId],
-    );
-    const projectName = workResult.rows[0]?.WorkName || "Untitled Work";
-
-    const params = [projectId];
-    let subWorkFilter = "";
-    const subWorkIdNum = Number(subWorkId);
-    const isSingleSubWork =
-      Boolean(subWorkId) && subWorkId !== "all" && subWorkIdNum > 0;
-    if (isSingleSubWork) {
-      subWorkFilter = `AND sw."SubWorkId" = $2`;
-      params.push(subWorkIdNum);
-    }
-
-    const query = `
-        SELECT
-          sw."SubWorkId",
-          sw."SubWorkName",
-          wa."WorkAbstractId",
-          wa."Sequence",
-          wa."FinalRate",
-          wa."RateString",
-          wa."IsRA",
-          wa."GroupId",
-          mg."GroupName",
-          i."ItemId",
-          i."ItemNumber",
-          i."ItemDescription",
-          i."RegionId",
-          i."CategoryId",
-          u."UnitShortName",
-          r."SSRRegionShortName",
-          y."Year" AS "SSRYear",
-          COALESCE((
-            SELECT SUM(wm."Quantity")
-            FROM "WorkMeasurement" wm
-            INNER JOIN "WorkAbstract" owner
-              ON owner."WorkAbstractId" = wm."WorkAbstractId"
-            WHERE owner."WorkId" = wa."WorkId"
-              AND owner."SubWorkId" = wa."SubWorkId"
-              AND owner."ItemId" = wa."ItemId"
-              AND (
-                wm."GroupId" IS NOT DISTINCT FROM wa."GroupId"
-                OR (
-                  wa."GroupId" IS NULL
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM "WorkAbstract" sib
-                    WHERE sib."WorkId" = wa."WorkId"
-                      AND sib."SubWorkId" = wa."SubWorkId"
-                      AND sib."ItemId" = wa."ItemId"
-                      AND sib."GroupId" IS NOT NULL
-                  )
-                )
-              )
-          ), 0) AS "Quantity"
-        FROM "WorkAbstract" wa
-        INNER JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
-        INNER JOIN "MasterSubWork" sw ON sw."SubWorkId" = wa."SubWorkId"
-        LEFT JOIN "MasterUnit" u ON u."UnitId" = i."UnitId"
-        LEFT JOIN "MasterSSRRegion" r ON r."SSRRegionId" = i."RegionId"
-        LEFT JOIN "MasterYear" y ON y."YearId" = i."SSRYearId"
-        LEFT JOIN "MasterMeasurementGroup" mg ON mg."GroupId" = wa."GroupId"
-        WHERE wa."WorkId" = $1
-        ${subWorkFilter}
-        ORDER BY
-          COALESCE(sw."Sequence", 999999) ASC,
-          sw."SubWorkName" ASC,
-          COALESCE(wa."Sequence", 999999) ASC,
-          wa."WorkAbstractId" ASC
-      `;
-
-    const { rows } = await pool.query(query, params);
-
-    if (rows.length === 0) {
+    const report = await loadAbstractReportModel(projectId, subWorkId);
+    if (report.error) {
       return res
-        .status(404)
-        .json({ message: "No items found for this selection." });
+        .status(report.error.status)
+        .json({ message: report.error.message });
     }
-
-    // Collect ancestor ItemNumbers (parent wording) for selected leaves
-    const neededParents = new Set();
-    for (const row of rows) {
-      for (const ancestor of ancestorItemNumbers(row.ItemNumber)) {
-        neededParents.add(ancestor);
-      }
-    }
-
-    // Map "RegionId|CategoryId|ItemNumber" -> parent description
-    const parentByKey = new Map();
-    if (neededParents.size > 0) {
-      const parentResult = await pool.query(
-        `SELECT "ItemNumber", "ItemDescription", "RegionId", "CategoryId"
-         FROM "MasterItem"
-         WHERE "ItemNumber" = ANY($1::text[])`,
-        [Array.from(neededParents)],
-      );
-      for (const p of parentResult.rows) {
-        const key = `${p.RegionId}|${p.CategoryId}|${p.ItemNumber}`;
-        if (!parentByKey.has(key)) {
-          parentByKey.set(key, p.ItemDescription || "");
-        }
-        // Also keep a number-only fallback when region/category match is ambiguous
-        if (!parentByKey.has(p.ItemNumber)) {
-          parentByKey.set(p.ItemNumber, p.ItemDescription || "");
-        }
-      }
-    }
-
-    const resolveParentDescription = (row, ancestorNumber) => {
-      const scoped = parentByKey.get(
-        `${row.RegionId}|${row.CategoryId}|${ancestorNumber}`,
-      );
-      if (scoped !== undefined) return scoped;
-      return parentByKey.get(ancestorNumber) || "";
-    };
-
-    const formatSsrItemNo = (itemNumber, regionShortName, year) => {
-      const number = String(itemNumber || "").trim();
-      const shortName = String(regionShortName || "").trim();
-      const yearText = String(year || "").trim();
-      const yearPart = yearText ? `(${yearText})` : "";
-      // 3 lines: SSRRegionShortName, Year, ItemNumber
-      const lines = [shortName, yearPart, number].filter(Boolean);
-      return lines.join("\n");
-    };
-
-    // ── Group rows by sub work; inject parent heading rows before leaves ──
-    const subWorkGroups = [];
-    const groupIndexBySubWorkId = new Map();
-    for (const row of rows) {
-      if (!groupIndexBySubWorkId.has(row.SubWorkId)) {
-        groupIndexBySubWorkId.set(row.SubWorkId, subWorkGroups.length);
-        subWorkGroups.push({
-          subWorkName: row.SubWorkName,
-          items: [],
-          printedParents: new Set(),
-        });
-      }
-      const group = subWorkGroups[groupIndexBySubWorkId.get(row.SubWorkId)];
-      const regionShortName = row.SSRRegionShortName || "";
-      const ssrYear = row.SSRYear || "";
-
-      for (const ancestor of ancestorItemNumbers(row.ItemNumber)) {
-        if (group.printedParents.has(ancestor)) continue;
-        group.printedParents.add(ancestor);
-        const parentDesc = resolveParentDescription(row, ancestor);
-        if (!parentDesc) continue;
-        group.items.push({
-          isParentHeading: true,
-          ItemNumber: ancestor,
-          DisplayItemNo: formatSsrItemNo(ancestor, regionShortName, ssrYear),
-          ItemDescription: parentDesc,
-        });
-      }
-
-      group.items.push({
-        isParentHeading: false,
-        ItemId: row.ItemId,
-        GroupId: row.GroupId == null ? null : Number(row.GroupId),
-        GroupName: row.GroupName || "",
-        ItemNumber: row.ItemNumber,
-        DisplayItemNo: formatSsrItemNo(
-          row.ItemNumber,
-          regionShortName,
-          ssrYear,
-        ),
-        ItemDescription: row.ItemDescription,
-        UnitShortName: row.UnitShortName,
-        FinalRate: Number(row.FinalRate || 0),
-        RateString: row.RateString || "",
-        IsRA: Boolean(row.IsRA),
-        Quantity: row.Quantity,
-      });
-    }
+    const { projectName, subWorkGroups, isSingleSubWork, subWorkIdNum } =
+      report;
 
     const abstractFileName = isSingleSubWork
       ? `Work-${projectId}-SubWork-${subWorkIdNum}-AbstractReport.pdf`
@@ -6080,25 +6342,14 @@ app.get("/api/generate-report", async (req, res) => {
       doc.moveDown(0.5);
     };
 
+
     subWorkGroups.forEach((group, groupIdx) => {
       if (groupIdx > 0) doc.addPage();
       drawHeader();
       drawSubWorkTitleAndTableHeader(groupIdx, group.subWorkName);
+      assignAbstractItemNumbers(group.items);
 
       let subWorkTotal = 0;
-      let serialNo = 0;
-      let groupLetter = 0;
-      let serialItemId = null;
-      const groupSuffix = (n) => {
-        let value = n;
-        let suffix = "";
-        while (value > 0) {
-          value -= 1;
-          suffix = String.fromCharCode(97 + (value % 26)) + suffix;
-          value = Math.floor(value / 26);
-        }
-        return suffix;
-      };
 
       group.items.forEach((item) => {
         const isParent = Boolean(item.isParentHeading);
@@ -6106,25 +6357,10 @@ app.get("/api/generate-report", async (req, res) => {
         const quantity = isParent ? 0 : Number(item.Quantity || 0);
         const rate = isParent ? 0 : Number(item.FinalRate || 0);
         const amount = Math.round(quantity * rate);
-        if (!isParent) {
-          subWorkTotal += amount;
-          if (!isGroupLine) {
-            serialNo += 1;
-            groupLetter = 0;
-            serialItemId = item.ItemId;
-          } else if (item.ItemId !== serialItemId) {
-            serialNo += 1;
-            groupLetter = 1;
-            serialItemId = item.ItemId;
-          } else {
-            groupLetter += 1;
-          }
-        }
+        if (!isParent) subWorkTotal += amount;
 
-        const groupLabel = isGroupLine
-          ? `${serialNo}-${groupSuffix(groupLetter)}`
-          : "";
-        const serialText = isParent || isGroupLine ? "" : String(serialNo);
+        const groupLabel = isGroupLine ? item.groupLabel || "" : "";
+        const serialText = item.reportSerial || "";
         const ssrItemNoText = isGroupLine
           ? ""
           : item.DisplayItemNo || item.ItemNumber || "";
@@ -6248,6 +6484,378 @@ app.get("/api/generate-report", async (req, res) => {
     console.error(err);
     if (!res.headersSent) {
       res.status(500).json({ message: err.message });
+    }
+  }
+});
+
+function rupeeSpellSheet(workbook) {
+  const existing = workbook.getWorksheet("Spell");
+  if (existing) return existing;
+  const sheet = workbook.addWorksheet("Spell", { state: "veryHidden" });
+  const ones = [
+    "",
+    "One",
+    "Two",
+    "Three",
+    "Four",
+    "Five",
+    "Six",
+    "Seven",
+    "Eight",
+    "Nine",
+    "Ten",
+    "Eleven",
+    "Twelve",
+    "Thirteen",
+    "Fourteen",
+    "Fifteen",
+    "Sixteen",
+    "Seventeen",
+    "Eighteen",
+    "Nineteen",
+  ];
+  const tens = [
+    "",
+    "",
+    "Twenty",
+    "Thirty",
+    "Forty",
+    "Fifty",
+    "Sixty",
+    "Seventy",
+    "Eighty",
+    "Ninety",
+  ];
+  for (let n = 0; n < 100; n += 1) {
+    let word = "";
+    if (n > 0 && n < 20) word = ones[n];
+    else if (n >= 20) {
+      word = tens[Math.floor(n / 10)];
+      if (n % 10) word += ` ${ones[n % 10]}`;
+    }
+    sheet.getCell(n + 1, 2).value = word;
+  }
+  return sheet;
+}
+
+function rupeesInWordsFormula(totalCell) {
+  const two = (expr) =>
+    `IF((${expr})=0,"",INDEX(Spell!$B$1:$B$100,(${expr})+1))`;
+  const three = (expr) => {
+    const hundreds = `INT((${expr})/100)`;
+    const rest = `MOD((${expr}),100)`;
+    return `TRIM(IF(${hundreds}=0,"",INDEX(Spell!$B$1:$B$100,${hundreds}+1)&" Hundred ")&${two(rest)})`;
+  };
+  const rounded = `ROUND(${totalCell},0)`;
+  const crore = `INT((${rounded})/10000000)`;
+  const lakh = `INT(MOD((${rounded}),10000000)/100000)`;
+  const thousand = `INT(MOD((${rounded}),100000)/1000)`;
+  const rest = `MOD((${rounded}),1000)`;
+  return (
+    `="Rupees "&IF(${rounded}=0,"Zero",TRIM(` +
+    `IF(${crore}=0,"",${three(crore)}&" Crore ")&` +
+    `IF(${lakh}=0,"",${two(lakh)}&" Lakh ")&` +
+    `IF(${thousand}=0,"",${two(thousand)}&" Thousand ")&` +
+    `IF(${rest}=0,"",${three(rest)})))&" Only"`
+  );
+}
+
+app.get("/api/export-estimate-excel", async (req, res) => {
+  const projectId = req.query.projectId || req.query.workId;
+  if (!projectId) {
+    return res.status(400).json({ message: "projectId is required." });
+  }
+
+  try {
+    const report = await loadAbstractReportModel(projectId, "all");
+    if (report.error) {
+      return res
+        .status(report.error.status)
+        .json({ message: report.error.message });
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "SoftChariot Estimation";
+    const recapSheet = workbook.addWorksheet("RecapSheet");
+    const recapLines = [];
+
+    const sheet = workbook.addWorksheet("Abstract");
+    sheet.columns = [
+      { width: 12 },
+      { width: 18 },
+      { width: 72 },
+      { width: 14 },
+      { width: 16 },
+      { width: 14 },
+      { width: 16 },
+      { width: 24 },
+    ];
+
+    const mergeFirstSeven = (row) => {
+      sheet.mergeCells(row.number, 1, row.number, 7);
+    };
+
+    sheet.addRow(["Abstract"]);
+    const titleRow = sheet.getRow(1);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { horizontal: "center", vertical: "middle" };
+    mergeFirstSeven(titleRow);
+    sheet.addRow([`Name of Work :   ${report.projectName}`]);
+    const workNameRow = sheet.getRow(2);
+    workNameRow.font = { bold: true, size: 12 };
+    workNameRow.alignment = { vertical: "middle", wrapText: true };
+    mergeFirstSeven(workNameRow);
+    sheet.addRow([]);
+    const headerRow = sheet.addRow([
+      "Item No",
+      "SSR Item No",
+      "Description",
+      "Quantity",
+      "Rate",
+      "Unit",
+      "Amount",
+      "Remarks",
+    ]);
+    headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    headerRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1F4E79" },
+    };
+    headerRow.alignment = { vertical: "middle", wrapText: true };
+
+    const writeRow = (
+      values,
+      { bold = false, fill = null, mergeTitle = false, justifyDescription = false, subWorkHeader = false } = {},
+    ) => {
+      const row = sheet.addRow(values);
+      row.alignment = { vertical: "top", wrapText: true };
+      if (bold) row.font = { bold: true };
+      if (fill) {
+        row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+      }
+      if (mergeTitle) mergeFirstSeven(row);
+      if (subWorkHeader) {
+        sheet.mergeCells(row.number, 1, row.number, 2);
+        row.getCell(1).alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+        row.getCell(3).alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true,
+        };
+      }
+      if (justifyDescription) {
+        row.getCell(3).alignment = {
+          horizontal: "justify",
+          vertical: "top",
+          wrapText: true,
+        };
+      }
+      const lines = values.reduce((count, value) => {
+        const text = value == null ? "" : String(value);
+        return Math.max(count, text.split("\n").length);
+      }, 1);
+      row.height = Math.min(160, Math.max(18, lines * 15));
+      return row;
+    };
+
+    let nextItemNo = 0;
+    report.subWorkGroups.forEach((group, groupIdx) => {
+      nextItemNo = assignAbstractItemNumbers(group.items, nextItemNo);
+      const subWorkHeaderRow = writeRow(
+        [
+          `${groupIdx + 1}. NAME OF SUB WORK --`,
+          "",
+          group.subWorkName,
+          "",
+          "",
+          "",
+          "",
+          "",
+        ],
+        { bold: true, fill: "FFE7EEF7", subWorkHeader: true },
+      );
+
+      let amountStart = null;
+      let amountEnd = null;
+      for (const item of group.items) {
+        const isParent = Boolean(item.isParentHeading);
+        const isGroupLine = !isParent && item.GroupId != null;
+        const quantity = isParent ? 0 : Number(item.Quantity || 0);
+        const rate = isParent ? 0 : Number(item.FinalRate || 0);
+        const qtyValue = Number(quantity.toFixed(3));
+        const rateValue = Number(rate.toFixed(2));
+
+        const groupLabel = isGroupLine ? item.groupLabel || "" : "";
+        const rateString = String(item.RateString || "").trim();
+        const description = isGroupLine
+          ? [groupLabel, String(item.GroupName || "Measurement Group").trim()]
+              .filter(Boolean)
+              .join("  ")
+          : String(item.ItemDescription || "").trim();
+
+        const itemRow = writeRow(
+          [
+            item.reportSerial || "",
+            isGroupLine ? "" : item.DisplayItemNo || item.ItemNumber || "",
+            description,
+            isParent ? "" : qtyValue,
+            isParent ? "" : rateValue,
+            isParent ? "" : item.UnitShortName || "",
+            "",
+            "",
+          ],
+          { bold: isParent, justifyDescription: true },
+        );
+        if (!isParent) {
+          const rowNumber = itemRow.number;
+          itemRow.getCell(4).numFmt = "0.000";
+          itemRow.getCell(5).numFmt = '"₹" #,##0.00';
+          itemRow.getCell(7).value = {
+            formula: `D${rowNumber}*E${rowNumber}`,
+          };
+          itemRow.getCell(7).numFmt = '"₹" #,##0.00';
+          if (amountStart == null) amountStart = rowNumber;
+          amountEnd = rowNumber;
+        }
+        if (!isParent && rateString) {
+          writeRow(
+            ["", "", rateString, "", "", "", "", ""],
+            { justifyDescription: true },
+          );
+        }
+      }
+
+      const extraAmountRow = sheet.addRow([]);
+      const totalRow = writeRow(
+        ["", "", "Total For Sub Work", "", "", "", "", ""],
+        { bold: true, justifyDescription: true },
+      );
+      if (amountStart != null) {
+        totalRow.getCell(7).value = {
+          formula: `SUM(G${amountStart}:G${extraAmountRow.number})`,
+        };
+        totalRow.getCell(7).numFmt = '"₹" #,##0.00';
+      }
+      recapLines.push({
+        nameRow: subWorkHeaderRow.number,
+        totalRow: totalRow.number,
+      });
+      const wordsRow = writeRow(
+        ["", "", "", "", "", "", "", ""],
+        { justifyDescription: false },
+      );
+      wordsRow.getCell(3).value = {
+        formula: rupeesInWordsFormula(`G${totalRow.number}`),
+      };
+      wordsRow.getCell(3).alignment = {
+        horizontal: "left",
+        vertical: "top",
+        wrapText: true,
+      };
+      sheet.addRow([]);
+    });
+
+    recapSheet.columns = [
+      { width: 12 },
+      { width: 42 },
+      { width: 18 },
+      { width: 24 },
+    ];
+    recapSheet.mergeCells("A1:C1");
+    const recapTitle = recapSheet.getCell("A1");
+    recapTitle.value = "Recapitulation Sheet";
+    recapTitle.font = { bold: true, size: 14, underline: true };
+    recapTitle.alignment = { horizontal: "center", vertical: "middle" };
+    recapSheet.getRow(1).height = 22;
+
+    recapSheet.mergeCells("A2:C2");
+    const recapWorkName = recapSheet.getCell("A2");
+    recapWorkName.value = { formula: "Abstract!A2" };
+    recapWorkName.font = { bold: true, size: 12 };
+    recapWorkName.alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+
+    const recapHeader = recapSheet.getRow(4);
+    ["S.No.", "Name Of Sub Work", "Amount", "Remarks"].forEach(
+      (heading, index) => {
+        const cell = recapHeader.getCell(index + 1);
+        cell.value = heading;
+        cell.font = { bold: true };
+        cell.alignment = { horizontal: "left", vertical: "middle" };
+      },
+    );
+
+    recapLines.forEach((line, index) => {
+      const row = recapSheet.getRow(5 + index);
+      row.getCell(1).value = index + 1;
+      row.getCell(2).value = { formula: `Abstract!C${line.nameRow}` };
+      row.getCell(3).value = { formula: `Abstract!G${line.totalRow}` };
+      row.getCell(3).numFmt = '"₹" #,##0.00';
+      row.getCell(4).value = "";
+    });
+
+    const recapTotalRowNumber = 5 + recapLines.length + 1;
+    const recapTotal = recapSheet.getRow(recapTotalRowNumber);
+    recapTotal.getCell(2).value = "Total";
+    recapTotal.getCell(2).font = { bold: true };
+    recapTotal.getCell(2).alignment = { horizontal: "right", vertical: "middle" };
+    if (recapLines.length > 0) {
+      const firstAmountRow = 5;
+      const lastAmountRow = 5 + recapLines.length;
+      recapTotal.getCell(3).value = {
+        formula: `SUM(C${firstAmountRow}:C${lastAmountRow})`,
+      };
+      recapTotal.getCell(3).numFmt = '"₹" #,##0.00';
+      recapTotal.getCell(3).font = { bold: true };
+    }
+
+    const wordsLabelRow = recapTotalRowNumber + 1;
+    const wordsRowNumber = recapTotalRowNumber + 2;
+    const wordsLabel = recapSheet.getCell(`B${wordsLabelRow}`);
+    wordsLabel.value = "Total in Words";
+    wordsLabel.font = { bold: true };
+    wordsLabel.alignment = { horizontal: "left", vertical: "middle" };
+
+    recapSheet.mergeCells(`B${wordsRowNumber}:C${wordsRowNumber}`);
+    const wordsCell = recapSheet.getCell(`B${wordsRowNumber}`);
+    wordsCell.value = {
+      formula: rupeesInWordsFormula(`C${recapTotalRowNumber}`).slice(1),
+    };
+    wordsCell.font = { italic: true };
+    wordsCell.alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+    recapSheet.getRow(wordsRowNumber).height = 32;
+
+    workbook.addWorksheet("Measurements");
+    rupeeSpellSheet(workbook);
+
+    const workId = Number(projectId);
+    const fileName = `EstimateFor${workId}On-${estimateExportStamp()}.xlsx`;
+    const buffer = await workbook.xlsx.writeBuffer();
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileName}"`,
+    );
+    return res.send(Buffer.from(buffer));
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) {
+      return res.status(500).json({ message: err.message });
     }
   }
 });
