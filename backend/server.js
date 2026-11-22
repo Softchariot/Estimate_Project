@@ -6538,6 +6538,177 @@ function rupeeSpellSheet(workbook) {
   return sheet;
 }
 
+function writeMeasurementSheet(measureSheet, abstractSheet, sections) {
+  measureSheet.columns = [
+    { width: 10 },
+    { width: 15 },
+    { width: 50 },
+    { width: 7 },
+    { width: 11 },
+    { width: 11 },
+    { width: 11 },
+    { width: 15 },
+  ];
+  measureSheet.getColumn(2).alignment = { wrapText: true, vertical: "top" };
+
+  const yellow = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFFFFF00" },
+  };
+  const lightBlue = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFBDD7EE" },
+  };
+  const blue = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF5B9BD5" },
+  };
+  const orange = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFFFC000" },
+  };
+  const paint = (row, from, to, fill) => {
+    for (let col = from; col <= to; col += 1) {
+      row.getCell(col).fill = fill;
+    }
+  };
+
+  measureSheet.mergeCells("A1:H1");
+  const title = measureSheet.getCell("A1");
+  title.value = "Measurement Sheet";
+  title.font = { bold: true, size: 16 };
+  title.alignment = { horizontal: "center", vertical: "middle" };
+  measureSheet.getRow(1).height = 22;
+
+  measureSheet.mergeCells("A2:H2");
+  const workName = measureSheet.getCell("A2");
+  workName.value = { formula: "Abstract!A2" };
+  workName.font = { bold: true, size: 12 };
+  workName.alignment = { horizontal: "left", vertical: "middle", wrapText: true };
+  measureSheet.getRow(2).height = 20;
+
+  const header = measureSheet.getRow(4);
+  [
+    { col: 1, formula: "Abstract!A4" },
+    { col: 2, formula: "Abstract!B4" },
+    { col: 3, formula: "Abstract!C4" },
+    { col: 4, text: "Nos." },
+    { col: 5, text: "L." },
+    { col: 6, text: "B." },
+    { col: 7, text: "D." },
+    { col: 8, text: "Quantity" },
+  ].forEach((entry) => {
+    const cell = header.getCell(entry.col);
+    cell.value = entry.formula ? { formula: entry.formula } : entry.text;
+    cell.font = { bold: true };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  });
+  header.height = 20;
+
+  let cursor = 5;
+  const addRow = () => {
+    const row = measureSheet.getRow(cursor);
+    cursor += 1;
+    return row;
+  };
+
+  sections.forEach((section) => {
+    const subRow = addRow();
+    measureSheet.mergeCells(subRow.number, 1, subRow.number, 2);
+    measureSheet.mergeCells(subRow.number, 3, subRow.number, 8);
+    subRow.getCell(1).value = { formula: `Abstract!A${section.headerRow}` };
+    subRow.getCell(3).value = { formula: `Abstract!C${section.headerRow}` };
+    subRow.getCell(1).font = { bold: true };
+    subRow.getCell(3).font = { bold: true };
+    subRow.getCell(1).alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+    subRow.getCell(3).alignment = {
+      horizontal: "left",
+      vertical: "middle",
+      wrapText: true,
+    };
+    subRow.height = 20;
+
+    section.entries.forEach((entry) => {
+      const itemRow = addRow();
+      measureSheet.mergeCells(itemRow.number, 3, itemRow.number, 8);
+      itemRow.getCell(1).value = { formula: `Abstract!A${entry.row}` };
+      itemRow.getCell(2).value = { formula: `Abstract!B${entry.row}` };
+      itemRow.getCell(3).value = { formula: `Abstract!C${entry.row}` };
+      itemRow.getCell(3).font = { bold: true };
+      itemRow.getCell(3).alignment = {
+        horizontal: "justify",
+        vertical: "top",
+        wrapText: true,
+      };
+      itemRow.height = Math.min(120, Math.max(18, entry.height || 18));
+
+      if (!entry.measured) return;
+
+      const measureRows = [];
+      for (let i = 0; i < 3; i += 1) {
+        const blank = addRow();
+        paint(blank, 1, 8, yellow);
+        for (let col = 5; col <= 8; col += 1) {
+          blank.getCell(col).numFmt = "0.000";
+        }
+        blank.getCell(8).value = {
+          formula: `PRODUCT(D${blank.number}:G${blank.number})`,
+        };
+        measureRows.push(blank.number);
+        blank.height = 18;
+      }
+
+      const total = addRow();
+      measureSheet.mergeCells(total.number, 4, total.number, 7);
+      total.getCell(4).value = "Total for this Item: ";
+      total.getCell(4).font = { bold: true };
+      total.getCell(4).alignment = { horizontal: "right", vertical: "middle" };
+      total.getCell(8).value = {
+        formula: `SUM(H${measureRows[0]}:H${measureRows[2]})`,
+      };
+      total.getCell(8).numFmt = "0.000";
+      total.getCell(8).fill = lightBlue;
+      total.height = 18;
+
+      const say = addRow();
+      measureSheet.mergeCells(say.number, 4, say.number, 7);
+      say.getCell(4).value = "Say: ";
+      say.getCell(4).font = { bold: true };
+      say.getCell(4).alignment = { horizontal: "right", vertical: "middle" };
+      say.getCell(8).value = {
+        formula: `MROUND(H${total.number},0.5)`,
+      };
+      say.getCell(8).numFmt = "0.000";
+      say.getCell(8).fill = blue;
+      say.height = 18;
+
+      const unit = addRow();
+      unit.getCell(7).value = "Unit:";
+      unit.getCell(7).font = { bold: true };
+      unit.getCell(7).alignment = { horizontal: "right", vertical: "middle" };
+      unit.getCell(8).value = { formula: `Abstract!F${entry.row}` };
+      unit.height = 18;
+
+      const gap = addRow();
+      paint(gap, 1, 8, orange);
+      gap.height = 18;
+
+      const abstractQty = abstractSheet.getCell(entry.row, 4);
+      abstractQty.value = { formula: `Measurements!H${say.number}` };
+      abstractQty.numFmt = "0.000";
+      abstractQty.fill = blue;
+    });
+  });
+}
+
 function rupeesInWordsFormula(totalCell) {
   const two = (expr) =>
     `IF((${expr})=0,"",INDEX(Spell!$B$1:$B$100,(${expr})+1))`;
@@ -6664,6 +6835,7 @@ app.get("/api/export-estimate-excel", async (req, res) => {
     };
 
     let nextItemNo = 0;
+    const measurementSections = [];
     report.subWorkGroups.forEach((group, groupIdx) => {
       nextItemNo = assignAbstractItemNumbers(group.items, nextItemNo);
       const subWorkHeaderRow = writeRow(
@@ -6679,6 +6851,11 @@ app.get("/api/export-estimate-excel", async (req, res) => {
         ],
         { bold: true, fill: "FFE7EEF7", subWorkHeader: true },
       );
+      const measurementSection = {
+        headerRow: subWorkHeaderRow.number,
+        entries: [],
+      };
+      measurementSections.push(measurementSection);
 
       let amountStart = null;
       let amountEnd = null;
@@ -6711,6 +6888,11 @@ app.get("/api/export-estimate-excel", async (req, res) => {
           ],
           { bold: isParent, justifyDescription: true },
         );
+        measurementSection.entries.push({
+          row: itemRow.number,
+          measured: !isParent,
+          height: itemRow.height,
+        });
         if (!isParent) {
           const rowNumber = itemRow.number;
           itemRow.getCell(4).numFmt = "0.000";
@@ -6837,11 +7019,24 @@ app.get("/api/export-estimate-excel", async (req, res) => {
     };
     recapSheet.getRow(wordsRowNumber).height = 32;
 
-    workbook.addWorksheet("Measurements");
+    const measureSheet = workbook.addWorksheet("Measurements");
+    writeMeasurementSheet(measureSheet, sheet, measurementSections);
     rupeeSpellSheet(workbook);
 
     const workId = Number(projectId);
-    const fileName = `EstimateFor${workId}On-${estimateExportStamp()}.xlsx`;
+    const orgResult = await pool.query(
+      `SELECT o."OrgCode"
+       FROM "MasterWork" w
+       LEFT JOIN "MasterUser" u ON u."UserId" = w."UserId"
+       LEFT JOIN "MasterOrganization" o ON o."OrganizationId" = u."OrganizationId"
+       WHERE w."MasterWorkId" = $1`,
+      [workId],
+    );
+    const orgCode = String(orgResult.rows[0]?.OrgCode || "")
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, "")
+      .replace(/\s+/g, "");
+    const fileName = `Estimate No-${workId}-${orgCode}-${estimateExportStamp()}.xlsx`;
     const buffer = await workbook.xlsx.writeBuffer();
     res.setHeader(
       "Content-Type",
