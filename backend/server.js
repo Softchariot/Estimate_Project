@@ -1089,7 +1089,8 @@ app.get("/api/ssr-items-load", async (req, res) => {
       const escaped = searchText.replace(/[\\%_]/g, "\\$&");
       params.push(`%${escaped}%`);
       query += ` AND (
-        i."ItemNumber" ILIKE $${params.length} ESCAPE '\\'
+        COALESCE(i."ItemCode", '') ILIKE $${params.length} ESCAPE '\\'
+        OR i."ItemNumber" ILIKE $${params.length} ESCAPE '\\'
         OR COALESCE(i."ItemDescription", '') ILIKE $${params.length} ESCAPE '\\'
       )`;
     }
@@ -2071,7 +2072,115 @@ app.post("/api/insert-work", async (req, res) => {
   }
 });
 
-async function assertSuperAdminActor(userId) {
+app.post("/api/copy-work-abstract", async (req, res) => {
+  const sourceWorkId = Number(req.body?.workId || req.body?.projectId);
+  const userId = Number(req.body?.userId);
+  if (!sourceWorkId) {
+    return res.status(400).json({ message: "Work is required." });
+  }
+  if (!userId) {
+    return res.status(400).json({ message: "User is required." });
+  }
+
+  try {
+    await assertSuperAdminActor(
+      userId,
+      "Copy Abstract is available to SuperAdmin only.",
+    );
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const source = await client.query(
+      `SELECT "MasterWorkId", "WorkName", "ProjectId"
+       FROM "MasterWork"
+       WHERE "MasterWorkId" = $1`,
+      [sourceWorkId],
+    );
+    if (!source.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Selected Work was not found." });
+    }
+
+    const sourceName = String(source.rows[0].WorkName || "").trim();
+    const copyName = `Copy Of ${sourceName}`.trim();
+    const created = await client.query(
+      `INSERT INTO "MasterWork"
+        ("WorkName", "ProjectId", "UserId", "Remarks", "MarkForDeletion", "CreationDate")
+       VALUES ($1, $2, $3, NULL, false, CURRENT_DATE)
+       RETURNING "MasterWorkId", "WorkName"`,
+      [copyName, source.rows[0].ProjectId ?? null, userId],
+    );
+    const newWorkId = Number(created.rows[0].MasterWorkId);
+
+    const subWorks = await client.query(
+      `SELECT "SubWorkId", "SubWorkName", "Sequence"
+       FROM "MasterSubWork"
+       WHERE "WorkId" = $1
+         AND COALESCE("MarkForDeletion", false) = false
+       ORDER BY COALESCE("Sequence", 999999), "SubWorkId"`,
+      [sourceWorkId],
+    );
+    const oldSubIds = [];
+    const newSubIds = [];
+    for (const subWork of subWorks.rows) {
+      const inserted = await client.query(
+        `INSERT INTO "MasterSubWork"
+          ("WorkId", "SubWorkName", "Sequence", "MarkForDeletion")
+         VALUES ($1, $2, $3, false)
+         RETURNING "SubWorkId"`,
+        [newWorkId, subWork.SubWorkName, subWork.Sequence],
+      );
+      oldSubIds.push(Number(subWork.SubWorkId));
+      newSubIds.push(Number(inserted.rows[0].SubWorkId));
+    }
+
+    let abstractsCopied = 0;
+    if (oldSubIds.length > 0) {
+      const copied = await client.query(
+        `INSERT INTO "WorkAbstract"
+          ("ProjectId", "WorkId", "SubWorkId", "ItemId", "Sequence",
+           "IsRA", "FinalRate", "Comment", "GroupId",
+           "GroupPercentage", "GroupSequence")
+         SELECT wa."ProjectId", $1, mapped.new_id, wa."ItemId", wa."Sequence",
+                COALESCE(wa."IsRA", false), i."CompletedRate",
+                NULL, NULL, NULL, NULL
+         FROM "WorkAbstract" wa
+         JOIN (
+           SELECT * FROM unnest($2::int[], $3::int[]) AS mapped(old_id, new_id)
+         ) mapped ON mapped.old_id = wa."SubWorkId"
+         LEFT JOIN "MasterItem" i ON i."ItemId" = wa."ItemId"
+         WHERE wa."WorkId" = $4`,
+        [newWorkId, oldSubIds, newSubIds, sourceWorkId],
+      );
+      abstractsCopied = copied.rowCount || 0;
+    }
+
+    await client.query("COMMIT");
+    return res.status(201).json({
+      message: "Abstract Copy of Selected Work successfully created",
+      workId: newWorkId,
+      workName: created.rows[0].WorkName,
+      subWorks: newSubIds.length,
+      abstracts: abstractsCopied,
+    });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore */
+    }
+    console.error(err);
+    return res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+async function assertSuperAdminActor(userId, deniedMessage) {
   const actorId = Number(userId);
   if (!actorId) {
     const error = new Error("User is required.");
@@ -2092,7 +2201,9 @@ async function assertSuperAdminActor(userId) {
     .toLowerCase()
     .replace(/\s+/g, "");
   if (category !== "superadmin") {
-    const error = new Error("Only SuperAdmin can delete a work.");
+    const error = new Error(
+      deniedMessage || "Only SuperAdmin can delete a work.",
+    );
     error.status = 403;
     throw error;
   }
@@ -7520,12 +7631,6 @@ app.get("/api/generate-recap-report", async (req, res) => {
 
     const totalAmount = subWorkRows.reduce((sum, r) => sum + r.amount, 0);
     const roundOff = Math.round(totalAmount);
-
-    if (totalAmount === 0) {
-      return res.status(404).json({
-        message: "No measured amounts found for Sub Works under this Work.",
-      });
-    }
 
     // ── Stream the PDF back as a download ──
     res.setHeader("Content-Type", "application/pdf");

@@ -26,7 +26,7 @@ import UserProfileModal from "../components/UserProfileModal";
 const SESSION_KEY = "werms_user";
 
 const API_BASE = "https://estimate-project-omega.vercel.app";
-//const API_BASE = "http://localhost:4000";
+// const API_BASE = "http://localhost:4000";
 
 const SESSION_IDLE_SECONDS = 300;
 const SESSION_WARNING_SECONDS = 285;
@@ -60,6 +60,40 @@ const theme = {
     display: "'IBM Plex Sans', 'Segoe UI', Arial, sans-serif",
     mono: "'IBM Plex Mono', 'SFMono-Regular', Menlo, monospace",
   },
+};
+
+const extraItemTones = {
+  item: {
+    panel: "#EAF4FF",
+    panelBorder: "#C9DFF5",
+    line: "#FFFFFF",
+    lineBorder: "#D5E6F6",
+  },
+  material: {
+    panel: "#E7F7F2",
+    panelBorder: "#C5E6DA",
+    line: "#FFFFFF",
+    lineBorder: "#D2EDE4",
+  },
+  labour: {
+    panel: "#F3F0FF",
+    panelBorder: "#DDD4F6",
+    line: "#FFFFFF",
+    lineBorder: "#E6DFF8",
+  },
+  machinery: {
+    panel: "#FFF4EA",
+    panelBorder: "#F3DCC4",
+    line: "#FFFFFF",
+    lineBorder: "#F6E6D4",
+  },
+};
+
+const extraItemFormShellStyle = {
+  background: "transparent",
+  border: "none",
+  padding: 0,
+  marginBottom: 0,
 };
 
 const superAdminMenu = [
@@ -120,7 +154,7 @@ const superAdminMenu = [
 const allUsersMenu = [
   {
     id: "item-master",
-    label: "NON DSR Items",
+    label: "NON SSR Items",
     status: "active",
     icon: "📑",
   },
@@ -538,6 +572,73 @@ function DescriptionPreview({ text, emphasize = false }) {
   );
 }
 
+function EstimateWaitOverlay({ message }) {
+  if (!message) return null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 4500,
+        background: "rgba(15, 42, 68, 0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+        cursor: "wait",
+      }}
+    >
+      <style>{`
+        @keyframes werms-hourglass {
+          0%, 40% { transform: rotate(0deg); }
+          50%, 90% { transform: rotate(180deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 380,
+          background: "#fff",
+          borderRadius: 12,
+          border: "1px solid #E1DCCC",
+          boxShadow: "0 16px 48px rgba(19, 35, 57, 0.28)",
+          padding: "28px 28px 24px",
+          textAlign: "center",
+        }}
+      >
+        <div
+          aria-hidden="true"
+          style={{
+            fontSize: 48,
+            lineHeight: 1,
+            marginBottom: 12,
+            animation: "werms-hourglass 1.6s ease-in-out infinite",
+          }}
+        >
+          ⌛
+        </div>
+        <div
+          style={{
+            fontWeight: 700,
+            fontSize: 18,
+            color: "#132339",
+            marginBottom: 6,
+          }}
+        >
+          Please wait
+        </div>
+        <div style={{ fontSize: 14, color: "#5B6B7C", lineHeight: 1.45 }}>
+          {message}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FullDescriptionTip({ tip }) {
   if (!tip?.text) return null;
   return (
@@ -811,7 +912,7 @@ function Card({ eyebrow, title, subtitle, children, style }) {
   );
 }
 
-function FormShell({ children, onSubmit }) {
+function FormShell({ children, onSubmit, style }) {
   return (
     <form
       onSubmit={onSubmit}
@@ -821,6 +922,7 @@ function FormShell({ children, onSubmit }) {
         borderRadius: 10,
         padding: 18,
         marginBottom: 22,
+        ...style,
       }}
     >
       {children}
@@ -1191,19 +1293,21 @@ function ExtraItemDetailEntry({
   saving = false,
   editing = false,
   onCancel,
+  tone = "material",
 }) {
   const [listOpen, setListOpen] = useState(false);
   const [hoverTip, setHoverTip] = useState(null);
   const locked = pickerLocked || listOpen;
+  const colors = extraItemTones[tone] || extraItemTones.material;
   const detailGrid =
     "minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(120px, 0.7fr) minmax(90px, 0.5fr) auto";
 
   return (
     <div
       style={{
-        background: "#D9D3C3",
-        border: "1px solid #C4BCA8",
-        borderRadius: 10,
+        background: colors.panel,
+        border: `1px solid ${colors.panelBorder}`,
+        borderRadius: 12,
         padding: 16,
       }}
     >
@@ -1250,9 +1354,9 @@ function ExtraItemDetailEntry({
               gap: 12,
               alignItems: "end",
               padding: 12,
-              border: "1px solid #C4BCA8",
+              border: `1px solid ${colors.lineBorder}`,
               borderRadius: 8,
-              background: "#E8E3D4",
+              background: colors.line,
             }}
           >
             <Field label={index === 0 ? "Description" : `Description ${index + 1}`}>
@@ -1390,6 +1494,7 @@ function ItemComponentsPanel({
   apiBase,
   userId,
   itemId,
+  itemDescription = "",
   regionId,
   regionIds,
   canEdit,
@@ -1843,13 +1948,22 @@ function ItemComponentsPanel({
     <Card
       eyebrow="MasterRAComponent"
       title={
-        editingId
-          ? `Edit item component #${editingId}`
-          : itemId
-            ? `Item Component for item #${itemId}`
-            : "Item Component"
+        editingId ? (
+          `Edit item component #${editingId}`
+        ) : itemId ? (
+          <>
+            {`Item Component for item #${itemId}`}
+            {String(itemDescription || "").trim() ? (
+              <span style={{ fontStyle: "italic", fontWeight: 500 }}>
+                {` ${String(itemDescription).trim()}`}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          "Item Component"
+        )
       }
-      subtitle="Select the Item from Item List by searching on Item Code or Text"
+      subtitle="Enter Below The Item / Material / Labour / Machinery Components for this Item"
     >
       {!itemId ? (
         <div style={{ color: theme.colors.inkSoft, fontSize: 14 }}>
@@ -1934,13 +2048,16 @@ function ItemComponentsPanel({
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <FormShell onSubmit={onSubmit}>
+            <FormShell
+              onSubmit={onSubmit}
+              style={detailEntry ? extraItemFormShellStyle : undefined}
+            >
               {detailEntry ? (
                 <div
                   style={{
-                    background: "#D9D3C3",
-                    border: "1px solid #C4BCA8",
-                    borderRadius: 10,
+                    background: extraItemTones.item.panel,
+                    border: `1px solid ${extraItemTones.item.panelBorder}`,
+                    borderRadius: 12,
                     padding: 16,
                   }}
                 >
@@ -2004,9 +2121,9 @@ function ItemComponentsPanel({
                           gap: 12,
                           alignItems: "end",
                           padding: 12,
-                          border: "1px solid #C4BCA8",
+                          border: `1px solid ${extraItemTones.item.lineBorder}`,
                           borderRadius: 8,
-                          background: "#E8E3D4",
+                          background: extraItemTones.item.line,
                         }}
                       >
                         <Field label={index === 0 ? "Description" : `Description ${index + 1}`}>
@@ -2919,9 +3036,7 @@ function LabourComponentsPanel({
       title={
         editingLabourComponentId
           ? `Edit labour component #${editingLabourComponentId}`
-          : itemId
-            ? `Labour components for item #${itemId}`
-            : "Labour components"
+          : "Enter Labour Components"
       }
       subtitle="Select the Labour from Labour List by searching on Item Code or Text"
     >
@@ -3009,9 +3124,13 @@ function LabourComponentsPanel({
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <FormShell onSubmit={onLabourSubmit}>
+            <FormShell
+              onSubmit={onLabourSubmit}
+              style={detailEntry ? extraItemFormShellStyle : undefined}
+            >
               {detailEntry ? (
                 <ExtraItemDetailEntry
+                  tone="labour"
                   inputStyle={inputStyle}
                   readonlyInputStyle={readonlyInputStyle}
                   search={labourPickerSearch}
@@ -3787,9 +3906,7 @@ function MachineryComponentsPanel({
       title={
         editingMachineryComponentId
           ? `Edit machinery component #${editingMachineryComponentId}`
-          : itemId
-            ? `Machinery components for item #${itemId}`
-            : "Machinery components"
+          : "Enter Machinery Components"
       }
       subtitle="Select the Machinery from Machinery List by searching on Item Code or Text"
     >
@@ -3879,9 +3996,13 @@ function MachineryComponentsPanel({
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <FormShell onSubmit={onMachinerySubmit}>
+            <FormShell
+              onSubmit={onMachinerySubmit}
+              style={detailEntry ? extraItemFormShellStyle : undefined}
+            >
               {detailEntry ? (
                 <ExtraItemDetailEntry
+                  tone="machinery"
                   inputStyle={inputStyle}
                   readonlyInputStyle={readonlyInputStyle}
                   search={machineryPickerSearch}
@@ -4824,6 +4945,8 @@ export default function HomePage() {
   const [materialItemsViewed, setMaterialItemsViewed] = useState(false);
   const [materialRALogic, setMaterialRALogic] = useState("CPWD");
   const [selectedMaterialItemId, setSelectedMaterialItemId] = useState(null);
+  const [selectedMaterialItemDescription, setSelectedMaterialItemDescription] =
+    useState("");
   const [materialMasterList, setMaterialMasterList] = useState([]);
   const [materialPickerSearch, setMaterialPickerSearch] = useState("");
   const [materialPickerOpenIds, setMaterialPickerOpenIds] = useState(
@@ -4858,6 +4981,7 @@ export default function HomePage() {
   const [subCategories, setSubCategories] = useState([]);
   const [subCategoryItemId, setSubCategoryItemId] = useState("");
   const [itemList, setItemList] = useState([]);
+  const [estimationItemSearch, setEstimationItemSearch] = useState("");
   const [projects, setProjects] = useState([]);
   const [projectMasterList, setProjectMasterList] = useState([]);
   const [projectForm, setProjectForm] = useState(initialProjectForm);
@@ -4982,6 +5106,9 @@ export default function HomePage() {
   const [workForm, setWorkForm] = useState(initialWorkForm);
   const [worksList, setWorksList] = useState([]);
   const [estimationWorksList, setEstimationWorksList] = useState([]);
+  const [estimationFilterOrgId, setEstimationFilterOrgId] = useState("");
+  const [estimationFilterUserId, setEstimationFilterUserId] = useState("");
+  const [estimationFilterUsers, setEstimationFilterUsers] = useState([]);
   const [workMasterList, setWorkMasterList] = useState([]);
   const [loadingWorks, setLoadingWorks] = useState(false);
   const [savingWork, setSavingWork] = useState(false);
@@ -5587,7 +5714,11 @@ export default function HomePage() {
       });
       const ownWorks = res.status === 200 ? res.data.data || [] : [];
       setWorksList(ownWorks);
-      if (isOrgAdminUser(user)) {
+      if (isSuperAdminUser(user)) {
+        if (estimationFilterUserId) {
+          await loadEstimationWorksForUser(estimationFilterUserId);
+        }
+      } else if (isOrgAdminUser(user)) {
         const orgRes = await axios.get(`${API_BASE}/api/load-works`, {
           params: {
             userId: user.UserId,
@@ -5607,6 +5738,47 @@ export default function HomePage() {
       setMessage(`Work load failed: ${error.message}`);
     } finally {
       setLoadingWorks(false);
+    }
+  };
+
+  const loadEstimationWorksForUser = async (filterUserId) => {
+    const user =
+      currentUser || JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
+    if (!user?.UserId || !filterUserId) {
+      setEstimationWorksList([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/load-works`, {
+        params: {
+          userId: user.UserId,
+          userCategory: user.UserCategoryName || "",
+          filterUserId,
+        },
+      });
+      setEstimationWorksList(res.status === 200 ? res.data.data || [] : []);
+    } catch (error) {
+      console.error(error);
+      setEstimationWorksList([]);
+      setMessage(`Work load failed: ${error.message}`);
+    }
+  };
+
+  const loadEstimationFilterUsers = async (organizationId) => {
+    if (!organizationId) {
+      setEstimationFilterUsers([]);
+      return;
+    }
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId },
+      });
+      setEstimationFilterUsers(
+        res.status === 200 && Array.isArray(res.data) ? res.data : [],
+      );
+    } catch (error) {
+      console.error(error);
+      setEstimationFilterUsers([]);
     }
   };
 
@@ -5969,6 +6141,8 @@ export default function HomePage() {
     if (subCategoryItemId) {
       params.subCategoryId = subCategoryItemId;
     }
+    const search = String(estimationItemSearch || "").trim();
+    if (search) params.search = search;
     axios
       .get(`${API_BASE}/api/ssr-items-load`, { params })
       .then((res) => {
@@ -5989,6 +6163,7 @@ export default function HomePage() {
 
   const resetMaterialSelection = () => {
     setSelectedMaterialItemId(null);
+    setSelectedMaterialItemDescription("");
     setMaterialComponentList([]);
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
@@ -6231,6 +6406,9 @@ export default function HomePage() {
       return;
     }
     setSelectedMaterialItemId(item.ItemId);
+    setSelectedMaterialItemDescription(
+      String(item.ItemDescription || "").trim(),
+    );
     setMaterialComponentForm(initialMaterialComponentForm);
     setMaterialDraftRows([createMaterialDraftRow()]);
     setEditingMaterialComponentId(null);
@@ -8029,6 +8207,44 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, selectedSubWorkId]);
 
+  const handleCopyAbstract = async () => {
+    clearEstimationOutputs();
+    if (!isSuperAdminUser(currentUser)) {
+      alert("Copy Abstract is available to SuperAdmin only.");
+      return;
+    }
+    if (!selectedProjectId) {
+      alert("Please select a Work first.");
+      return;
+    }
+    const workName =
+      estimationWorksList.find(
+        (work) => Number(work.MasterWorkId) === Number(selectedProjectId),
+      )?.WorkName || "Selected Work";
+    const copyName = `Copy Of ${workName}`;
+    const proceed = window.confirm(
+      `A Copy of this Work ${workName} will be created by name ${copyName}`,
+    );
+    if (!proceed) return;
+
+    try {
+      const res = await axios.post(`${API_BASE}/api/copy-work-abstract`, {
+        workId: selectedProjectId,
+        userId: currentUser?.UserId,
+      });
+      alert(
+        res.data?.message ||
+          "Abstract Copy of Selected Work successfully created",
+      );
+      await loadWorksMaster();
+    } catch (err) {
+      console.error(err);
+      alert(
+        `Copy Abstract failed: ${err.response?.data?.message || err.message}`,
+      );
+    }
+  };
+
   const handleExportEstimateExcel = async () => {
     clearEstimationOutputs();
     if (!selectedProjectId) {
@@ -8130,7 +8346,19 @@ export default function HomePage() {
       window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error("Failed to generate recap report:", err);
-      alert("Failed to generate the recapitulation report. Please try again.");
+      let message = "Failed to generate the recapitulation report. Please try again.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const data = JSON.parse(text);
+          if (data?.message) message = data.message;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (err.response?.data?.message) {
+        message = err.response.data.message;
+      }
+      alert(message);
     }
   };
 
@@ -8475,6 +8703,11 @@ export default function HomePage() {
     setItemCategories([]);
     setSubCategories([]);
     setItemList([]);
+    setEstimationItemSearch("");
+    setEstimationFilterOrgId("");
+    setEstimationFilterUserId("");
+    setEstimationFilterUsers([]);
+    if (isSuperAdminUser(currentUser)) setEstimationWorksList([]);
     setEstimationTab(0);
     setMeasurementGroupsOpen(false);
     setCheckedListDragId(null);
@@ -8500,6 +8733,7 @@ export default function HomePage() {
     setMaterialItemsViewed(false);
     setMaterialRALogic("CPWD");
     setSelectedMaterialItemId(null);
+    setSelectedMaterialItemDescription("");
     setMaterialMasterList([]);
     setMaterialPickerSearch("");
     setMaterialComponentList([]);
@@ -8593,6 +8827,7 @@ export default function HomePage() {
     } catch (err) {
       console.error(err);
       clearEstimatePanel();
+      setLoadingEstimate(false);
       alert(
         `Generate Estimate failed: ${err.response?.data?.message || err.message}`,
       );
@@ -8769,11 +9004,13 @@ export default function HomePage() {
         setEstimateLeadsSaved(false);
       }
       setMessage(successMsg);
+      setSavingEstimateAdditions(false);
       alert(successMsg);
     } catch (err) {
       console.error(err);
       const failMsg = `Standard addition save failed: ${err.response?.data?.message || err.message}`;
       setMessage(failMsg);
+      setSavingEstimateAdditions(false);
       alert(failMsg);
     } finally {
       setSavingEstimateAdditions(false);
@@ -8864,6 +9101,7 @@ export default function HomePage() {
         res.data?.message ||
         "Work Material and Work Abstract rates updated successfully.";
       setMessage(successMsg);
+      setSavingWorkMaterials(false);
       alert(successMsg);
       if (estimationTab === 1) {
         getCheckedItemsList();
@@ -8873,6 +9111,7 @@ export default function HomePage() {
       console.error(err);
       const failMsg = `Work Material populate failed: ${err.response?.data?.message || err.message}`;
       setMessage(failMsg);
+      setSavingWorkMaterials(false);
       alert(failMsg);
     } finally {
       setSavingWorkMaterials(false);
@@ -9759,6 +9998,25 @@ export default function HomePage() {
     setItemCodePreviewNonce((n) => n + 1);
   };
 
+  const itemMasterWasOpen = useRef(false);
+  useEffect(() => {
+    if (activeMaster === "item-master") {
+      itemMasterWasOpen.current = true;
+      return;
+    }
+    if (!itemMasterWasOpen.current) return;
+    itemMasterWasOpen.current = false;
+    resetItemMasterEdit();
+    setItemMasterList([]);
+    setItemMasterDescriptionSearch("");
+    setItemMasterFilterYearId("");
+    setItemMasterFilterCategoryId("");
+    setItemMasterFilterSubCategoryId("");
+    setItemMasterListSubCategories([]);
+    const allowedRegionId = getItemMasterAllowedRegionId(currentUser);
+    setItemMasterFilterRegionId(allowedRegionId ? String(allowedRegionId) : "");
+  }, [activeMaster]);
+
   const onItemMasterChange = (e) => {
     const { name, value, type, checked } = e.target;
     const nextValue = type === "checkbox" ? checked : value;
@@ -10600,6 +10858,20 @@ export default function HomePage() {
         />
       </Head>
 
+      <EstimateWaitOverlay
+        message={
+          savingWorkMaterials
+            ? "Updating rate analysis. Please wait…"
+            : savingEstimateLeads
+              ? "Saving lead details. Please wait…"
+              : savingEstimateAdditions
+                ? "Saving standard additions. Please wait…"
+                : loadingEstimate
+                  ? "Generating estimate. Please wait…"
+                  : ""
+        }
+      />
+
       {idleSecondsLeft != null && (
         <div
           role="dialog"
@@ -10738,6 +11010,20 @@ export default function HomePage() {
         }
         .wrms-table tbody tr:hover {
           background: ${theme.colors.accentSoft};
+        }
+        .extra-item-ra section {
+          background: #F7FBFF;
+          border-color: #D3E4F6;
+          box-shadow: 0 8px 24px rgba(47, 125, 225, 0.06);
+        }
+        .extra-item-ra .wrms-table thead th {
+          background: #6FA0D4;
+        }
+        .extra-item-ra .wrms-table tbody tr:nth-child(even) {
+          background: #F3F8FD;
+        }
+        .extra-item-ra .wrms-table tbody tr:hover {
+          background: #E5F1FB;
         }
         .wrms-shell {
           display: flex;
@@ -10999,12 +11285,16 @@ export default function HomePage() {
             >
               {activeMaster === "items"
                 ? "Estimate Management"
-                : "Masters Management"}
+                : activeMaster === "item-master"
+                  ? "NON SSR Item Management"
+                  : "Masters Management"}
             </h1>
             <p style={{ margin: 0, color: theme.colors.inkSoft, fontSize: 14 }}>
               {activeMaster === "items"
                 ? "Select Work, Sub Work, SSR Region and SSR Year. SSR Category and SSR Sub Category are also required, except when SSR Region 3 or 4 is selected."
-                : "Manage the reference data behind your estimates — regions, categories, items, works and sub-works."}
+                : activeMaster === "item-master"
+                  ? "Manage the NON SSR Items here"
+                  : "Manage the reference data behind your estimates — regions, categories, items, works and sub-works."}
             </p>
           </div>
 
@@ -13020,7 +13310,7 @@ export default function HomePage() {
               title={
                 editingItemMasterId
                   ? `Edit item #${editingItemMasterId}`
-                  : "NON DSR Items"
+                  : "Enter / Update / Edit NON SSR Items"
               }
               subtitle="Add / edit MasterItem rows. FK fields use short names from lookup tables."
             >
@@ -14450,6 +14740,11 @@ export default function HomePage() {
               ? canManageExtraItemRa
               : canManageMaterials) && (
             <>
+              <div
+                className={
+                  activeMaster === "extra-item-ra" ? "extra-item-ra" : undefined
+                }
+              >
               <Card
                 eyebrow={
                   activeMaster === "extra-item-ra"
@@ -14831,6 +15126,7 @@ export default function HomePage() {
                 apiBase={API_BASE}
                 userId={currentUser?.UserId}
                 itemId={selectedMaterialItemId}
+                itemDescription={selectedMaterialItemDescription}
                 regionId={materialRegionId}
                 regionIds={componentCatalogRegionIds}
                 canEdit={canManageMaterials || canManageExtraItemRa}
@@ -14850,9 +15146,7 @@ export default function HomePage() {
                 title={
                   editingMaterialComponentId
                     ? `Edit component #${editingMaterialComponentId}`
-                    : selectedMaterialItemId
-                      ? `Material components for item #${selectedMaterialItemId}`
-                      : "Material components"
+                    : "Enter Material Components"
                 }
                 subtitle="Select the Material from Material List by searching on Item Code or Text"
               >
@@ -14941,9 +15235,17 @@ export default function HomePage() {
                     </div>
 
                     <div style={{ marginTop: 18 }}>
-                      <FormShell onSubmit={onMaterialComponentSubmit}>
+                      <FormShell
+                        onSubmit={onMaterialComponentSubmit}
+                        style={
+                          activeMaster === "extra-item-ra"
+                            ? extraItemFormShellStyle
+                            : undefined
+                        }
+                      >
                         {activeMaster === "extra-item-ra" ? (
                           <ExtraItemDetailEntry
+                            tone="material"
                             inputStyle={inputStyle}
                             readonlyInputStyle={{
                               ...inputStyle,
@@ -15498,6 +15800,7 @@ export default function HomePage() {
                 }}
               />
               </div>
+              </div>
             </>
           )}
 
@@ -15506,8 +15809,8 @@ export default function HomePage() {
             <>
               <Card
                 eyebrow="Master · SSR Item"
-                title="Find SSR Items"
-                subtitle="Filter by work, region and year. SSR Category and SSR Sub Category are required, except for SSR Region 3 or 4."
+                title="Create Estimate Here"
+                subtitle="Interface to Select Items of your choice from SSR / NON SSR and Enter / Import Measurements..."
               >
                 <FormShell onSubmit={loadItems}>
                   <div
@@ -15517,6 +15820,89 @@ export default function HomePage() {
                       gap: 14,
                     }}
                   >
+                    {isSuperAdmin && (
+                      <>
+                        <Field label="Organization" required>
+                          <select
+                            value={estimationFilterOrgId}
+                            onChange={async (e) => {
+                              const value = e.target.value;
+                              setEstimationFilterOrgId(value);
+                              setEstimationFilterUserId("");
+                              setEstimationFilterUsers([]);
+                              setEstimationWorksList([]);
+                              setSelectedProjectId(0);
+                              setSelectedSubWorkId(0);
+                              setMeasurementGroupsOpen(false);
+                              setSubWorks([]);
+                              setCheckedItemsList([]);
+                              setCheckedItemIds([]);
+                              setItemRegion("");
+                              setItemSsrYearId("");
+                              setItemCategoryId("");
+                              setSubCategoryItemId("");
+                              setSsrYears([]);
+                              setItemCategories([]);
+                              setSubCategories([]);
+                              setItemList([]);
+                              setEstimationItemSearch("");
+                              clearEstimationOutputs();
+                              await loadEstimationFilterUsers(value);
+                            }}
+                            style={inputStyle}
+                          >
+                            <option value="">Select Organization</option>
+                            {organizations.map((org) => (
+                              <option
+                                key={org.OrganizationId}
+                                value={org.OrganizationId}
+                              >
+                                {org.OrgName || org.OrgCode || org.OrganizationId}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="User" required>
+                          <select
+                            value={estimationFilterUserId}
+                            onChange={async (e) => {
+                              const value = e.target.value;
+                              setEstimationFilterUserId(value);
+                              setSelectedProjectId(0);
+                              setSelectedSubWorkId(0);
+                              setMeasurementGroupsOpen(false);
+                              setSubWorks([]);
+                              setCheckedItemsList([]);
+                              setCheckedItemIds([]);
+                              setItemRegion("");
+                              setItemSsrYearId("");
+                              setItemCategoryId("");
+                              setSubCategoryItemId("");
+                              setSsrYears([]);
+                              setItemCategories([]);
+                              setSubCategories([]);
+                              setItemList([]);
+                              setEstimationItemSearch("");
+                              clearEstimationOutputs();
+                              await loadEstimationWorksForUser(value);
+                            }}
+                            disabled={!estimationFilterOrgId}
+                            style={inputStyle}
+                          >
+                            <option value="">
+                              {estimationFilterOrgId
+                                ? "Select User"
+                                : "Select Organization first"}
+                            </option>
+                            {estimationFilterUsers.map((u) => (
+                              <option key={u.UserId} value={u.UserId}>
+                                {u.UserName || u.UserLoginName || u.UserId}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                      </>
+                    )}
                     <Field label="Select Work" required>
                       <select
                         name="Works"
@@ -15537,12 +15923,18 @@ export default function HomePage() {
                           setItemCategories([]);
                           setSubCategories([]);
                           setItemList([]);
+                          setEstimationItemSearch("");
                           clearEstimationOutputs();
                           loadSubWorks(workId);
                         }}
+                        disabled={isSuperAdmin && !estimationFilterUserId}
                         style={inputStyle}
                       >
-                        <option value="">Select Work</option>
+                        <option value="">
+                          {isSuperAdmin && !estimationFilterUserId
+                            ? "Select Organization and User first"
+                            : "Select Work"}
+                        </option>
                         {estimationWorksList.map((work) => (
                           <option
                             key={work.MasterWorkId}
@@ -15575,6 +15967,7 @@ export default function HomePage() {
                           setItemCategories([]);
                           setSubCategories([]);
                           setItemList([]);
+                          setEstimationItemSearch("");
                           clearEstimationOutputs();
                         }}
                         disabled={!selectedProjectId}
@@ -15592,7 +15985,7 @@ export default function HomePage() {
                       </select>
                     </Field>
 
-                    {!(selectedProjectId && selectedSubWorkId) && (
+                    {isSuperAdmin && !estimationFilterUserId ? (
                       <div
                         style={{
                           gridColumn: "1 / -1",
@@ -15602,8 +15995,22 @@ export default function HomePage() {
                           padding: "2px 0 4px",
                         }}
                       >
-                        Please Select Work and Sub Work
+                        Please Select Organization and User
                       </div>
+                    ) : (
+                      !(selectedProjectId && selectedSubWorkId) && (
+                        <div
+                          style={{
+                            gridColumn: "1 / -1",
+                            color: theme.colors.red || "#B42318",
+                            fontSize: 13.5,
+                            fontWeight: 600,
+                            padding: "2px 0 4px",
+                          }}
+                        >
+                          Please Select Work and Sub Work
+                        </div>
+                      )
                     )}
 
                     <Field label="SSR Region" required>
@@ -15723,6 +16130,22 @@ export default function HomePage() {
                     </Field>
                   </div>
 
+                  <div style={{ marginTop: 14 }}>
+                    <Field label="Search">
+                      <input
+                        type="text"
+                        value={estimationItemSearch}
+                        onChange={(e) => setEstimationItemSearch(e.target.value)}
+                        placeholder="Enter Item Code or Text String to Match your Search"
+                        style={{
+                          ...inputStyle,
+                          background: "#FFE0B8",
+                          borderColor: "#F0B06A",
+                        }}
+                      />
+                    </Field>
+                  </div>
+
                   <div
                     style={{
                       marginTop: 18,
@@ -15814,6 +16237,28 @@ export default function HomePage() {
                       }}
                     >
                       DELETE WORK
+                    </Button>
+                    <Button
+                      type="button"
+                      color="primary"
+                      variant="solid"
+                      disabled={
+                        !isSuperAdminUser(currentUser) || !selectedProjectId
+                      }
+                      onClick={handleCopyAbstract}
+                      title={
+                        !isSuperAdminUser(currentUser)
+                          ? "Copy Abstract is available to SuperAdmin only"
+                          : selectedProjectId
+                            ? "Copy the selected work abstract"
+                            : "Select Work first"
+                      }
+                      sx={{
+                        fontSize: 13,
+                        textTransform: "none",
+                      }}
+                    >
+                      Copy Abstract
                     </Button>
                     <Button
                       type="button"
