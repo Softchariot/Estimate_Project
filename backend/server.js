@@ -1400,21 +1400,33 @@ app.get("/api/load-projects", async (req, res) => {
 
 app.get("/api/org-users", async (req, res) => {
   const organizationId = Number(req.query.organizationId || req.query.org_id);
-  if (!organizationId) {
+  const orgCode = String(req.query.orgCode || "").trim();
+  if (!organizationId && !orgCode) {
     return res
       .status(400)
       .json({ message: "organizationId query parameter is required." });
   }
 
   try {
-    const result = await pool.query(
-      `SELECT "UserId", "UserName", "UserLoginName"
-       FROM "MasterUser"
-       WHERE "OrganizationId" = $1
-         AND COALESCE("MarkForDeletion", false) = false
-       ORDER BY "UserName"`,
-      [organizationId],
-    );
+    const result = orgCode
+      ? await pool.query(
+          `SELECT u."UserId", u."UserName", u."UserLoginName"
+           FROM "MasterUser" u
+           INNER JOIN "MasterOrganization" o
+             ON o."OrganizationId" = u."OrganizationId"
+           WHERE UPPER(BTRIM(o."OrgCode")) = UPPER(BTRIM($1))
+             AND COALESCE(u."MarkForDeletion", false) = false
+           ORDER BY u."UserName"`,
+          [orgCode],
+        )
+      : await pool.query(
+          `SELECT "UserId", "UserName", "UserLoginName"
+           FROM "MasterUser"
+           WHERE "OrganizationId" = $1
+             AND COALESCE("MarkForDeletion", false) = false
+           ORDER BY "UserName"`,
+          [organizationId],
+        );
     return res.json(result.rows);
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -4906,6 +4918,32 @@ app.get("/api/master-items", async (req, res) => {
       message: "You can only list items for your allowed NON SSR region.",
     });
   }
+  const organizationIdFilter =
+    req.query.organizationId !== undefined &&
+    req.query.organizationId !== null &&
+    String(req.query.organizationId).trim() !== ""
+      ? Number(req.query.organizationId)
+      : null;
+  const ownerUserIdFilter =
+    req.query.ownerUserId !== undefined &&
+    req.query.ownerUserId !== null &&
+    String(req.query.ownerUserId).trim() !== ""
+      ? Number(req.query.ownerUserId)
+      : null;
+  const superAdminOrgList =
+    auth.isSuperAdmin && Number(regionIdFilter) === 3;
+  const superAdminUserList =
+    auth.isSuperAdmin && Number(regionIdFilter) === 4;
+  if (superAdminOrgList && !organizationIdFilter) {
+    return res.status(400).json({
+      message: "Organisation is required for this SSR Region.",
+    });
+  }
+  if (superAdminUserList && !ownerUserIdFilter) {
+    return res.status(400).json({
+      message: "User is required for this SSR Region.",
+    });
+  }
 
   try {
     await ensureMasterItemUserId();
@@ -4919,6 +4957,20 @@ app.get("/api/master-items", async (req, res) => {
     if (subCategoryIdFilter) {
       params.push(subCategoryIdFilter);
       filterSql += ` AND i."SubCategoryId" = $${params.length}`;
+    }
+    if (superAdminOrgList) {
+      params.push(organizationIdFilter);
+      filterSql += `
+          AND EXISTS (
+            SELECT 1
+            FROM "MasterUser" creator
+            WHERE creator."UserId" = i."UserId"
+              AND creator."OrganizationId" = $${params.length}
+          )`;
+    }
+    if (superAdminUserList) {
+      params.push(ownerUserIdFilter);
+      filterSql += ` AND i."UserId" = $${params.length}`;
     }
     if (auth.isOrgAdmin) {
       const orgId = Number(auth.actor.OrganizationId);
@@ -5451,6 +5503,32 @@ app.get("/api/non-dsr-materials", async (req, res) => {
       message: "You can only list materials for your allowed NON SSR region.",
     });
   }
+  const organizationIdFilter =
+    req.query.organizationId !== undefined &&
+    req.query.organizationId !== null &&
+    String(req.query.organizationId).trim() !== ""
+      ? Number(req.query.organizationId)
+      : null;
+  const ownerUserIdFilter =
+    req.query.ownerUserId !== undefined &&
+    req.query.ownerUserId !== null &&
+    String(req.query.ownerUserId).trim() !== ""
+      ? Number(req.query.ownerUserId)
+      : null;
+  const superAdminOrgList =
+    auth.isSuperAdmin && Number(regionIdFilter) === 3;
+  const superAdminUserList =
+    auth.isSuperAdmin && Number(regionIdFilter) === 4;
+  if (superAdminOrgList && !organizationIdFilter) {
+    return res.status(400).json({
+      message: "Organisation is required for this SSR Region.",
+    });
+  }
+  if (superAdminUserList && !ownerUserIdFilter) {
+    return res.status(400).json({
+      message: "User is required for this SSR Region.",
+    });
+  }
 
   try {
     const params = [regionIdFilter];
@@ -5466,6 +5544,20 @@ app.get("/api/non-dsr-materials", async (req, res) => {
     if (subCategoryIdFilter) {
       params.push(subCategoryIdFilter);
       filterSql += ` AND m."SubCategoryId" = $${params.length}`;
+    }
+    if (superAdminOrgList) {
+      params.push(organizationIdFilter);
+      filterSql += `
+          AND EXISTS (
+            SELECT 1
+            FROM "MasterUser" creator
+            WHERE creator."UserId" = m."UserId"
+              AND creator."OrganizationId" = $${params.length}
+          )`;
+    }
+    if (superAdminUserList) {
+      params.push(ownerUserIdFilter);
+      filterSql += ` AND m."UserId" = $${params.length}`;
     }
     if (auth.isOrgAdmin) {
       const orgId = Number(auth.actor.OrganizationId);
@@ -8774,16 +8866,53 @@ app.get("/api/generate-measurement-report", async (req, res) => {
 
 app.get("/api/generate-item-catalog-report", async (req, res) => {
   const { ssrYearId, regionId, categoryId, subCategoryId } = req.query;
+  const organizationId =
+    req.query.organizationId !== undefined &&
+    req.query.organizationId !== null &&
+    String(req.query.organizationId).trim() !== ""
+      ? Number(req.query.organizationId)
+      : null;
 
   if (!ssrYearId || !regionId) {
     return res
       .status(400)
       .json({ message: "ssrYearId and regionId are required." });
   }
+  if (Number(regionId) === 3 && !organizationId) {
+    return res.status(400).json({
+      message: "Organisation is required for this SSR Region.",
+    });
+  }
 
   try {
+    let organisationName = "";
+    if (Number(regionId) === 3 && organizationId) {
+      const orgResult = await pool.query(
+        `SELECT "OrgName", "OrgCode"
+         FROM "MasterOrganization"
+         WHERE "OrganizationId" = $1`,
+        [organizationId],
+      );
+      if (!orgResult.rows.length) {
+        return res.status(404).json({ message: "Organisation not found." });
+      }
+      organisationName = String(
+        orgResult.rows[0].OrgName || orgResult.rows[0].OrgCode || "",
+      ).trim();
+    }
+
     const params = [ssrYearId, regionId];
     let extraFilters = "";
+    if (Number(regionId) === 3 && organizationId) {
+      params.push(organizationId);
+      extraFilters += `
+          AND EXISTS (
+            SELECT 1
+            FROM "MasterUser" creator
+            WHERE creator."UserId" = i."UserId"
+              AND creator."OrganizationId" = $${params.length}
+          )`;
+    }
     if (categoryId) {
       params.push(categoryId);
       extraFilters += ` AND i."CategoryId" = $${params.length}`;
@@ -8902,8 +9031,16 @@ app.get("/api/generate-item-catalog-report", async (req, res) => {
     const rowGap = 6;
 
     const drawPageHeader = () => {
+      let y = doc.page.margins.top;
+      if (organisationName) {
+        doc.font("Helvetica-Bold").fontSize(12);
+        doc.text(`Organisation : ${organisationName}`, pageLeft, y, {
+          width: pageRight - pageLeft,
+          align: "center",
+        });
+        y = doc.y + 8;
+      }
       doc.font("Helvetica-Bold").fontSize(9);
-      const y = doc.page.margins.top;
       doc.text("Code No", colCode, y, { width: colCodeWidth, lineBreak: false });
       doc.text("Description", 100, y, {
         width: colUnit - 110,

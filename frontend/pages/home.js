@@ -267,6 +267,21 @@ function formatIndiaDateTime(value) {
   }).format(d);
 }
 
+function formatSessionDuration(loginValue, logoutValue) {
+  if (!loginValue || !logoutValue) return "—";
+  const start = new Date(loginValue).getTime();
+  const end = new Date(logoutValue).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return "—";
+  }
+  const totalSeconds = Math.floor((end - start) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
 function sortMasterUsers(rows) {
   return [...rows].sort((a, b) => {
     const orgCmp = Number(a.OrganizationId) - Number(b.OrganizationId);
@@ -4869,6 +4884,10 @@ export default function HomePage() {
   const [itemMasterCategories, setItemMasterCategories] = useState([]);
   const [itemMasterSubCategories, setItemMasterSubCategories] = useState([]);
   const [itemMasterFilterRegionId, setItemMasterFilterRegionId] = useState("");
+  const [itemMasterFilterOrganizationId, setItemMasterFilterOrganizationId] =
+    useState("");
+  const [itemMasterFilterUserId, setItemMasterFilterUserId] = useState("");
+  const [itemMasterFilterUsers, setItemMasterFilterUsers] = useState([]);
   const [itemMasterFilterYearId, setItemMasterFilterYearId] = useState("");
   const [itemMasterFilterCategoryId, setItemMasterFilterCategoryId] =
     useState("");
@@ -4912,6 +4931,15 @@ export default function HomePage() {
     nonDsrMaterialFilterSubCategoryId,
     setNonDsrMaterialFilterSubCategoryId,
   ] = useState("");
+  const [
+    nonDsrMaterialFilterOrganizationId,
+    setNonDsrMaterialFilterOrganizationId,
+  ] = useState("");
+  const [nonDsrMaterialFilterUserId, setNonDsrMaterialFilterUserId] =
+    useState("");
+  const [nonDsrMaterialFilterUsers, setNonDsrMaterialFilterUsers] = useState(
+    [],
+  );
   const [nonDsrMaterialDescriptionSearch, setNonDsrMaterialDescriptionSearch] =
     useState("");
   const nonDsrMaterialDescriptionQuery = nonDsrMaterialDescriptionSearch
@@ -5076,6 +5104,7 @@ export default function HomePage() {
   const [printSsrCategories, setPrintSsrCategories] = useState([]);
   const [printSsrSubCategoryId, setPrintSsrSubCategoryId] = useState("");
   const [printSsrSubCategories, setPrintSsrSubCategories] = useState([]);
+  const [printSsrOrganizationId, setPrintSsrOrganizationId] = useState("");
   const [printingSsr, setPrintingSsr] = useState(false);
   const [userTrackOrgId, setUserTrackOrgId] = useState("");
   const [userTrackUserId, setUserTrackUserId] = useState("");
@@ -9157,8 +9186,14 @@ export default function HomePage() {
   };
 
   const handlePrintSsr = async () => {
+    const printNeedsOrganisation =
+      Number(printSsrRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
     if (!printSsrRegionId || !printSsrYearId) {
       alert("Please select SSR Region and SSR Year.");
+      return;
+    }
+    if (printNeedsOrganisation && !printSsrOrganizationId) {
+      alert("Please select Organisation.");
       return;
     }
     setPrintingSsr(true);
@@ -9167,6 +9202,9 @@ export default function HomePage() {
         ssrYearId: printSsrYearId,
         regionId: printSsrRegionId,
       };
+      if (printNeedsOrganisation) {
+        params.organizationId = printSsrOrganizationId;
+      }
       if (printSsrCategoryId) params.categoryId = printSsrCategoryId;
       if (printSsrSubCategoryId) params.subCategoryId = printSsrSubCategoryId;
 
@@ -9198,7 +9236,17 @@ export default function HomePage() {
       window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error("Failed to print SSR:", err);
-      alert("Failed to generate the SSR report. Please try again.");
+      let message = "Failed to generate the SSR report. Please try again.";
+      try {
+        if (err.response?.data) {
+          const text = await err.response.data.text();
+          const parsed = JSON.parse(text);
+          if (parsed?.message) message = parsed.message;
+        }
+      } catch (_) {
+        /* keep the generic message */
+      }
+      alert(message);
     } finally {
       setPrintingSsr(false);
     }
@@ -9418,7 +9466,18 @@ export default function HomePage() {
 
   useEffect(() => {
     if (activeMaster !== "item-master" || !currentUser?.UserId) return;
-    if (!itemMasterFilterRegionId || !itemMasterFilterYearId) {
+    const listNeedsOrganisation =
+      isSuperAdminUser(currentUser) &&
+      Number(itemMasterFilterRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    const listNeedsUser =
+      isSuperAdminUser(currentUser) &&
+      Number(itemMasterFilterRegionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (
+      !itemMasterFilterRegionId ||
+      !itemMasterFilterYearId ||
+      (listNeedsOrganisation && !itemMasterFilterOrganizationId) ||
+      (listNeedsUser && !itemMasterFilterUserId)
+    ) {
       setItemMasterList([]);
       return;
     }
@@ -9436,6 +9495,12 @@ export default function HomePage() {
         }
         if (itemMasterFilterSubCategoryId) {
           params.subCategoryId = itemMasterFilterSubCategoryId;
+        }
+        if (listNeedsOrganisation) {
+          params.organizationId = itemMasterFilterOrganizationId;
+        }
+        if (listNeedsUser) {
+          params.ownerUserId = itemMasterFilterUserId;
         }
         const res = await axios.get(`${API_BASE}/api/master-items`, {
           params,
@@ -9467,6 +9532,8 @@ export default function HomePage() {
     itemMasterFilterYearId,
     itemMasterFilterCategoryId,
     itemMasterFilterSubCategoryId,
+    itemMasterFilterOrganizationId,
+    itemMasterFilterUserId,
   ]);
 
   useEffect(() => {
@@ -9872,6 +9939,26 @@ export default function HomePage() {
     }
   };
 
+  const loadItemMasterIndvUsers = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId: INDIVIDUAL_ORGANIZATION_ID },
+      });
+      setItemMasterFilterUsers(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setItemMasterFilterUsers([]);
+    }
+  };
+
+  useEffect(() => {
+    if (activeMaster !== "item-master" || !isSuperAdminUser(currentUser)) return;
+    if (Number(itemMasterFilterRegionId) !== ITEM_MASTER_INDV_USER_REGION_ID) {
+      return;
+    }
+    loadItemMasterIndvUsers();
+  }, [activeMaster, currentUser?.UserId, itemMasterFilterRegionId]);
+
   const loadItemMasterList = async (
     user = currentUser,
     filters = {
@@ -9879,6 +9966,8 @@ export default function HomePage() {
       ssrYearId: itemMasterFilterYearId,
       categoryId: itemMasterFilterCategoryId,
       subCategoryId: itemMasterFilterSubCategoryId,
+      organizationId: itemMasterFilterOrganizationId,
+      ownerUserId: itemMasterFilterUserId,
     },
   ) => {
     if (!user?.UserId || !canAccessItemMaster(user)) {
@@ -9889,7 +9978,20 @@ export default function HomePage() {
     const ssrYearId = filters.ssrYearId;
     const categoryId = filters.categoryId;
     const subCategoryId = filters.subCategoryId;
-    if (!regionId || !ssrYearId) {
+    const organizationId = filters.organizationId;
+    const ownerUserId = filters.ownerUserId;
+    const listNeedsOrganisation =
+      isSuperAdminUser(user) &&
+      Number(regionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    const listNeedsUser =
+      isSuperAdminUser(user) &&
+      Number(regionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (
+      !regionId ||
+      !ssrYearId ||
+      (listNeedsOrganisation && !organizationId) ||
+      (listNeedsUser && !ownerUserId)
+    ) {
       setItemMasterList([]);
       return;
     }
@@ -9902,6 +10004,8 @@ export default function HomePage() {
       };
       if (categoryId) params.categoryId = categoryId;
       if (subCategoryId) params.subCategoryId = subCategoryId;
+      if (listNeedsOrganisation) params.organizationId = organizationId;
+      if (listNeedsUser) params.ownerUserId = ownerUserId;
       const res = await axios.get(`${API_BASE}/api/master-items`, {
         params,
       });
@@ -10012,6 +10116,9 @@ export default function HomePage() {
     setItemMasterFilterYearId("");
     setItemMasterFilterCategoryId("");
     setItemMasterFilterSubCategoryId("");
+    setItemMasterFilterOrganizationId("");
+    setItemMasterFilterUserId("");
+    setItemMasterFilterUsers([]);
     setItemMasterListSubCategories([]);
     const allowedRegionId = getItemMasterAllowedRegionId(currentUser);
     setItemMasterFilterRegionId(allowedRegionId ? String(allowedRegionId) : "");
@@ -10154,6 +10261,8 @@ export default function HomePage() {
           ssrYearId: itemMasterFilterYearId,
           categoryId: itemMasterFilterCategoryId,
           subCategoryId: itemMasterFilterSubCategoryId,
+          organizationId: itemMasterFilterOrganizationId,
+          ownerUserId: itemMasterFilterUserId,
         });
       } else {
         setItemMasterList([]);
@@ -10259,6 +10368,18 @@ export default function HomePage() {
     }
   };
 
+  const loadNonDsrMaterialIndvUsers = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/org-users`, {
+        params: { organizationId: INDIVIDUAL_ORGANIZATION_ID },
+      });
+      setNonDsrMaterialFilterUsers(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error(err);
+      setNonDsrMaterialFilterUsers([]);
+    }
+  };
+
   const loadNonDsrMaterialList = async (
     user = currentUser,
     filters = {
@@ -10266,13 +10387,28 @@ export default function HomePage() {
       ssrYearId: nonDsrMaterialFilterYearId,
       categoryId: nonDsrMaterialFilterCategoryId,
       subCategoryId: nonDsrMaterialFilterSubCategoryId,
+      organizationId: nonDsrMaterialFilterOrganizationId,
+      ownerUserId: nonDsrMaterialFilterUserId,
     },
   ) => {
     if (!user?.UserId || !canAccessItemMaster(user)) {
       setNonDsrMaterialList([]);
       return;
     }
-    if (!filters.regionId) {
+    const regionId = filters.regionId;
+    const organizationId = filters.organizationId;
+    const ownerUserId = filters.ownerUserId;
+    const listNeedsOrganisation =
+      isSuperAdminUser(user) &&
+      Number(regionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    const listNeedsUser =
+      isSuperAdminUser(user) &&
+      Number(regionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (
+      !regionId ||
+      (listNeedsOrganisation && !organizationId) ||
+      (listNeedsUser && !ownerUserId)
+    ) {
       setNonDsrMaterialList([]);
       return;
     }
@@ -10280,11 +10416,13 @@ export default function HomePage() {
     try {
       const params = {
         userId: user.UserId,
-        regionId: filters.regionId,
+        regionId,
         ssrYearId: filters.ssrYearId,
       };
       if (filters.categoryId) params.categoryId = filters.categoryId;
       if (filters.subCategoryId) params.subCategoryId = filters.subCategoryId;
+      if (listNeedsOrganisation) params.organizationId = organizationId;
+      if (listNeedsUser) params.ownerUserId = ownerUserId;
       const res = await axios.get(`${API_BASE}/api/non-dsr-materials`, {
         params,
       });
@@ -10488,6 +10626,8 @@ export default function HomePage() {
           ssrYearId: nonDsrMaterialFilterYearId,
           categoryId: nonDsrMaterialFilterCategoryId,
           subCategoryId: nonDsrMaterialFilterSubCategoryId,
+          organizationId: nonDsrMaterialFilterOrganizationId,
+          ownerUserId: nonDsrMaterialFilterUserId,
         });
       } else {
         setNonDsrMaterialList([]);
@@ -10519,7 +10659,17 @@ export default function HomePage() {
 
   useEffect(() => {
     if (activeMaster !== "non-dsr-material" || !currentUser?.UserId) return;
-    if (!nonDsrMaterialFilterRegionId) {
+    const listNeedsOrganisation =
+      isSuperAdminUser(currentUser) &&
+      Number(nonDsrMaterialFilterRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID;
+    const listNeedsUser =
+      isSuperAdminUser(currentUser) &&
+      Number(nonDsrMaterialFilterRegionId) === ITEM_MASTER_INDV_USER_REGION_ID;
+    if (
+      !nonDsrMaterialFilterRegionId ||
+      (listNeedsOrganisation && !nonDsrMaterialFilterOrganizationId) ||
+      (listNeedsUser && !nonDsrMaterialFilterUserId)
+    ) {
       setNonDsrMaterialList([]);
       return;
     }
@@ -10528,6 +10678,8 @@ export default function HomePage() {
       ssrYearId: nonDsrMaterialFilterYearId,
       categoryId: nonDsrMaterialFilterCategoryId,
       subCategoryId: nonDsrMaterialFilterSubCategoryId,
+      organizationId: nonDsrMaterialFilterOrganizationId,
+      ownerUserId: nonDsrMaterialFilterUserId,
     });
   }, [
     activeMaster,
@@ -10536,7 +10688,24 @@ export default function HomePage() {
     nonDsrMaterialFilterYearId,
     nonDsrMaterialFilterCategoryId,
     nonDsrMaterialFilterSubCategoryId,
+    nonDsrMaterialFilterOrganizationId,
+    nonDsrMaterialFilterUserId,
   ]);
+
+  useEffect(() => {
+    if (
+      activeMaster !== "non-dsr-material" ||
+      !isSuperAdminUser(currentUser)
+    ) {
+      return;
+    }
+    if (
+      Number(nonDsrMaterialFilterRegionId) !== ITEM_MASTER_INDV_USER_REGION_ID
+    ) {
+      return;
+    }
+    loadNonDsrMaterialIndvUsers();
+  }, [activeMaster, currentUser?.UserId, nonDsrMaterialFilterRegionId]);
 
   const startRegionEdit = (row) => {
     setActiveMaster("regions");
@@ -13625,7 +13794,16 @@ export default function HomePage() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+                  gridTemplateColumns:
+                    isSuperAdmin &&
+                    Number(itemMasterFilterRegionId) ===
+                      ITEM_MASTER_INDV_USER_REGION_ID
+                      ? "minmax(0, 1fr) minmax(0, 1.6fr) repeat(4, minmax(0, 1fr))"
+                      : isSuperAdmin &&
+                          Number(itemMasterFilterRegionId) ===
+                            ITEM_MASTER_ORG_ADMIN_REGION_ID
+                        ? "repeat(6, minmax(0, 1fr))"
+                        : "repeat(5, minmax(0, 1fr))",
                   gap: 12,
                   alignItems: "end",
                   marginBottom: 12,
@@ -13637,6 +13815,9 @@ export default function HomePage() {
                     onChange={(e) => {
                       const value = e.target.value;
                       setItemMasterFilterRegionId(value);
+                      setItemMasterFilterOrganizationId("");
+                      setItemMasterFilterUserId("");
+                      setItemMasterFilterUsers([]);
                       setItemMasterFilterYearId("");
                       setItemMasterFilterCategoryId("");
                       setItemMasterFilterSubCategoryId("");
@@ -13645,6 +13826,9 @@ export default function HomePage() {
                       setItemMasterList([]);
                       loadItemMasterListYears(value);
                       loadItemMasterListCategories(value);
+                      if (Number(value) === ITEM_MASTER_INDV_USER_REGION_ID) {
+                        loadItemMasterIndvUsers();
+                      }
                     }}
                     disabled={!isSuperAdmin}
                     style={{
@@ -13670,6 +13854,49 @@ export default function HomePage() {
                     )}
                   </select>
                 </Field>
+                {isSuperAdmin &&
+                  Number(itemMasterFilterRegionId) ===
+                    ITEM_MASTER_ORG_ADMIN_REGION_ID && (
+                    <Field label="Organisation" required>
+                      <select
+                        value={itemMasterFilterOrganizationId}
+                        onChange={(e) =>
+                          setItemMasterFilterOrganizationId(e.target.value)
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Select Organisation</option>
+                        {sortOrganizationsByDOrder(organizations).map((org) => (
+                          <option
+                            key={org.OrganizationId}
+                            value={org.OrganizationId}
+                          >
+                            {org.OrgName || org.OrgCode || org.OrganizationId}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
+                {isSuperAdmin &&
+                  Number(itemMasterFilterRegionId) ===
+                    ITEM_MASTER_INDV_USER_REGION_ID && (
+                    <Field label="User" required>
+                      <select
+                        value={itemMasterFilterUserId}
+                        onChange={(e) =>
+                          setItemMasterFilterUserId(e.target.value)
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Select User</option>
+                        {itemMasterFilterUsers.map((user) => (
+                          <option key={user.UserId} value={user.UserId}>
+                            {user.UserName || user.UserLoginName || user.UserId}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
                 <Field label="SSR Year">
                   <select
                     value={itemMasterFilterYearId}
@@ -13735,7 +13962,15 @@ export default function HomePage() {
                 <SecondaryButton
                   type="button"
                   disabled={
-                    !itemMasterFilterRegionId || !itemMasterFilterYearId
+                    !itemMasterFilterRegionId ||
+                    !itemMasterFilterYearId ||
+                    (isSuperAdmin &&
+                      ((Number(itemMasterFilterRegionId) ===
+                        ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                        !itemMasterFilterOrganizationId) ||
+                        (Number(itemMasterFilterRegionId) ===
+                          ITEM_MASTER_INDV_USER_REGION_ID &&
+                          !itemMasterFilterUserId)))
                   }
                   onClick={() =>
                     loadItemMasterList(currentUser, {
@@ -13743,6 +13978,8 @@ export default function HomePage() {
                       ssrYearId: itemMasterFilterYearId,
                       categoryId: itemMasterFilterCategoryId,
                       subCategoryId: itemMasterFilterSubCategoryId,
+                      organizationId: itemMasterFilterOrganizationId,
+                      ownerUserId: itemMasterFilterUserId,
                     })
                   }
                 >
@@ -13757,8 +13994,15 @@ export default function HomePage() {
                   marginBottom: 8,
                 }}
               >
-                Select SSR Region and SSR Year to list items. SSR Category
-                and SSR Sub Category are optional.
+                {isSuperAdmin &&
+                Number(itemMasterFilterRegionId) ===
+                  ITEM_MASTER_ORG_ADMIN_REGION_ID
+                  ? "Select SSR Region, Organisation, and SSR Year to list items. SSR Category and SSR Sub Category are optional."
+                  : isSuperAdmin &&
+                      Number(itemMasterFilterRegionId) ===
+                        ITEM_MASTER_INDV_USER_REGION_ID
+                    ? "Select SSR Region, User, and SSR Year to list items. SSR Category and SSR Sub Category are optional."
+                    : "Select SSR Region and SSR Year to list items. SSR Category and SSR Sub Category are optional."}
               </div>
 
               <div style={{ maxWidth: 480, marginBottom: 12 }}>
@@ -14219,7 +14463,16 @@ export default function HomePage() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+                  gridTemplateColumns:
+                    isSuperAdmin &&
+                    Number(nonDsrMaterialFilterRegionId) ===
+                      ITEM_MASTER_INDV_USER_REGION_ID
+                      ? "minmax(0, 1fr) minmax(0, 1.6fr) repeat(4, minmax(0, 1fr))"
+                      : isSuperAdmin &&
+                          Number(nonDsrMaterialFilterRegionId) ===
+                            ITEM_MASTER_ORG_ADMIN_REGION_ID
+                        ? "repeat(6, minmax(0, 1fr))"
+                        : "repeat(5, minmax(0, 1fr))",
                   gap: 12,
                   alignItems: "end",
                   marginBottom: 12,
@@ -14231,6 +14484,9 @@ export default function HomePage() {
                     onChange={(e) => {
                       const value = e.target.value;
                       setNonDsrMaterialFilterRegionId(value);
+                      setNonDsrMaterialFilterOrganizationId("");
+                      setNonDsrMaterialFilterUserId("");
+                      setNonDsrMaterialFilterUsers([]);
                       setNonDsrMaterialFilterYearId("");
                       setNonDsrMaterialFilterCategoryId("");
                       setNonDsrMaterialFilterSubCategoryId("");
@@ -14239,6 +14495,9 @@ export default function HomePage() {
                       setNonDsrMaterialList([]);
                       loadNonDsrMaterialListYears(value);
                       loadNonDsrMaterialListCategories(value);
+                      if (Number(value) === ITEM_MASTER_INDV_USER_REGION_ID) {
+                        loadNonDsrMaterialIndvUsers();
+                      }
                     }}
                     disabled={!isSuperAdmin}
                     style={{
@@ -14264,6 +14523,49 @@ export default function HomePage() {
                     )}
                   </select>
                 </Field>
+                {isSuperAdmin &&
+                  Number(nonDsrMaterialFilterRegionId) ===
+                    ITEM_MASTER_ORG_ADMIN_REGION_ID && (
+                    <Field label="Organisation" required>
+                      <select
+                        value={nonDsrMaterialFilterOrganizationId}
+                        onChange={(e) =>
+                          setNonDsrMaterialFilterOrganizationId(e.target.value)
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Select Organisation</option>
+                        {sortOrganizationsByDOrder(organizations).map((org) => (
+                          <option
+                            key={org.OrganizationId}
+                            value={org.OrganizationId}
+                          >
+                            {org.OrgName || org.OrgCode || org.OrganizationId}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
+                {isSuperAdmin &&
+                  Number(nonDsrMaterialFilterRegionId) ===
+                    ITEM_MASTER_INDV_USER_REGION_ID && (
+                    <Field label="User" required>
+                      <select
+                        value={nonDsrMaterialFilterUserId}
+                        onChange={(e) =>
+                          setNonDsrMaterialFilterUserId(e.target.value)
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Select User</option>
+                        {nonDsrMaterialFilterUsers.map((user) => (
+                          <option key={user.UserId} value={user.UserId}>
+                            {user.UserName || user.UserLoginName || user.UserId}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  )}
                 <Field label="SSR Year">
                   <select
                     value={nonDsrMaterialFilterYearId}
@@ -14328,13 +14630,24 @@ export default function HomePage() {
                 </Field>
                 <SecondaryButton
                   type="button"
-                  disabled={!nonDsrMaterialFilterRegionId}
+                  disabled={
+                    !nonDsrMaterialFilterRegionId ||
+                    (isSuperAdmin &&
+                      ((Number(nonDsrMaterialFilterRegionId) ===
+                        ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                        !nonDsrMaterialFilterOrganizationId) ||
+                        (Number(nonDsrMaterialFilterRegionId) ===
+                          ITEM_MASTER_INDV_USER_REGION_ID &&
+                          !nonDsrMaterialFilterUserId)))
+                  }
                   onClick={() =>
                     loadNonDsrMaterialList(currentUser, {
                       regionId: nonDsrMaterialFilterRegionId,
                       ssrYearId: nonDsrMaterialFilterYearId,
                       categoryId: nonDsrMaterialFilterCategoryId,
                       subCategoryId: nonDsrMaterialFilterSubCategoryId,
+                      organizationId: nonDsrMaterialFilterOrganizationId,
+                      ownerUserId: nonDsrMaterialFilterUserId,
                     })
                   }
                 >
@@ -14349,8 +14662,15 @@ export default function HomePage() {
                   marginBottom: 8,
                 }}
               >
-                Select SSR Region to list materials. SSR Year, SSR Category,
-                and SSR Sub Category are optional.
+                {isSuperAdmin &&
+                Number(nonDsrMaterialFilterRegionId) ===
+                  ITEM_MASTER_ORG_ADMIN_REGION_ID
+                  ? "Select SSR Region and Organisation to list materials. SSR Year, SSR Category, and SSR Sub Category are optional."
+                  : isSuperAdmin &&
+                      Number(nonDsrMaterialFilterRegionId) ===
+                        ITEM_MASTER_INDV_USER_REGION_ID
+                    ? "Select SSR Region and User to list materials. SSR Year, SSR Category, and SSR Sub Category are optional."
+                    : "Select SSR Region to list materials. SSR Year, SSR Category, and SSR Sub Category are optional."}
               </div>
 
               <div style={{ maxWidth: 480, marginBottom: 12 }}>
@@ -14404,6 +14724,20 @@ export default function HomePage() {
                     ) : !nonDsrMaterialFilterRegionId ? (
                       <EmptyRow colSpan={8}>
                         Select SSR Region above, then click Refresh list.
+                      </EmptyRow>
+                    ) : isSuperAdmin &&
+                      Number(nonDsrMaterialFilterRegionId) ===
+                        ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                      !nonDsrMaterialFilterOrganizationId ? (
+                      <EmptyRow colSpan={8}>
+                        Select Organisation above, then click Refresh list.
+                      </EmptyRow>
+                    ) : isSuperAdmin &&
+                      Number(nonDsrMaterialFilterRegionId) ===
+                        ITEM_MASTER_INDV_USER_REGION_ID &&
+                      !nonDsrMaterialFilterUserId ? (
+                      <EmptyRow colSpan={8}>
+                        Select User above, then click Refresh list.
                       </EmptyRow>
                     ) : visibleNonDsrMaterials.length ? (
                       visibleNonDsrMaterials.map((row) => {
@@ -14509,6 +14843,7 @@ export default function HomePage() {
                     onChange={(e) => {
                       const regionId = e.target.value;
                       setPrintSsrRegionId(regionId);
+                      setPrintSsrOrganizationId("");
                       setPrintSsrYearId("");
                       setPrintSsrCategoryId("");
                       setPrintSsrSubCategoryId("");
@@ -14546,6 +14881,23 @@ export default function HomePage() {
                     ))}
                   </select>
                 </Field>
+
+                {Number(printSsrRegionId) === ITEM_MASTER_ORG_ADMIN_REGION_ID && (
+                  <Field label="Organisation" required span>
+                    <select
+                      value={printSsrOrganizationId}
+                      onChange={(e) => setPrintSsrOrganizationId(e.target.value)}
+                      style={inputStyle}
+                    >
+                      <option value="">Select Organisation</option>
+                      {sortOrganizationsByDOrder(organizations).map((org) => (
+                        <option key={org.OrganizationId} value={org.OrganizationId}>
+                          {org.OrgName || org.OrgCode || org.OrganizationId}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
 
                 <Field label="SSR Category">
                   <select
@@ -14593,7 +14945,12 @@ export default function HomePage() {
                   type="button"
                   onClick={handlePrintSsr}
                   disabled={
-                    printingSsr || !printSsrRegionId || !printSsrYearId
+                    printingSsr ||
+                    !printSsrRegionId ||
+                    !printSsrYearId ||
+                    (Number(printSsrRegionId) ===
+                      ITEM_MASTER_ORG_ADMIN_REGION_ID &&
+                      !printSsrOrganizationId)
                   }
                 >
                   {printingSsr ? "Printing…" : "Print SSR"}
@@ -14683,6 +15040,7 @@ export default function HomePage() {
                           {!userTrackUserId && <th>User Name</th>}
                           <th>Login Time</th>
                           <th>Logout Time</th>
+                          <th>Session Time</th>
                           <th>Latitude</th>
                           <th>Longitude</th>
                           <th>SessionStatus</th>
@@ -14692,7 +15050,7 @@ export default function HomePage() {
                       </thead>
                       <tbody>
                         {loadingUserTrack ? (
-                          <EmptyRow colSpan={userTrackUserId ? 8 : 9}>
+                          <EmptyRow colSpan={userTrackUserId ? 9 : 10}>
                             Loading session log…
                           </EmptyRow>
                         ) : userTrackRows.length ? (
@@ -14704,6 +15062,12 @@ export default function HomePage() {
                               )}
                               <td>{formatIndiaDateTime(row.LoginDateTime)}</td>
                               <td>{formatIndiaDateTime(row.LogoutDateTime)}</td>
+                              <td style={{ fontFamily: theme.font.mono, whiteSpace: "nowrap" }}>
+                                {formatSessionDuration(
+                                  row.LoginDateTime,
+                                  row.LogoutDateTime,
+                                )}
+                              </td>
                               <td>
                                 {row.Latitude === null ||
                                 row.Latitude === undefined
@@ -14722,7 +15086,7 @@ export default function HomePage() {
                             </tr>
                           ))
                         ) : (
-                          <EmptyRow colSpan={userTrackUserId ? 8 : 9}>
+                          <EmptyRow colSpan={userTrackUserId ? 9 : 10}>
                             No session log found for this selection.
                           </EmptyRow>
                         )}
